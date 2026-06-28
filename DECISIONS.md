@@ -47,3 +47,27 @@
 - **Context:** Target users are household users, not torrent enthusiasts. Exposing advanced torrent settings by default creates confusion and misconfiguration risk.
 - **Decision:** Default UX hides advanced torrent internals. An advanced mode may be added later as an opt-in toggle.
 - **Consequences:** Power users may need to enable advanced mode. Default screens show only essential controls and status.
+
+## ADR-007: libtorrent-rasterbar v2.0.10 via Git Submodule
+
+- **Date:** 2026-06-28
+- **Status:** Accepted
+- **Context:** Stage 1 requires embedding libtorrent-rasterbar in the Android app. The library needs to be version-pinned and reproducible.
+- **Decision:** Use libtorrent-rasterbar v2.0.10 (commit 74bc93a37) as a git submodule. Boost 1.86.0 headers downloaded separately from archives.boost.io.
+- **Consequences:** Build requires submodule initialization. Boost headers are not version-controlled but downloaded during build setup. License is Boost Software License 1.0 (BSD-style, permissive).
+
+## ADR-008: No Session Persistence in Stage 1
+
+- **Date:** 2026-06-28
+- **Status:** Accepted
+- **Context:** Stage 1 is a proof of concept. Implementing session persistence across process death requires foreground service, resume data serialization, and lifecycle management that would significantly increase complexity.
+- **Decision:** Session is not persisted across app restart in Stage 1. This is documented as a known limitation.
+- **Consequences:** Users lose active torrents on app kill. Stage 3 (Persistent Daemon) will address this.
+
+## ADR-009: Polling-Based Status Updates
+
+- **Date:** 2026-06-28
+- **Status:** Accepted
+- **Context:** libtorrent provides an alert mechanism for real-time updates, but integrating it with Android's main thread and Kotlin coroutines adds complexity. For Stage 1, polling is simpler and sufficient.
+- **Decision:** Use 1-second polling via ViewModel coroutine. Alerts are consumed only for error reporting.
+- **Consequences:** Slight latency in UI updates (up to 1s). Minimal CPU overhead. Can be replaced with alert-driven updates in future stages.

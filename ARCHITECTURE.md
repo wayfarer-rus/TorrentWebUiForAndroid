@@ -4,61 +4,93 @@
 
 ```
 ┌─────────────────────────────────────────────┐
-│  WebUI (browser, LAN)                        │
 │  Android UI (Compose, onboarding/controls)   │
 ├─────────────────────────────────────────────┤
 │  Shared Domain / Backend Model               │
-│  - Torrent state DTOs                        │
-│  - Storage destination model                 │
-│  - Settings model                            │
+│  - TorrentStatus DTO                         │
+│  - NativeDiagnostics DTO                     │
 ├─────────────────────────────────────────────┤
-│  Android Service Layer                       │
-│  - Foreground service (future)               │
-│  - SAF permission management                 │
-│  - Lifecycle and recovery                    │
+│  ViewModel (TorrentViewModel)                │
+│  - Session lifecycle management              │
+│  - 1-second polling of native state          │
 ├─────────────────────────────────────────────┤
-│  JNI Bridge (narrow, typed DTOs)             │
+│  JNI Bridge (TorrentSession object)          │
+│  - Narrow, typed DTOs                       │
+│  - No raw pointers, no JSON                 │
 ├─────────────────────────────────────────────┤
-│  Native Engine (libtorrent, C++)             │
-│  - Session lifecycle                         │
-│  - Torrent management                        │
-│  - Network I/O                               │
+│  Native Engine (libtorrent 2.0.10, C++)      │
+│  - Session lifecycle                        │
+│  - Torrent management                       │
+│  - Network I/O                              │
 └─────────────────────────────────────────────┘
 ```
 
-## Key Conventions
+## Module Layout
 
-### Kotlin / Compose
-- Kotlin + Jetpack Compose for all Android UI.
-- ViewModels for UI state; no business logic in composables.
-- Single-source settings model shared between Android UI and WebUI.
+```
+app/
+  build.gradle.kts          # Android app module config
+  CMakeLists.txt            # Native build (libtorrent + JNI)
+  src/main/
+    AndroidManifest.xml     # App manifest, INTERNET permission
+    jni/torrent_jni.cpp     # JNI bridge implementation
+    java/.../
+      MainActivity.kt       # Compose activity + UI
+      TorrentSession.kt     # Kotlin JNI interface
+      TorrentStatus.kt      # DTO models
+      TorrentViewModel.kt   # ViewModel with polling
+libtorrent/                 # Git submodule (v2.0.10)
+dep/                        # Boost 1.86.0 headers
+```
 
-### JNI Boundary
-- Kotlin never owns native objects directly.
-- Native layer manages session lifecycle (create, destroy, pause, resume).
-- JNI exchanges small, typed DTOs. No raw pointers, no giant JSON blobs.
-- All native errors surfaced as structured Kotlin exceptions, not crashes.
+## JNI Ownership Model
 
-### Native Engine
-- libtorrent-rasterbar is the target engine (pending license review).
-- Native build via Android NDK / CMake.
-- Target ABI: `arm64-v8a` first.
-- Native objects are reference-counted or owned exclusively by the C++ side.
+- **Native layer owns all libtorrent objects.** Kotlin never directly owns or destroys native handles.
+- `TorrentSession` Kotlin object is the sole JNI entry point.
+- Native session is created via `nativeInit()` and destroyed via `nativeDestroy()`.
+- Torrent handles are stored in a `std::unordered_map<uint64_t, lt::torrent_handle>` within each session entry.
+- All JNI entry points are wrapped in `try/catch` to prevent native exceptions from crossing the boundary.
+- JNI functions use `extern "C"` to avoid name mangling issues.
 
-### WebUI
-- LAN-only HTTP server embedded in the app.
-- Password authentication required by default.
-- Consumes the same domain model as Android UI.
-- No raw filesystem browsing; uses app-approved named destinations.
-- Future: WebSocket for live updates.
+## Native Build Approach
 
-### Storage
-- Proof-of-concept: app-private external storage.
-- Production: SAF (Storage Access Framework) with named, user-approved locations.
-- WebUI never sees raw Android paths or document URIs.
+- **CMake 3.22.1** + **NDK 29.0.14206865**
+- **libtorrent-rasterbar v2.0.10** (commit 74bc93a37) via git submodule
+- **Boost 1.86.0** headers downloaded from archives.boost.io
+- Target ABI: **arm64-v8a** only
+- Build flags:
+  - `lt_USE_OPENSSL=OFF`
+  - `lt_USE_LIBRESOLVE=OFF`
+  - `lt_USE_STREAMING=OFF`
+  - `lt_ENABLE_EXAMPLES=OFF`
+  - `lt_ENABLE_TESTS=OFF`
+  - `lt_ENABLE_PYTHON_BINDINGS=OFF`
+  - `lt_STRICT_ANDROID=ON`
+  - `-std=c++17`
 
-### Security
-- No cloud dependency; local-only operation.
-- No public Internet exposure by default.
-- No VPN provider coupling.
-- Credentials and sensitive data never logged.
+## Session Lifecycle
+
+1. `TorrentViewModel.init()` calls `TorrentSession.init(context)`
+2. `TorrentSession.init()` loads `libtorrent-jni.so`, creates native session, sets save path
+3. ViewModel starts 1-second polling coroutine
+4. On `onCleared()`, ViewModel stops polling and calls `TorrentSession.destroy()`
+5. Native `nativeDestroy()` removes session from global map
+
+## Data Flow: Native to Compose UI
+
+1. Native layer: `lt::torrent_status` queried via `handle.status()`
+2. JNI: `nativeGetTorrentStatus()` returns `jlongArray[6]` (id, progress*1000, downloadRate, uploadRate, peers, stateCode)
+3. JNI: `nativeGetTorrentName()` returns `jstring`
+4. Kotlin: `TorrentSession.getTorrentStatus()` assembles `TorrentStatus` DTO
+5. ViewModel: Polls every 1s, updates `MutableStateFlow<TorrentUiState>`
+6. Compose: `collectAsStateWithLifecycle()` drives UI updates
+
+## Known Limitations (Stage 1)
+
+- **No session persistence across process death.** Session is lost on app kill.
+- **No WebUI.** Android UI only.
+- **No SAF.** App-private storage only.
+- **No foreground service.** Torrents stop when app is backgrounded.
+- **Single session.** No multi-session support.
+- **No encryption/HTTPS tracker support.** OpenSSL disabled.
+- **Polling-based.** No alert-driven updates (alerts are consumed for error reporting only).
