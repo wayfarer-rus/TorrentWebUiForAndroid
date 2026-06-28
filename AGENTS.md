@@ -66,3 +66,15 @@ This file is the primary authority for how agents and contributors work in this 
 7. **Do not fabricate test results.**
 8. **Do not claim a device test** unless it actually ran on a physical device.
 9. **Before adding dependencies**, explain why they are needed and document their license.
+
+## Agent Workflow and Timeout Rules
+
+- **Assume a hard request timeout of 300 seconds.** Plan work accordingly.
+- **Work in small, resumable batches.** Split substantial work into numbered batches.
+- **Keep each batch independently reviewable** and ideally independently committable.
+- **Prefer focused patches** over broad rewrites.
+- **Avoid generating or printing large files in full.**
+- **Keep reports under ~1000 tokens** unless debugging requires more.
+- **Stop after a completed batch** if further work risks timeout.
+- **After each batch:** summarize changes, list files touched, run the smallest relevant validation, state the exact next batch.
+- **If more work remains,** stop after the completed batch and wait for the next instruction.
