@@ -1,4 +1,4 @@
-package com.example.torrentwebuiforandroid
+package com.andreiefimov.torrentwebui
 
 import android.content.Context
 
@@ -142,7 +142,7 @@ object TorrentSession {
                 downloadRate = raw[2],
                 uploadRate = raw[3],
                 peers = raw[4].toInt(),
-                savePath = "",
+                savePath = nativeGetSavePath(sessionId),
                 error = null
             )
         } catch (e: Exception) {
@@ -156,6 +156,14 @@ object TorrentSession {
             if (sessionId > 0) nativeGetLastError(sessionId) else null
         } catch (e: Exception) {
             e.message
+        }
+    }
+
+    fun popAlerts() {
+        try {
+            if (sessionId > 0) nativePopAlerts(sessionId)
+        } catch (e: Exception) {
+            _lastError = e.message
         }
     }
 
@@ -210,4 +218,6 @@ object TorrentSession {
     private external fun nativeGetLastError(sessionId: Long): String?
     private external fun nativeGetAllTorrentIds(sessionId: Long): LongArray
     private external fun nativeSetSavePath(sessionId: Long, path: String)
+    private external fun nativePopAlerts(sessionId: Long)
+    private external fun nativeGetSavePath(sessionId: Long): String
 }

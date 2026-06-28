@@ -4,7 +4,7 @@ plugins {
 }
 
 android {
-    namespace = "com.example.torrentwebuiforandroid"
+    namespace = "com.andreiefimov.torrentwebui"
     compileSdk {
         version = release(36) {
             minorApiLevel = 1
@@ -12,7 +12,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.example.torrentwebuiforandroid"
+        applicationId = "com.andreiefimov.torrentwebui"
         minSdk = 33
         targetSdk = 36
         versionCode = 1

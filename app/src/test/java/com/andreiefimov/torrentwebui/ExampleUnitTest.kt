@@ -1,4 +1,4 @@
-package com.example.torrentwebuiforandroid
+package com.andreiefimov.torrentwebui
 
 import org.junit.Test
 

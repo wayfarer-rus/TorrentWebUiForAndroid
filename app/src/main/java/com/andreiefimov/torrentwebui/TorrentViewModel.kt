@@ -1,4 +1,4 @@
-package com.example.torrentwebuiforandroid
+package com.andreiefimov.torrentwebui
 
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
@@ -46,6 +46,7 @@ class TorrentViewModel(application: Application) : AndroidViewModel(application)
     }
 
     private fun refreshTorrents() {
+        TorrentSession.popAlerts()
         val ids = TorrentSession.getAllTorrentIds()
         val statuses = ids.mapNotNull { id ->
             TorrentSession.getTorrentStatus(id)

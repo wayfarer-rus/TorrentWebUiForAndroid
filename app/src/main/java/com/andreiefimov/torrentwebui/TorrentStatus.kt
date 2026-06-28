@@ -1,4 +1,4 @@
-package com.example.torrentwebuiforandroid
+package com.andreiefimov.torrentwebui
 
 /**
  * DTO returned from the native libtorrent layer via JNI.

@@ -39,21 +39,6 @@ static uint64_t g_next_session_id = 1;
 
 // ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
-static std::string state_to_string(lt::torrent_status::state_t state) {
-    switch (state) {
-        case lt::torrent_status::queued_for_checking: return "queued_for_checking";
-        case lt::torrent_status::checking_files:      return "checking_files";
-        case lt::torrent_status::downloading_metadata:return "downloading_metadata";
-        case lt::torrent_status::downloading:         return "downloading";
-        case lt::torrent_status::finished:            return "finished";
-        case lt::torrent_status::seeding:             return "seeding";
-        case lt::torrent_status::allocating:          return "allocating";
-        case lt::torrent_status::checking_resume_data:return "checking_resume_data";
-        default:                                      return "unknown";
-    }
-}
-
 static std::string pop_last_error(lt::session& s) {
     try {
         std::vector<lt::alert*> alerts;
@@ -74,7 +59,7 @@ static std::string pop_last_error(lt::session& s) {
 // JNI: Session management
 // ---------------------------------------------------------------------------
 extern "C" JNIEXPORT jlong JNICALL
-Java_com_example_torrentwebuiforandroid_TorrentSession_nativeInit(
+Java_com_andreiefimov_torrentwebui_TorrentSession_nativeInit(
         JNIEnv* env, jobject, jstring jSavePath) {
     try {
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -84,8 +69,7 @@ Java_com_example_torrentwebuiforandroid_TorrentSession_nativeInit(
 
         lt::session_params params;
         params.settings.set_int(lt::settings_pack::alert_mask,
-            static_cast<int>(lt::alert::error_notification | lt::alert::storage_notification
-                             | lt::alert::status_notification));
+            static_cast<int>(lt::alert::error_notification | lt::alert::storage_notification));
         params.settings.set_int(lt::settings_pack::alert_queue_size, 256);
         params.settings.set_int(lt::settings_pack::connections_limit, 160);
         params.settings.set_bool(lt::settings_pack::enable_upnp, false);
@@ -96,7 +80,7 @@ Java_com_example_torrentwebuiforandroid_TorrentSession_nativeInit(
         g_sessions[id].session = std::make_unique<lt::session>(std::move(params));
         g_sessions[id].save_path = savePath;
 
-        LOGI("Session %lu created, save_path=%s", id, savePath.c_str());
+        LOGI("Session %llu created, save_path=%s", id, savePath.c_str());
         return static_cast<jlong>(id);
     } catch (std::exception const& e) {
         LOGE("nativeInit failed: %s", e.what());
@@ -105,13 +89,13 @@ Java_com_example_torrentwebuiforandroid_TorrentSession_nativeInit(
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_example_torrentwebuiforandroid_TorrentSession_nativeDestroy(
+Java_com_andreiefimov_torrentwebui_TorrentSession_nativeDestroy(
         JNIEnv*, jobject, jlong jId) {
     try {
         std::lock_guard<std::mutex> lock(g_mutex);
         uint64_t id = static_cast<uint64_t>(jId);
         g_sessions.erase(id);
-        LOGI("Session %lu destroyed", id);
+        LOGI("Session %llu destroyed", id);
     } catch (std::exception const& e) {
         LOGE("nativeDestroy failed: %s", e.what());
     }
@@ -121,7 +105,7 @@ Java_com_example_torrentwebuiforandroid_TorrentSession_nativeDestroy(
 // JNI: Version
 // ---------------------------------------------------------------------------
 extern "C" JNIEXPORT jstring JNICALL
-Java_com_example_torrentwebuiforandroid_TorrentSession_nativeVersion(JNIEnv* env, jobject) {
+Java_com_andreiefimov_torrentwebui_TorrentSession_nativeVersion(JNIEnv* env, jobject) {
     return env->NewStringUTF(lt::version());
 }
 
@@ -129,7 +113,7 @@ Java_com_example_torrentwebuiforandroid_TorrentSession_nativeVersion(JNIEnv* env
 // JNI: Set session save path
 // ---------------------------------------------------------------------------
 extern "C" JNIEXPORT void JNICALL
-Java_com_example_torrentwebuiforandroid_TorrentSession_nativeSetSavePath(
+Java_com_andreiefimov_torrentwebui_TorrentSession_nativeSetSavePath(
         JNIEnv* env, jobject, jlong jId, jstring jPath) {
     try {
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -149,7 +133,7 @@ Java_com_example_torrentwebuiforandroid_TorrentSession_nativeSetSavePath(
 // JNI: Add magnet
 // ---------------------------------------------------------------------------
 extern "C" JNIEXPORT jlong JNICALL
-Java_com_example_torrentwebuiforandroid_TorrentSession_nativeAddMagnet(
+Java_com_andreiefimov_torrentwebui_TorrentSession_nativeAddMagnet(
         JNIEnv* env, jobject, jlong jId, jstring jMagnet) {
     try {
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -161,15 +145,14 @@ Java_com_example_torrentwebuiforandroid_TorrentSession_nativeAddMagnet(
         std::string magnet(cmag);
         env->ReleaseStringUTFChars(jMagnet, cmag);
 
-        lt::add_torrent_params p;
-        p.url = magnet;
+        lt::add_torrent_params p = lt::parse_magnet_uri(magnet);
         p.save_path = sit->second.save_path;
 
         lt::torrent_handle h = sit->second.session->add_torrent(p);
         uint64_t torrentId = sit->second.next_torrent_id++;
         sit->second.torrents[torrentId] = h;
 
-        LOGI("Added magnet, torrent_id=%lu, save_path=%s", torrentId, sit->second.save_path.c_str());
+        LOGI("Added magnet, torrent_id=%llu, save_path=%s", torrentId, sit->second.save_path.c_str());
         return static_cast<jlong>(torrentId);
     } catch (std::exception const& e) {
         LOGE("nativeAddMagnet failed: %s", e.what());
@@ -181,7 +164,7 @@ Java_com_example_torrentwebuiforandroid_TorrentSession_nativeAddMagnet(
 // JNI: Pause / Resume / Remove
 // ---------------------------------------------------------------------------
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_example_torrentwebuiforandroid_TorrentSession_nativePauseTorrent(
+Java_com_andreiefimov_torrentwebui_TorrentSession_nativePauseTorrent(
         JNIEnv*, jobject, jlong jId, jlong jTorrentId) {
     try {
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -202,7 +185,7 @@ Java_com_example_torrentwebuiforandroid_TorrentSession_nativePauseTorrent(
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_example_torrentwebuiforandroid_TorrentSession_nativeResumeTorrent(
+Java_com_andreiefimov_torrentwebui_TorrentSession_nativeResumeTorrent(
         JNIEnv*, jobject, jlong jId, jlong jTorrentId) {
     try {
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -223,7 +206,7 @@ Java_com_example_torrentwebuiforandroid_TorrentSession_nativeResumeTorrent(
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_example_torrentwebuiforandroid_TorrentSession_nativeRemoveTorrent(
+Java_com_andreiefimov_torrentwebui_TorrentSession_nativeRemoveTorrent(
         JNIEnv*, jobject, jlong jId, jlong jTorrentId, jboolean jDeleteFiles) {
     try {
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -251,7 +234,7 @@ Java_com_example_torrentwebuiforandroid_TorrentSession_nativeRemoveTorrent(
 // Returns jlongArray: [id, progress*1000, downloadRate, uploadRate, peers, stateCode]
 // ---------------------------------------------------------------------------
 extern "C" JNIEXPORT jlongArray JNICALL
-Java_com_example_torrentwebuiforandroid_TorrentSession_nativeGetTorrentStatus(
+Java_com_andreiefimov_torrentwebui_TorrentSession_nativeGetTorrentStatus(
         JNIEnv* env, jobject, jlong jId, jlong jTorrentId) {
     try {
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -284,7 +267,7 @@ Java_com_example_torrentwebuiforandroid_TorrentSession_nativeGetTorrentStatus(
 }
 
 extern "C" JNIEXPORT jstring JNICALL
-Java_com_example_torrentwebuiforandroid_TorrentSession_nativeGetTorrentName(
+Java_com_andreiefimov_torrentwebui_TorrentSession_nativeGetTorrentName(
         JNIEnv* env, jobject, jlong jId, jlong jTorrentId) {
     try {
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -305,7 +288,7 @@ Java_com_example_torrentwebuiforandroid_TorrentSession_nativeGetTorrentName(
 }
 
 extern "C" JNIEXPORT jstring JNICALL
-Java_com_example_torrentwebuiforandroid_TorrentSession_nativeGetLastError(
+Java_com_andreiefimov_torrentwebui_TorrentSession_nativeGetLastError(
         JNIEnv* env, jobject, jlong jId) {
     try {
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -323,7 +306,7 @@ Java_com_example_torrentwebuiforandroid_TorrentSession_nativeGetLastError(
 // JNI: Get all torrent IDs
 // ---------------------------------------------------------------------------
 extern "C" JNIEXPORT jlongArray JNICALL
-Java_com_example_torrentwebuiforandroid_TorrentSession_nativeGetAllTorrentIds(
+Java_com_andreiefimov_torrentwebui_TorrentSession_nativeGetAllTorrentIds(
         JNIEnv* env, jobject, jlong jId) {
     try {
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -345,5 +328,42 @@ Java_com_example_torrentwebuiforandroid_TorrentSession_nativeGetAllTorrentIds(
     } catch (std::exception const& e) {
         LOGE("nativeGetAllTorrentIds failed: %s", e.what());
         return env->NewLongArray(0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// JNI: Pop all pending alerts (called during polling to prevent queue buildup)
+// ---------------------------------------------------------------------------
+extern "C" JNIEXPORT void JNICALL
+Java_com_andreiefimov_torrentwebui_TorrentSession_nativePopAlerts(
+        JNIEnv*, jobject, jlong jId) {
+    try {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        uint64_t id = static_cast<uint64_t>(jId);
+        auto sit = g_sessions.find(id);
+        if (sit == g_sessions.end()) return;
+        std::vector<lt::alert*> alerts;
+        sit->second.session->pop_alerts(&alerts);
+        // Alerts are consumed here to prevent queue saturation.
+        // Error alerts are still accessible via nativeGetLastError().
+    } catch (std::exception const& e) {
+        LOGE("nativePopAlerts failed: %s", e.what());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// JNI: Get session save path
+// ---------------------------------------------------------------------------
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_andreiefimov_torrentwebui_TorrentSession_nativeGetSavePath(
+        JNIEnv* env, jobject, jlong jId) {
+    try {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        uint64_t id = static_cast<uint64_t>(jId);
+        auto sit = g_sessions.find(id);
+        if (sit == g_sessions.end()) return env->NewStringUTF("");
+        return env->NewStringUTF(sit->second.save_path.c_str());
+    } catch (std::exception const& e) {
+        return env->NewStringUTF(e.what());
     }
 }

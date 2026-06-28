@@ -1,4 +1,4 @@
-package com.example.torrentwebuiforandroid
+package com.andreiefimov.torrentwebui
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -189,6 +189,9 @@ fun TorrentCard(
             DiagnosticRow("Down", formatBytes(status.downloadRate) + "/s")
             DiagnosticRow("Up", formatBytes(status.uploadRate) + "/s")
             DiagnosticRow("Peers", status.peers.toString())
+            if (status.savePath.isNotBlank()) {
+                DiagnosticRow("Save", status.savePath)
+            }
 
             Spacer(modifier = Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

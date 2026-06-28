@@ -1,0 +1,5 @@
+# Boost 1.86.0 SHA-256 checksum
+# Source: https://archives.boost.io/release/1.86.0/source/boost_1_86_0.tar.gz
+# License: Boost Software License 1.0 (BSD-style)
+# Verified: 2026-06-28
+2575e74ffc3ef1cd0babac2c1ee8bdb5782a0ee672b1912da40e5b4b591ca01f  boost_1_86_0.tar.gz
