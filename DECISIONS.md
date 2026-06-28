@@ -1,0 +1,49 @@
+# Architecture Decision Records
+
+## ADR-001: Browser-First Product Model
+
+- **Date:** 2026-06-28
+- **Status:** Accepted
+- **Context:** The product needs to serve a household user who will interact with it from multiple devices on the LAN. A native Android-only UI would limit accessibility and increase development complexity.
+- **Decision:** The primary product interface is a LAN-accessible WebUI. The Android app serves as a bootstrap shell for permissions, onboarding, and service management.
+- **Consequences:** WebUI receives primary UX investment. Android UI is intentionally minimal. Both consume the same backend model.
+
+## ADR-002: Android App as Permission/Bootstrap Shell
+
+- **Date:** 2026-06-28
+- **Status:** Accepted
+- **Context:** Android requires native components for SAF permissions, foreground services, and lifecycle management. A pure-web approach cannot acquire these permissions.
+- **Decision:** The Android app handles permissions acquisition, service lifecycle, and onboarding. The WebUI handles day-to-day interaction.
+- **Consequences:** Two UI surfaces must stay synchronized via a shared domain model. Settings duplication is avoided.
+
+## ADR-003: Future Torrent Engine Behind JNI
+
+- **Date:** 2026-06-28
+- **Status:** Accepted
+- **Context:** libtorrent-rasterbar is a C++ library. Direct embedding in Kotlin is not possible. JNI is the bridge.
+- **Decision:** The native torrent engine runs behind a narrow JNI boundary. Kotlin never owns native objects directly. JNI exchanges small typed DTOs.
+- **Consequences:** Clear ownership semantics. Native crashes are isolated. Kotlin side remains stable and testable.
+
+## ADR-004: SAF Logical Destination Model
+
+- **Date:** 2026-06-28
+- **Status:** Accepted
+- **Context:** Android's scoped storage model prevents arbitrary filesystem access. The WebUI runs in a browser and cannot invoke Android pickers directly.
+- **Decision:** Android app acquires SAF permissions for specific folders. WebUI presents these as named, human-readable destinations. No raw paths or document URIs exposed.
+- **Consequences:** WebUI storage selection is limited to app-approved locations. Permission revocation requires Android app re-authorization.
+
+## ADR-005: No VPN-Provider Coupling
+
+- **Date:** 2026-06-28
+- **Status:** Accepted
+- **Context:** Users may deploy the app behind various VPN providers with different split-tunneling configurations. The app cannot reliably inspect or control another VPN app's behavior.
+- **Decision:** VPN split tunneling is treated as external deployment configuration. The app provides no VPN provider integration, inspection, or control.
+- **Consequences:** Deployment documentation must cover split tunneling. The app cannot guarantee VPN routing correctness internally.
+
+## ADR-006: Consumer-First Defaults Over Expert Settings
+
+- **Date:** 2026-06-28
+- **Status:** Accepted
+- **Context:** Target users are household users, not torrent enthusiasts. Exposing advanced torrent settings by default creates confusion and misconfiguration risk.
+- **Decision:** Default UX hides advanced torrent internals. An advanced mode may be added later as an opt-in toggle.
+- **Consequences:** Power users may need to enable advanced mode. Default screens show only essential controls and status.
