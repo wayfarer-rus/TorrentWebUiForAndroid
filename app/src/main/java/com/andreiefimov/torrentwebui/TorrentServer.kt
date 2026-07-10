@@ -91,6 +91,11 @@ object TorrentServer {
         }
 
         application.routing {
+            // Health check endpoint for diagnostics. Must come before the catch-all route.
+            get("/health") {
+                call.respond(HealthResponse("ok"))
+            }
+
             // Serve the WebUI entry point.
             get("/") {
                 val html = readAsset("www/index.html") ?: return@get call.respondText(
@@ -100,6 +105,7 @@ object TorrentServer {
             }
 
             // Serve all static assets from the WebUI root (SvelteKit's /_app/, etc.).
+            // Must come AFTER explicit routes above — catch-all matches everything.
             get("/{path...}") {
                 val path = call.parameters["path"] ?: return@get call.respondText(
                     "Not found", ContentType.Text.Plain, io.ktor.http.HttpStatusCode.NotFound
@@ -110,11 +116,6 @@ object TorrentServer {
                     )
                 val contentType = detectContentType("www/$path")
                 call.respondText(content, contentType)
-            }
-
-            // Health check endpoint for diagnostics.
-            get("/health") {
-                call.respond(HealthResponse("ok"))
             }
 
             // ---- REST API: torrent management ----
