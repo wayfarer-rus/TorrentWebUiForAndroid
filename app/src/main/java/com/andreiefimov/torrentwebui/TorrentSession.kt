@@ -171,6 +171,7 @@ object TorrentSession {
     // Diagnostics
     // -------------------------------------------------------------------
 
+
     fun getDiagnostics(): NativeDiagnostics {
         return NativeDiagnostics(
             abi = android.os.Build.SUPPORTED_ABIS.getOrNull(0) ?: "unknown",
@@ -187,17 +188,17 @@ object TorrentSession {
 
     private fun stateCodeToString(code: Int): String {
         return when (code) {
-            0 -> "checking_files"
-            1 -> "downloading_metadata"
-            2 -> "metadata_received"
+            0 -> "queued_for_checking"
+            1 -> "checking_files"
+            2 -> "downloading_metadata"
             3 -> "downloading"
-            4 -> "paused"
+            4 -> "finished"
             5 -> "seeding"
             6 -> "allocating"
             7 -> "checking_resume_data"
-            8 -> "moving_storage"
+            8 -> "move_storage"
             9 -> "pause_requested"
-            10 -> "queued_for_check"
+            10 -> "paused"
             else -> "unknown($code)"
         }
     }

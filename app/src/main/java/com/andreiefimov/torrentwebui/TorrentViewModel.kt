@@ -1,5 +1,6 @@
 package com.andreiefimov.torrentwebui
 
+import android.util.Log
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -15,6 +16,13 @@ import kotlinx.coroutines.flow.asStateFlow
  */
 class TorrentViewModel(application: Application) : AndroidViewModel(application) {
 
+    // Hardcoded test magnet for Stage 1 acceptance testing.
+    // Ubuntu 24.04 LTS Desktop ISO (legal, public domain).
+    private val TEST_MAGNET = "magnet:?xt=urn:btih:2e62854a660074367b8104bd09472b04b44d870e&dn=ubuntu-24.04.1-desktop-amd64.iso&tr=udp://tracker.opentrackr.org:1337/announce&tr=udp://open.stealth.si:80/announce&tr=udp://tracker.torrent.eu.org:451/announce&tr=udp://tracker.openbittorrent.com:6969/announce&tr=udp://exodus.desync.com:6969/announce&tr=udp://open.demonii.com:1337/announce"
+
+    fun addTestMagnet() {
+        addMagnet(TEST_MAGNET)
+    }
     private val _uiState = MutableStateFlow(TorrentUiState())
     val uiState: StateFlow<TorrentUiState> = _uiState.asStateFlow()
 
@@ -51,6 +59,9 @@ class TorrentViewModel(application: Application) : AndroidViewModel(application)
         val statuses = ids.mapNotNull { id ->
             TorrentSession.getTorrentStatus(id)
         }
+        if (statuses.isNotEmpty()) {
+            Log.d("TorrentViewModel", "Poll: ${statuses.size} torrents, first=${statuses[0].state} progress=${(statuses[0].progress * 100).toInt()}%")
+        }
         _uiState.value = _uiState.value.copy(
             torrents = statuses,
             diagnostics = TorrentSession.getDiagnostics()
@@ -58,11 +69,14 @@ class TorrentViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun addMagnet(uri: String) {
+        Log.d("TorrentViewModel", "Adding magnet: ${uri.take(60)}...")
         viewModelScope.launch {
             val id = TorrentSession.addMagnet(uri)
             if (id > 0) {
+                Log.d("TorrentViewModel", "Magnet added, id=$id")
                 _uiState.value = _uiState.value.copy(addMagnetError = null)
             } else {
+                Log.e("TorrentViewModel", "Failed to add magnet: ${TorrentSession.lastError}")
                 _uiState.value = _uiState.value.copy(
                     addMagnetError = TorrentSession.lastError
                 )

@@ -90,6 +90,13 @@ fun TorrentScreen(viewModel: TorrentViewModel) {
                 ) {
                     Text("Add")
                 }
+                Spacer(modifier = Modifier.width(8.dp))
+                FilledTonalButton(
+                    onClick = { viewModel.addTestMagnet() },
+                    enabled = state.sessionStarted
+                ) {
+                    Text("Test")
+                }
             }
 
             if (state.addMagnetError != null) {

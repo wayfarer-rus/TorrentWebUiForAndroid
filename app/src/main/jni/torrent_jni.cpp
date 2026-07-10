@@ -69,7 +69,10 @@ Java_com_andreiefimov_torrentwebui_TorrentSession_nativeInit(
 
         lt::session_params params;
         params.settings.set_int(lt::settings_pack::alert_mask,
-            static_cast<int>(lt::alert::error_notification | lt::alert::storage_notification));
+            static_cast<int>(lt::alert::error_notification | lt::alert::storage_notification
+                             | lt::alert::status_notification | lt::alert::tracker_notification
+                             | lt::alert::connect_notification | lt::alert::peer_notification
+                             | lt::alert::performance_warning));
         params.settings.set_int(lt::settings_pack::alert_queue_size, 256);
         params.settings.set_int(lt::settings_pack::connections_limit, 160);
         params.settings.set_bool(lt::settings_pack::enable_upnp, false);
@@ -176,6 +179,7 @@ Java_com_andreiefimov_torrentwebui_TorrentSession_nativePauseTorrent(
         auto tit = sit->second.torrents.find(tid);
         if (tit == sit->second.torrents.end()) return JNI_FALSE;
 
+        LOGI("Pausing torrent %llu", tid);
         tit->second.pause();
         return JNI_TRUE;
     } catch (std::exception const& e) {
@@ -197,6 +201,7 @@ Java_com_andreiefimov_torrentwebui_TorrentSession_nativeResumeTorrent(
         auto tit = sit->second.torrents.find(tid);
         if (tit == sit->second.torrents.end()) return JNI_FALSE;
 
+        LOGI("Resuming torrent %llu", tid);
         tit->second.resume();
         return JNI_TRUE;
     } catch (std::exception const& e) {
@@ -218,6 +223,7 @@ Java_com_andreiefimov_torrentwebui_TorrentSession_nativeRemoveTorrent(
         auto tit = sit->second.torrents.find(tid);
         if (tit == sit->second.torrents.end()) return JNI_FALSE;
 
+        LOGI("Removing torrent %llu, delete_files=%d", tid, (int)jDeleteFiles);
         int flags = jDeleteFiles ? lt::session::delete_files : 0;
         sit->second.session->remove_torrent(
             tit->second, static_cast<lt::remove_flags_t>(flags));
@@ -247,6 +253,7 @@ Java_com_andreiefimov_torrentwebui_TorrentSession_nativeGetTorrentStatus(
         if (tit == sit->second.torrents.end()) return nullptr;
 
         lt::torrent_status st = tit->second.status(lt::torrent_handle::query_name);
+        LOGI("Torrent %llu state=%d name=%s", tid, (int)st.state, st.name.c_str());
 
         jlong values[6] = {
             static_cast<jlong>(tid),
@@ -280,6 +287,7 @@ Java_com_andreiefimov_torrentwebui_TorrentSession_nativeGetTorrentName(
         if (tit == sit->second.torrents.end()) return env->NewStringUTF("");
 
         lt::torrent_status st = tit->second.status(lt::torrent_handle::query_name);
+        LOGI("Torrent %llu state=%d name=%s", tid, (int)st.state, st.name.c_str());
         return env->NewStringUTF(st.name.c_str());
     } catch (std::exception const& e) {
         LOGE("nativeGetTorrentName failed: %s", e.what());
@@ -344,26 +352,11 @@ Java_com_andreiefimov_torrentwebui_TorrentSession_nativePopAlerts(
         if (sit == g_sessions.end()) return;
         std::vector<lt::alert*> alerts;
         sit->second.session->pop_alerts(&alerts);
-        // Alerts are consumed here to prevent queue saturation.
-        // Error alerts are still accessible via nativeGetLastError().
+        // Log alerts for debugging
+        for (auto* alert : alerts) {
+            LOGI("Alert: %s", alert->message().c_str());
+        }
     } catch (std::exception const& e) {
         LOGE("nativePopAlerts failed: %s", e.what());
-    }
-}
-
-// ---------------------------------------------------------------------------
-// JNI: Get session save path
-// ---------------------------------------------------------------------------
-extern "C" JNIEXPORT jstring JNICALL
-Java_com_andreiefimov_torrentwebui_TorrentSession_nativeGetSavePath(
-        JNIEnv* env, jobject, jlong jId) {
-    try {
-        std::lock_guard<std::mutex> lock(g_mutex);
-        uint64_t id = static_cast<uint64_t>(jId);
-        auto sit = g_sessions.find(id);
-        if (sit == g_sessions.end()) return env->NewStringUTF("");
-        return env->NewStringUTF(sit->second.save_path.c_str());
-    } catch (std::exception const& e) {
-        return env->NewStringUTF(e.what());
     }
 }
