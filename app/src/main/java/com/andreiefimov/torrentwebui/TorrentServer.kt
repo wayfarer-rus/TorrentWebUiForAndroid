@@ -18,6 +18,19 @@ import io.ktor.server.routing.post
 import io.ktor.server.routing.put
 import io.ktor.server.routing.route
 import io.ktor.server.routing.routing
+import io.ktor.server.websocket.WebSockets
+import io.ktor.server.websocket.webSocket
+import io.ktor.websocket.Frame
+import io.ktor.websocket.readText
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlin.coroutines.cancellation.CancellationException
+import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
@@ -71,6 +84,11 @@ object TorrentServer {
     internal fun configureApplication(application: Application) {
         // JSON content negotiation — handles serialization/deserialization for all routes.
         application.install(ContentNegotiation) { json(this@TorrentServer.json) }
+
+        // WebSocket plugin — required for /ws/progress.
+        application.install(WebSockets) {
+            // Ktor 3.x uses default ping/pong settings; no explicit configuration needed.
+        }
 
         application.routing {
             // Serve the WebUI entry point.
@@ -193,12 +211,91 @@ object TorrentServer {
                     }
                 }
             }
+
+            // ---- WebSocket: live torrent progress + alerts ----
+            webSocket("/ws/progress") {
+                Log.i(TAG, "WebSocket client connected")
+
+                val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+                try {
+                    // Send an initial snapshot immediately.
+                    send(Frame.Text(buildSnapshotJson()))
+                    scope.launch {
+                        try {
+                            while (true) {
+                                delay(1000L)
+                                send(Frame.Text(buildSnapshotJson()))
+                            }
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            Log.w(TAG, "WebSocket snapshot error", e)
+                        }
+                    }
+
+                    // Handle incoming messages (keep alive until client disconnects).
+                    for (frame in incoming) {
+                        if (frame is Frame.Text) {
+                            val text = frame.readText()
+                            if (text == "ping") {
+                                send(Frame.Text("pong"))
+                            }
+                        }
+                    }
+                } finally {
+                    scope.cancel()
+                    Log.i(TAG, "WebSocket client disconnected")
+                }
+            }
         }
+    }
+
+    /** Builds a JSON snapshot of all torrents and pending alerts. */
+    private fun buildSnapshotJson(): String {
+        val ids = TorrentSession.getAllTorrentIds()
+        val torrents = ids.mapNotNull { id ->
+            TorrentSession.getTorrentStatus(id)?.let { s ->
+                TorrentListItem(
+                    id = s.id, name = s.name, state = s.state, progress = s.progress,
+                    downloadRate = s.downloadRate, uploadRate = s.uploadRate,
+                    peers = s.peers, savePath = s.savePath
+                )
+            }
+        }
+
+        // Build the message envelope: {"type":"torrents","data":[...]}
+        val torrentsJson = buildString {
+            append("[")
+            torrents.forEachIndexed { index, item ->
+                if (index > 0) append(",")
+                append("{\"id\":${item.id},\"name\":\"${escapeJson(item.name)}\",\"state\":\"${escapeJson(item.state)}\",\"progress\":${item.progress},\"downloadRate\":${item.downloadRate},\"uploadRate\":${item.uploadRate},\"peers\":${item.peers},\"savePath\":\"${escapeJson(item.savePath)}\"}")
+            }
+            append("]")
+        }
+        val envelope = """{"type":"torrents","data":$torrentsJson}"""
+
+        // Append any pending alerts as separate messages.
+        val alertJson = TorrentSession.popAlerts()
+        if (alertJson != "[]") {
+            return envelope + alertJson
+        }
+
+        return envelope
+    }
+
+    /** Escapes special characters in a string for JSON encoding. */
+    private fun escapeJson(s: String): String {
+        return s.replace("\\", "\\\\")
+            .replace("\"", "\\\"")
+            .replace("\n", "\\n")
+            .replace("\r", "\\r")
+            .replace("\t", "\\t")
     }
 
     /**
      * Reads a file from Android assets. Returns null if the file doesn't exist.
      */
+
     private fun readAsset(path: String): String? {
         return try {
             appContext.assets.open(path).bufferedReader().readText()
