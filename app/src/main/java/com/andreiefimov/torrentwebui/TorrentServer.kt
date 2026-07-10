@@ -113,15 +113,26 @@ object TorrentServer {
             // Serve all static assets from the WebUI root (SvelteKit's /_app/, etc.).
             // Must come AFTER explicit routes above — catch-all matches everything.
             get("/{path...}") {
-                val path = call.parameters["path"] ?: return@get call.respondText(
-                    "Not found", ContentType.Text.Plain, io.ktor.http.HttpStatusCode.NotFound
-                )
-                val content = readAsset("www/$path")
+                val uri = call.request.local.uri
+                Log.i(TAG, "=== WILDCARD ROUTE MATCHED === URI: $uri")
+                // Extract full path from URI (skip leading /)
+                val fullPath = uri.removePrefix("/")
+                Log.i(TAG, "Static request URI: $uri, extracted path: '$fullPath'")
+                val assetPath = "www/$fullPath"
+                Log.i(TAG, "Attempting to read asset: $assetPath")
+                val content = readAsset(assetPath)
                     ?: return@get call.respondText(
-                        "Not found", ContentType.Text.Plain, io.ktor.http.HttpStatusCode.NotFound
+                        "Not found (tried: $assetPath)", ContentType.Text.Plain, io.ktor.http.HttpStatusCode.NotFound
                     )
-                val contentType = detectContentType("www/$path")
+                val contentType = detectContentType(assetPath)
                 call.respondText(content, contentType)
+            }
+
+            // Fallback: log all unmatched requests for debugging
+            get("/*") {
+                val uri = call.request.local.uri
+                Log.i(TAG, "=== FALLBACK ROUTE MATCHED === URI: $uri")
+                call.respondText("Fallback: $uri", ContentType.Text.Plain)
             }
 
             // ---- REST API: torrent management ----
