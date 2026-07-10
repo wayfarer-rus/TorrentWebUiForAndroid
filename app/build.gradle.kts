@@ -42,6 +42,17 @@ android {
         compose = true
     }
 
+    // Fix duplicate META-INF files from Netty/Ktor dependencies.
+    packaging {
+        resources {
+            excludes += listOf(
+                "META-INF/INDEX.LIST",
+                "META-INF/INDEX.TXT",
+                "META-INF/io.netty.versions.properties"
+            )
+        }
+    }
+
     // NDK + CMake: arm64-v8a only
     externalNativeBuild {
         cmake {
@@ -68,6 +79,13 @@ dependencies {
     // ViewModel + Lifecycle
     implementation(libs.androidx.lifecycle.viewmodel.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
+
+    // Ktor Server
+    implementation(libs.ktor.server.core)
+    implementation(libs.ktor.server.netty)
+    implementation(libs.ktor.server.content.negotiation)
+    implementation(libs.ktor.serialization.json)
+    implementation(libs.ktor.server.websockets)
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
