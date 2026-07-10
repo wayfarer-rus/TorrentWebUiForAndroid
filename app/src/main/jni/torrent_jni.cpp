@@ -312,6 +312,23 @@ Java_com_andreiefimov_torrentwebui_TorrentSession_nativeGetLastError(
 }
 
 // ---------------------------------------------------------------------------
+// JNI: Get the save path for a session
+// ---------------------------------------------------------------------------
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_andreiefimov_torrentwebui_TorrentSession_nativeGetSavePath(
+        JNIEnv* env, jobject, jlong jId) {
+    try {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        uint64_t id = static_cast<uint64_t>(jId);
+        auto sit = g_sessions.find(id);
+        if (sit == g_sessions.end()) return env->NewStringUTF("");
+        return env->NewStringUTF(sit->second.save_path.c_str());
+    } catch (std::exception const& e) {
+        return env->NewStringUTF(e.what());
+    }
+}
+
+// ---------------------------------------------------------------------------
 // JNI: Get all torrent IDs
 // ---------------------------------------------------------------------------
 extern "C" JNIEXPORT jlongArray JNICALL
