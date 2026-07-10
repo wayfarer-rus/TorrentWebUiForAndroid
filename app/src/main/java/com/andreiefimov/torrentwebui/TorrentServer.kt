@@ -37,7 +37,9 @@ object TorrentServer {
         appContext = context.applicationContext
         Log.i(TAG, "Starting Ktor server on http://0.0.0.0:$PORT")
 
-        val eng = embeddedServer(Netty, PORT, "0.0.0.0", listOf(), ::configureApplication)
+        // Use a lambda instead of ::configureApplication — Ktor's module function
+        // discovery uses reflection and fails on Android (dex transformation).
+        val eng = embeddedServer(Netty, PORT, "0.0.0.0", listOf()) { configureApplication(this) }
         eng.start(wait = false)
         server = eng
 
@@ -47,8 +49,9 @@ object TorrentServer {
     /**
      * Configures Ktor routing: static file serving from Android assets,
      * plus placeholder routes for future REST API endpoints.
+     * Must be non-private — Ktor uses reflection to invoke this from EmbeddedServer.
      */
-    private fun configureApplication(application: Application) {
+    internal fun configureApplication(application: Application) {
         application.routing {
             // Serve the WebUI entry point.
             get("/") {
