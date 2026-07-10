@@ -93,7 +93,13 @@ object TorrentServer {
         application.routing {
             // Health check endpoint for diagnostics. Must come before the catch-all route.
             get("/health") {
-                call.respond(HealthResponse("ok"))
+                Log.i(TAG, "Health check requested")
+                try {
+                    call.respond(HealthResponse("ok"))
+                    Log.i(TAG, "Health check responded successfully")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Health check failed", e)
+                }
             }
 
             // Serve the WebUI entry point.
