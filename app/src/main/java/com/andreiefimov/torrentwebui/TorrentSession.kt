@@ -1,6 +1,9 @@
 package com.andreiefimov.torrentwebui
 
 import android.content.Context
+import android.util.Log
+import com.andreiefimov.torrentwebui.events.EventBus
+import com.andreiefimov.torrentwebui.events.SessionEvent
 
 /**
  * Kotlin-facing JNI bridge to libtorrent.
@@ -10,6 +13,7 @@ import android.content.Context
  */
 object TorrentSession {
 
+    private const val TAG = "TorrentSession"
     private var sessionId: Long = 0
     private var _nativeLoaded: Boolean = false
     private var _sessionStarted: Boolean = false
@@ -39,13 +43,18 @@ object TorrentSession {
             if (sessionId > 0) {
                 nativeSetSavePath(sessionId, saveDir.absolutePath)
                 _sessionStarted = true
+
+                // Notify subscribers that the session is ready.
+                EventBus.post(SessionEvent.Started)
                 true
             } else {
                 _lastError = "Session creation returned id=0"
+                EventBus.post(SessionEvent.Error(_lastError ?: ""))
                 false
             }
         } catch (e: Exception) {
             _lastError = e.message ?: e.toString()
+            EventBus.post(SessionEvent.Error(_lastError ?: ""))
             false
         }
     }
@@ -60,6 +69,8 @@ object TorrentSession {
         } finally {
             sessionId = 0
             _sessionStarted = false
+            // Notify subscribers that the session is shut down.
+            EventBus.post(SessionEvent.Stopped)
         }
     }
 
@@ -159,13 +170,54 @@ object TorrentSession {
         }
     }
 
-    fun popAlerts() {
-        try {
-            if (sessionId > 0) nativePopAlerts(sessionId)
+    /**
+     * Pops all pending alerts from the native session and returns them as a JSON array string.
+     * Each alert is an object with: type, message, category, info_hash (hex).
+     * Returns "[]" if no alerts or on error.
+     */
+    fun popAlerts(): String {
+        return try {
+            if (sessionId <= 0) return "[]"
+            val json = nativeGetAllAlerts(sessionId) ?: "[]"
+            if (json.isBlank()) "[]" else json
         } catch (e: Exception) {
-            _lastError = e.message
+            Log.w(TAG, "popAlerts failed", e)
+            "[]"
         }
     }
+
+    /** Returns a map of torrent ID → info_hash (hex) for all active torrents. */
+    fun getAllTorrentHashes(): Map<Long, String> {
+        return try {
+            if (sessionId <= 0) return emptyMap()
+            val hashes = nativeGetAllTorrentHashes(sessionId) ?: return emptyMap()
+            val ids = getAllTorrentIds()
+            ids.zip(hashes.toList()).filter { it.second.isNotEmpty() }
+                .associate { it.first to it.second }
+        } catch (e: Exception) {
+            Log.w(TAG, "getAllTorrentHashes failed", e)
+            emptyMap()
+        }
+    }
+
+    /** Looks up a torrent ID by its info_hash (hex-encoded). Returns -1 if not found. */
+    fun getTorrentIdByHash(hashHex: String): Long {
+        return try {
+            if (sessionId <= 0) return -1L
+            nativeGetTorrentIdByHash(sessionId, hashHex)
+        } catch (e: Exception) {
+            Log.w(TAG, "getTorrentIdByHash failed for $hashHex", e)
+            -1L
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // Alerts (JNI) — returns JSON string of alerts
+    // -------------------------------------------------------------------
+
+    private external fun nativeGetAllAlerts(sessionId: Long): String?
+    private external fun nativeGetAllTorrentHashes(sessionId: Long): Array<String>?
+    private external fun nativeGetTorrentIdByHash(sessionId: Long, hashHex: String): Long
 
     // -------------------------------------------------------------------
     // Diagnostics
@@ -219,6 +271,6 @@ object TorrentSession {
     private external fun nativeGetLastError(sessionId: Long): String?
     private external fun nativeGetAllTorrentIds(sessionId: Long): LongArray
     private external fun nativeSetSavePath(sessionId: Long, path: String)
-    private external fun nativePopAlerts(sessionId: Long)
+
     private external fun nativeGetSavePath(sessionId: Long): String
 }

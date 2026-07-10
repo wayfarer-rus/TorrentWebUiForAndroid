@@ -1,18 +1,27 @@
 package com.andreiefimov.torrentwebui
 
-import android.util.Log
 import android.app.Application
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.andreiefimov.torrentwebui.events.AlertDispatcher
+import com.andreiefimov.torrentwebui.events.EventBus
+import com.andreiefimov.torrentwebui.events.SessionEvent
+import com.andreiefimov.torrentwebui.events.TorrentEvent
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 
 /**
  * ViewModel that owns the libtorrent session lifecycle and polls for status.
  * Preserved across configuration changes (screen rotation).
+ *
+ * Alert processing is delegated to [AlertDispatcher], which polls native alerts
+ * and dispatches typed events via [EventBus]. The ViewModel observes those events
+ * to stay in sync with the UI state.
  */
 class TorrentViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -23,16 +32,19 @@ class TorrentViewModel(application: Application) : AndroidViewModel(application)
     fun addTestMagnet() {
         addMagnet(TEST_MAGNET)
     }
+
     private val _uiState = MutableStateFlow(TorrentUiState())
     val uiState: StateFlow<TorrentUiState> = _uiState.asStateFlow()
 
-    private var pollingJob: kotlinx.coroutines.Job? = null
+    private var pollingJob: Job? = null
+    private var eventSubscription: Job? = null
 
     init {
         startSession()
     }
 
     private fun startSession() {
+        AlertDispatcher.start()
         val ok = TorrentSession.init(getApplication())
         _uiState.value = _uiState.value.copy(
             diagnostics = TorrentSession.getDiagnostics(),
@@ -40,6 +52,7 @@ class TorrentViewModel(application: Application) : AndroidViewModel(application)
         )
         if (ok) {
             startPolling()
+            subscribeToEvents()
         }
     }
 
@@ -54,7 +67,7 @@ class TorrentViewModel(application: Application) : AndroidViewModel(application)
     }
 
     private fun refreshTorrents() {
-        TorrentSession.popAlerts()
+        // Alert processing is now handled by AlertDispatcher + EventBus.
         val ids = TorrentSession.getAllTorrentIds()
         val statuses = ids.mapNotNull { id ->
             TorrentSession.getTorrentStatus(id)
@@ -66,6 +79,47 @@ class TorrentViewModel(application: Application) : AndroidViewModel(application)
             torrents = statuses,
             diagnostics = TorrentSession.getDiagnostics()
         )
+    }
+
+    private fun subscribeToEvents() {
+        eventSubscription?.cancel()
+        eventSubscription = viewModelScope.launch {
+            EventBus.observe().collect { event ->
+                when (event) {
+                    is SessionEvent.Started -> {
+                        _uiState.value = _uiState.value.copy(
+                            sessionStarted = true,
+                            diagnostics = TorrentSession.getDiagnostics()
+                        )
+                    }
+                    is SessionEvent.Error -> {
+                        _uiState.value = _uiState.value.copy(
+                            sessionStarted = false,
+                            diagnostics = TorrentSession.getDiagnostics()
+                        )
+                    }
+                    is SessionEvent.Warning -> {
+                        Log.w("TorrentViewModel", "Session warning: ${event.message}")
+                    }
+                    is TorrentEvent.StateChanged -> {
+                        // Force a refresh to pick up the new state.
+                        refreshTorrents()
+                    }
+                    is TorrentEvent.Added -> {
+                        // Force a refresh to show the newly added torrent.
+                        refreshTorrents()
+                    }
+                    is TorrentEvent.Removed -> {
+                        // Force a refresh to remove the torrent from the list.
+                        refreshTorrents()
+                    }
+                    is TorrentEvent.Error -> {
+                        Log.e("TorrentViewModel", "Torrent error #$${event.torrentId}: ${event.message}")
+                        refreshTorrents()
+                    }
+                }
+            }
+        }
     }
 
     fun addMagnet(uri: String) {
@@ -99,6 +153,8 @@ class TorrentViewModel(application: Application) : AndroidViewModel(application)
     override fun onCleared() {
         super.onCleared()
         pollingJob?.cancel()
+        eventSubscription?.cancel()
+        AlertDispatcher.stop()
         TorrentSession.destroy()
     }
 }

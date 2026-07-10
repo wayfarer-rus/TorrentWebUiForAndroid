@@ -4,6 +4,7 @@
 #include <vector>
 #include <mutex>
 #include <cstring>
+#include <algorithm>
 
 #include <libtorrent/session.hpp>
 #include <libtorrent/torrent_handle.hpp>
@@ -340,23 +341,172 @@ Java_com_andreiefimov_torrentwebui_TorrentSession_nativeGetAllTorrentIds(
 }
 
 // ---------------------------------------------------------------------------
-// JNI: Pop all pending alerts (called during polling to prevent queue buildup)
+// JNI: Get all pending alerts as a JSON string
+// Format: [{"type":"...","message":"...","category":"...","info_hash":"..."}, ...]
 // ---------------------------------------------------------------------------
-extern "C" JNIEXPORT void JNICALL
-Java_com_andreiefimov_torrentwebui_TorrentSession_nativePopAlerts(
-        JNIEnv*, jobject, jlong jId) {
+
+static std::string escape_json_string(const std::string& s) {
+    std::string out;
+    out.reserve(s.size() + 8);
+    for (char c : s) {
+        switch (c) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\b': out += "\\b";  break;
+            case '\f': out += "\\f";  break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t";  break;
+            default:   out += c;      break;
+        }
+    }
+    return out;
+}
+
+static std::string alert_to_json(lt::alert* alert) {
+    std::string json;
+    json += "{";
+    json += "\"type\":\"";
+    json += escape_json_string(alert->what());
+    json += "\",";
+
+    json += "\"message\":\"";
+    json += escape_json_string(alert->message());
+    json += "\",";
+
+    // Category: extract alert type name (e.g. "state_changed" from "state_changed_alert")
+    std::string cat = alert->what();
+    if (cat.size() > 6 && cat.substr(cat.size() - 6) == "_alert") {
+        cat = cat.substr(0, cat.size() - 6);
+    }
+    json += "\"category\":\"";
+    json += escape_json_string(cat);
+    json += "\",";
+
+    // Info hash (if the alert is associated with a torrent)
+    json += "\"info_hash\":\"\"";
+    json += "}";
+    return json;
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_andreiefimov_torrentwebui_TorrentSession_nativeGetAllAlerts(
+        JNIEnv* env, jobject, jlong jId) {
     try {
         std::lock_guard<std::mutex> lock(g_mutex);
         uint64_t id = static_cast<uint64_t>(jId);
         auto sit = g_sessions.find(id);
-        if (sit == g_sessions.end()) return;
+        if (sit == g_sessions.end()) {
+            return env->NewStringUTF("[]");
+        }
+
         std::vector<lt::alert*> alerts;
         sit->second.session->pop_alerts(&alerts);
-        // Log alerts for debugging
-        for (auto* alert : alerts) {
-            LOGI("Alert: %s", alert->message().c_str());
+
+        if (alerts.empty()) {
+            return env->NewStringUTF("[]");
         }
+
+        // Build JSON array string.
+        std::string json = "[";
+        for (size_t i = 0; i < alerts.size(); ++i) {
+            if (i > 0) json += ",";
+            json += alert_to_json(alerts[i]);
+        }
+        json += "]";
+
+        return env->NewStringUTF(json.c_str());
     } catch (std::exception const& e) {
-        LOGE("nativePopAlerts failed: %s", e.what());
+        LOGE("nativeGetAllAlerts failed: %s", e.what());
+        return env->NewStringUTF("[]");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// JNI: Get all torrent info_hash values as a string array (hex-encoded)
+// ---------------------------------------------------------------------------
+extern "C" JNIEXPORT jobjectArray JNICALL
+Java_com_andreiefimov_torrentwebui_TorrentSession_nativeGetAllTorrentHashes(
+        JNIEnv* env, jobject, jlong jId) {
+    try {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        uint64_t id = static_cast<uint64_t>(jId);
+        auto sit = g_sessions.find(id);
+        if (sit == g_sessions.end()) {
+            return env->NewObjectArray(0, env->FindClass("java/lang/String"), nullptr);
+        }
+
+        auto const& torrents = sit->second.torrents;
+        jobjectArray arr = env->NewObjectArray(
+            static_cast<jsize>(torrents.size()),
+            env->FindClass("java/lang/String"),
+            nullptr);
+
+        jstring emptyStr = env->NewStringUTF("");
+        int i = 0;
+        for (auto const& [tid, handle] : torrents) {
+            try {
+                if (!handle.is_valid()) {
+                    env->SetObjectArrayElement(arr, i, emptyStr);
+                } else {
+                    // Use info_hash() which returns the v1 SHA-1 hash directly.
+                    lt::sha1_hash hash = handle.info_hashes().v1;
+                    if (hash.is_all_zeros()) {
+                        env->SetObjectArrayElement(arr, i, emptyStr);
+                    } else {
+                        env->SetObjectArrayElement(arr, i,
+                            env->NewStringUTF(hash.to_string().c_str()));
+                    }
+                }
+            } catch (...) {
+                // Torrent metadata not yet loaded or handle invalid.
+                env->SetObjectArrayElement(arr, i, emptyStr);
+            }
+            i++;
+        }
+        env->DeleteLocalRef(emptyStr);
+        return arr;
+    } catch (std::exception const& e) {
+        LOGE("nativeGetAllTorrentHashes failed: %s", e.what());
+        return env->NewObjectArray(0, env->FindClass("java/lang/String"), nullptr);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// JNI: Look up torrent ID by info_hash (hex-encoded string)
+// Returns -1 if not found.
+// ---------------------------------------------------------------------------
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_andreiefimov_torrentwebui_TorrentSession_nativeGetTorrentIdByHash(
+        JNIEnv* env, jobject, jlong jId, jstring jHashHex) {
+    try {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        uint64_t sid = static_cast<uint64_t>(jId);
+        auto sit = g_sessions.find(sid);
+        if (sit == g_sessions.end()) return -1L;
+
+        const char* hashStr = env->GetStringUTFChars(jHashHex, nullptr);
+        std::string target(hashStr);
+        env->ReleaseStringUTFChars(jHashHex, hashStr);
+
+        // Normalize: lowercase, 40-char hex.
+        std::transform(target.begin(), target.end(), target.begin(), ::tolower);
+
+        for (auto const& [tid, handle] : sit->second.torrents) {
+            try {
+                if (!handle.is_valid()) continue;
+                lt::sha1_hash hash = handle.info_hashes().v1;
+                if (hash.is_all_zeros()) continue;
+                std::string h = hash.to_string();
+                std::transform(h.begin(), h.end(), h.begin(), ::tolower);
+                if (h == target) return static_cast<jlong>(tid);
+            } catch (...) {
+                // Skip torrents whose metadata isn't available yet.
+            }
+        }
+        return -1L;
+    } catch (std::exception const& e) {
+        LOGE("nativeGetTorrentIdByHash failed: %s", e.what());
+        return -1L;
     }
 }
