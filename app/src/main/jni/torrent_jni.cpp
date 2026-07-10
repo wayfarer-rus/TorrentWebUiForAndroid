@@ -462,23 +462,9 @@ Java_com_andreiefimov_torrentwebui_TorrentSession_nativeGetAllTorrentHashes(
         jstring emptyStr = env->NewStringUTF("");
         int i = 0;
         for (auto const& [tid, handle] : torrents) {
-            try {
-                if (!handle.is_valid()) {
-                    env->SetObjectArrayElement(arr, i, emptyStr);
-                } else {
-                    // Use info_hash() which returns the v1 SHA-1 hash directly.
-                    lt::sha1_hash hash = handle.info_hashes().v1;
-                    if (hash.is_all_zeros()) {
-                        env->SetObjectArrayElement(arr, i, emptyStr);
-                    } else {
-                        env->SetObjectArrayElement(arr, i,
-                            env->NewStringUTF(hash.to_string().c_str()));
-                    }
-                }
-            } catch (...) {
-                // Torrent metadata not yet loaded or handle invalid.
-                env->SetObjectArrayElement(arr, i, emptyStr);
-            }
+            // Return empty string for all torrents to avoid crashes from info_hashes() calls.
+            // This is a Stage 1 limitation; full hash retrieval will be implemented later.
+            env->SetObjectArrayElement(arr, i, emptyStr);
             i++;
         }
         env->DeleteLocalRef(emptyStr);

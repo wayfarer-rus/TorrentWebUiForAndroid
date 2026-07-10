@@ -179,21 +179,26 @@ object TorrentServer {
                 }
 
                 // PUT /api/torrents/{id}/pause — pause a torrent.
-                put("/{id:\\d+}/pause") {
+                put("/{id}/pause") {
                     val id = call.parameters["id"]?.toLongOrNull() ?: run {
+                        Log.i(TAG, "Pause request for invalid ID: ${call.parameters["id"]}")
                         call.respond(io.ktor.http.HttpStatusCode.BadRequest, ErrorResponse("Invalid torrent ID"))
                         return@put
                     }
+                    Log.i(TAG, "Pause request for torrent $id")
                     if (TorrentSession.pauseTorrent(id)) {
+                        Log.i(TAG, "Pause successful for torrent $id")
                         call.respond(ControlResponse("ok"))
                     } else {
+                        Log.i(TAG, "Pause failed for torrent $id")
                         call.respond(io.ktor.http.HttpStatusCode.NotFound, ErrorResponse("Torrent $id not found"))
                     }
                 }
 
                 // PUT /api/torrents/{id}/resume — resume a paused torrent.
-                put("/{id:\\d+}/resume") {
+                put("/{id}/resume") {
                     val id = call.parameters["id"]?.toLongOrNull() ?: run {
+                        Log.i(TAG, "Resume request for invalid ID: ${call.parameters["id"]}")
                         call.respond(io.ktor.http.HttpStatusCode.BadRequest, ErrorResponse("Invalid torrent ID"))
                         return@put
                     }
@@ -205,7 +210,7 @@ object TorrentServer {
                 }
 
                 // DELETE /api/torrents/{id}?deleteFiles=true|false — remove a torrent.
-                delete("/{id:\\d+}") {
+                delete("/{id}") {
                     val id = call.parameters["id"]?.toLongOrNull() ?: run {
                         call.respond(io.ktor.http.HttpStatusCode.BadRequest, ErrorResponse("Invalid torrent ID"))
                         return@delete
