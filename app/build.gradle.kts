@@ -63,6 +63,10 @@ android {
     ndkVersion = "29.0.14206865"
 }
 
+// Pre-build: rename _app → app-build before Gradle's asset merge filters underscore dirs.
+// This is handled by the npm copy-assets script (web/package.json), which runs before Gradle.
+// The assets directory should already contain app-build/ (not _app/) at build time.
+
 dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)

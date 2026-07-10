@@ -99,8 +99,8 @@ object TorrentServer {
                 call.respondText(html, ContentType.Text.Html)
             }
 
-            // Serve individual asset files from assets/www/.
-            get("/assets/{path...}") {
+            // Serve all static assets from the WebUI root (SvelteKit's /_app/, etc.).
+            get("/{path...}") {
                 val path = call.parameters["path"] ?: return@get call.respondText(
                     "Not found", ContentType.Text.Plain, io.ktor.http.HttpStatusCode.NotFound
                 )

@@ -7,7 +7,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
-    "copy-assets": "npm run build && cp -r build/* ../app/src/main/assets/www/"
+    "copy-assets": "npm run build && mv build/_app build/app-build && cp -r build/* ../app/src/main/assets/www/"
   },
   "devDependencies": {
     "@sveltejs/adapter-static": "^3.0.8",
