@@ -5,11 +5,13 @@ import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.andreiefimov.torrentwebui.events.AlertDispatcher
+import com.andreiefimov.torrentwebui.events.AlertEvent
 import com.andreiefimov.torrentwebui.events.EventBus
 import com.andreiefimov.torrentwebui.events.SessionEvent
 import com.andreiefimov.torrentwebui.events.TorrentEvent
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -84,42 +86,74 @@ class TorrentViewModel(application: Application) : AndroidViewModel(application)
     private fun subscribeToEvents() {
         eventSubscription?.cancel()
         eventSubscription = viewModelScope.launch {
-            EventBus.observe().collect { event ->
-                when (event) {
-                    is SessionEvent.Started -> {
-                        _uiState.value = _uiState.value.copy(
-                            sessionStarted = true,
-                            diagnostics = TorrentSession.getDiagnostics()
-                        )
-                    }
-                    is SessionEvent.Error -> {
-                        _uiState.value = _uiState.value.copy(
-                            sessionStarted = false,
-                            diagnostics = TorrentSession.getDiagnostics()
-                        )
-                    }
-                    is SessionEvent.Warning -> {
-                        Log.w("TorrentViewModel", "Session warning: ${event.message}")
-                    }
-                    is TorrentEvent.StateChanged -> {
-                        // Force a refresh to pick up the new state.
-                        refreshTorrents()
-                    }
-                    is TorrentEvent.Added -> {
-                        // Force a refresh to show the newly added torrent.
-                        refreshTorrents()
-                    }
-                    is TorrentEvent.Removed -> {
-                        // Force a refresh to remove the torrent from the list.
-                        refreshTorrents()
-                    }
-                    is TorrentEvent.Error -> {
-                        Log.e("TorrentViewModel", "Torrent error #$${event.torrentId}: ${event.message}")
-                        refreshTorrents()
+            val sessionJob = launch {
+                EventBus.observeSessionEvents().collect { event ->
+                    when (event) {
+                        is SessionEvent.Started -> {
+                            _uiState.value = _uiState.value.copy(
+                                sessionStarted = true,
+                                diagnostics = TorrentSession.getDiagnostics()
+                            )
+                        }
+                        is SessionEvent.Error -> {
+                            _uiState.value = _uiState.value.copy(
+                                sessionStarted = false,
+                                diagnostics = TorrentSession.getDiagnostics()
+                            )
+                        }
+                        is SessionEvent.Warning -> {
+                            Log.w("TorrentViewModel", "Session warning: ${event.message}")
+                        }
+                        is SessionEvent.Stopped -> {
+                            _uiState.value = _uiState.value.copy(
+                                sessionStarted = false,
+                                diagnostics = TorrentSession.getDiagnostics()
+                            )
+                        }
                     }
                 }
             }
+            val torrentJob = launch {
+                EventBus.observeTorrentEvents().collect { event ->
+                    when (event) {
+                        is TorrentEvent.StateChanged -> {
+                            // Force a refresh to pick up the new state.
+                            refreshTorrents()
+                        }
+                        is TorrentEvent.Added -> {
+                            // Force a refresh to show the newly added torrent.
+                            refreshTorrents()
+                        }
+                        is TorrentEvent.Removed -> {
+                            // Force a refresh to remove the torrent from the list.
+                            refreshTorrents()
+                        }
+                        is TorrentEvent.Error -> {
+                            Log.e("TorrentViewModel", "Torrent error #$${event.torrentId}: ${event.message}")
+                            refreshTorrents()
+                        }
+                    }
+                }
+            }
+            val alertJob = launch {
+                EventBus.observeAlerts().collect { event ->
+                    // Keep the last 50 alerts in memory for UI display.
+                    val current = _uiState.value.recentAlerts.toMutableList()
+                    current.add(event)
+                    if (current.size > MAX_ALERTS) {
+                        current.removeAt(0)
+                    }
+                    _uiState.value = _uiState.value.copy(recentAlerts = current)
+                }
+            }
+            // Keep all subscriptions alive until this scope is cancelled.
+            joinAll(sessionJob, torrentJob, alertJob)
         }
+    }
+
+    companion object {
+        /** Maximum number of recent alerts kept in memory. */
+        private const val MAX_ALERTS = 50
     }
 
     fun addMagnet(uri: String) {
@@ -172,5 +206,6 @@ data class TorrentUiState(
         lastError = null
     ),
     val sessionStarted: Boolean = false,
-    val addMagnetError: String? = null
+    val addMagnetError: String? = null,
+    val recentAlerts: List<AlertEvent> = emptyList()
 )

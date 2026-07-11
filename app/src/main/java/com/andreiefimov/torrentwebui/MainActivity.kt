@@ -16,6 +16,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.andreiefimov.torrentwebui.events.AlertEvent
 
 class MainActivity : ComponentActivity() {
     private val viewModel: TorrentViewModel by viewModels()
@@ -115,6 +116,12 @@ fun TorrentScreen(viewModel: TorrentViewModel) {
             }
 
             Spacer(modifier = Modifier.height(16.dp))
+
+            // Recent alerts (from native libtorrent)
+            if (state.recentAlerts.isNotEmpty()) {
+                RecentAlertsList(state.recentAlerts)
+                Spacer(modifier = Modifier.height(16.dp))
+            }
 
             // Torrent list
             if (state.torrents.isEmpty()) {
@@ -246,4 +253,27 @@ fun Alert(type: AlertType, message: String) {
             style = MaterialTheme.typography.bodyMedium
         )
     }
+}
+
+/** Renders a list of recent [AlertEvent]s. */
+@Composable
+fun RecentAlertsList(alerts: List<AlertEvent>) {
+    LazyColumn(
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        items(alerts) { alert ->
+            Alert(
+                type = alertSeverity(alert.type),
+                message = "${alert.type}: ${alert.message}"
+            )
+        }
+    }
+}
+
+/** Maps a libtorrent alert type to a severity level. */
+private fun alertSeverity(type: String): AlertType = when (type) {
+    "error_alert", "tracker_error_alert" -> AlertType.Error
+    "listen_failed_alert", "tracker_warning_alert" -> AlertType.Warning
+    else -> AlertType.Info
 }

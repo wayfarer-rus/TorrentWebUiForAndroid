@@ -2,8 +2,10 @@ package com.andreiefimov.torrentwebui
 
 import android.content.Context
 import android.util.Log
+import com.andreiefimov.torrentwebui.events.AlertEvent
 import com.andreiefimov.torrentwebui.events.EventBus
 import com.andreiefimov.torrentwebui.events.SessionEvent
+import com.andreiefimov.torrentwebui.events.TorrentEvent
 
 /**
  * Kotlin-facing JNI bridge to libtorrent.
@@ -24,6 +26,38 @@ object TorrentSession {
     val sessionStarted get() = _sessionStarted
     val lastError get() = _lastError
     val version get() = _version
+
+    // -------------------------------------------------------------------
+    // Alerts — callback interface implementation (for future JNI registration)
+    // -------------------------------------------------------------------
+
+    /**
+     * Default [AlertReceiver] implementation that posts every alert to [EventBus].
+     *
+     * Currently alerts are polled via [popAlerts] rather than pushed through JNI callbacks,
+     * but this implementation is available for when the native layer adds callback registration.
+     */
+    class AlertReceiverImpl : com.andreiefimov.torrentwebui.events.AlertReceiver {
+        override fun onAlert(alertType: String, message: String) {
+            EventBus.post(AlertEvent(type = alertType, message = message))
+        }
+
+        override fun onError(torrentId: Long, message: String) {
+            EventBus.post(TorrentEvent.Error(torrentId = torrentId, message = message))
+        }
+
+        override fun onTorrentAdded(torrentId: Long) {
+            EventBus.post(TorrentEvent.Added(torrentId = torrentId))
+        }
+
+        override fun onTorrentRemoved(torrentId: Long) {
+            EventBus.post(TorrentEvent.Removed(torrentId = torrentId))
+        }
+
+        override fun onStateChanged(torrentId: Long, newState: String) {
+            EventBus.post(TorrentEvent.StateChanged(torrentId = torrentId, newState = newState))
+        }
+    }
 
     // -------------------------------------------------------------------
     // Lifecycle

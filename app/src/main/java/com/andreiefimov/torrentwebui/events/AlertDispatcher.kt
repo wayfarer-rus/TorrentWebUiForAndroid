@@ -67,29 +67,29 @@ object AlertDispatcher {
             when (alert.type) {
                 "error_alert" -> {
                     if (torrentId > 0) {
-                        EventBus.post(TorrentEvent.Error(torrentId, alert.message))
+                        EventBus.postTorrentEvent(TorrentEvent.Error(torrentId, alert.message))
                     } else {
-                        EventBus.post(SessionEvent.Error(alert.message))
+                        EventBus.postSessionEvent(SessionEvent.Error(alert.message))
                     }
                 }
                 "state_changed_alert" -> {
                     if (torrentId > 0) {
-                        EventBus.post(TorrentEvent.StateChanged(torrentId, alert.category ?: "unknown"))
+                        EventBus.postTorrentEvent(TorrentEvent.StateChanged(torrentId, alert.category ?: "unknown"))
                     }
                 }
                 "torrent_added_alert" -> {
                     if (torrentId > 0) {
-                        EventBus.post(TorrentEvent.Added(torrentId))
+                        EventBus.postTorrentEvent(TorrentEvent.Added(torrentId))
                     }
                 }
                 "torrent_removed_alert" -> {
                     if (torrentId > 0) {
-                        EventBus.post(TorrentEvent.Removed(torrentId))
+                        EventBus.postTorrentEvent(TorrentEvent.Removed(torrentId))
                     }
                 }
                 "tracker_warning_alert",
                 "listen_failed_alert" -> {
-                    EventBus.post(SessionEvent.Warning(alert.message))
+                    EventBus.postSessionEvent(SessionEvent.Warning(alert.message))
                 }
                 else -> {
                     // Unknown alert type — log for debugging but don't post.
