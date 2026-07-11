@@ -52,50 +52,65 @@ object AlertDispatcher {
     }
 
     private fun processAlerts() {
-        val json = TorrentSession.popAlerts()
-        if (json == "[]" || json.isBlank()) return
+        try {
+            val json = TorrentSession.popAlerts()
+            if (json == "[]" || json.isBlank()) return
 
-        val alerts = parseAlerts(json)
-        if (alerts.isEmpty()) return
+            val alerts = parseAlerts(json)
+            if (alerts.isEmpty()) return
 
-        Log.d(TAG, "Processing ${alerts.size} alert(s)")
-        val hashMap = TorrentSession.getAllTorrentHashes()
+            Log.d(TAG, "Processing ${alerts.size} alert(s)")
 
-        for (alert in alerts) {
-            val torrentId = resolveTorrentId(alert.hash, hashMap)
+            // Get hash map separately to avoid holding resources during processing
+            val hashMap = try {
+                TorrentSession.getAllTorrentHashes()
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to get torrent hashes", e)
+                emptyMap()
+            }
 
-            when (alert.type) {
-                "error_alert" -> {
-                    if (torrentId > 0) {
-                        EventBus.postTorrentEvent(TorrentEvent.Error(torrentId, alert.message))
-                    } else {
-                        EventBus.postSessionEvent(SessionEvent.Error(alert.message))
+            for (alert in alerts) {
+                try {
+                    val torrentId = resolveTorrentId(alert.hash, hashMap)
+
+                    when (alert.type) {
+                        "error_alert" -> {
+                            if (torrentId > 0) {
+                                EventBus.postTorrentEvent(TorrentEvent.Error(torrentId, alert.message))
+                            } else {
+                                EventBus.postSessionEvent(SessionEvent.Error(alert.message))
+                            }
+                        }
+                        "state_changed_alert" -> {
+                            if (torrentId > 0) {
+                                EventBus.postTorrentEvent(TorrentEvent.StateChanged(torrentId, alert.category ?: "unknown"))
+                            }
+                        }
+                        "torrent_added_alert" -> {
+                            if (torrentId > 0) {
+                                EventBus.postTorrentEvent(TorrentEvent.Added(torrentId))
+                            }
+                        }
+                        "torrent_removed_alert" -> {
+                            if (torrentId > 0) {
+                                EventBus.postTorrentEvent(TorrentEvent.Removed(torrentId))
+                            }
+                        }
+                        "tracker_warning_alert",
+                        "listen_failed_alert" -> {
+                            EventBus.postSessionEvent(SessionEvent.Warning(alert.message))
+                        }
+                        else -> {
+                            // Unknown alert type — log for debugging but don't post.
+                            Log.d(TAG, "Unhandled alert type: ${alert.type}")
+                        }
                     }
-                }
-                "state_changed_alert" -> {
-                    if (torrentId > 0) {
-                        EventBus.postTorrentEvent(TorrentEvent.StateChanged(torrentId, alert.category ?: "unknown"))
-                    }
-                }
-                "torrent_added_alert" -> {
-                    if (torrentId > 0) {
-                        EventBus.postTorrentEvent(TorrentEvent.Added(torrentId))
-                    }
-                }
-                "torrent_removed_alert" -> {
-                    if (torrentId > 0) {
-                        EventBus.postTorrentEvent(TorrentEvent.Removed(torrentId))
-                    }
-                }
-                "tracker_warning_alert",
-                "listen_failed_alert" -> {
-                    EventBus.postSessionEvent(SessionEvent.Warning(alert.message))
-                }
-                else -> {
-                    // Unknown alert type — log for debugging but don't post.
-                    Log.d(TAG, "Unhandled alert type: ${alert.type}")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error processing alert ${alert.type}", e)
                 }
             }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in processAlerts", e)
         }
     }
 
@@ -103,7 +118,12 @@ object AlertDispatcher {
         if (hash.isBlank()) return -1L
         // Normalize: ensure hex format for lookup.
         val normalizedHash = if (hash.length == 40) hash else hash.take(40)
-        return hashMap.entries.find { it.value.equals(normalizedHash, ignoreCase = true) }?.key ?: -1L
+        // Fast path: look up by hash from the map returned by getAllTorrentHashes().
+        val directResult = hashMap.entries.find { it.value.equals(normalizedHash, ignoreCase = true) }?.key
+        if (directResult != null) return directResult
+        // Fallback: look up by hash directly via the torrent handle (Stage 2 fix).
+        // This is needed because nativeGetAllTorrentHashes() returns empty strings in Stage 1.
+        return TorrentSession.getTorrentIdByHash(normalizedHash)
     }
 
     private data class Alert(
