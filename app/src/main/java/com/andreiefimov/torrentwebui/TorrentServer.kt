@@ -110,7 +110,7 @@ object TorrentServer {
                 call.respondText(html, ContentType.Text.Html)
             }
 
-            // Serve all static assets from the WebUI root (SvelteKit's /_app/, etc.).
+            // Serve all static assets from the WebUI root (SvelteKit's /app-build/, etc.).
             // Must come AFTER explicit routes above — catch-all matches everything.
             get("/{path...}") {
                 val uri = call.request.local.uri
@@ -118,7 +118,12 @@ object TorrentServer {
                 // Extract full path from URI (skip leading /)
                 val fullPath = uri.removePrefix("/")
                 Log.i(TAG, "Static request URI: $uri, extracted path: '$fullPath'")
-                val assetPath = "www/$fullPath"
+                // Assets are stored under "www/" in the assets directory. The index.html route
+                // works with "www/index.html", and SvelteKit's build output is under "app-build/".
+                val assetPath = when {
+                    fullPath == "index.html" -> "www/index.html"
+                    else -> "www/$fullPath"
+                }
                 Log.i(TAG, "Attempting to read asset: $assetPath")
                 val content = readAsset(assetPath)
                     ?: return@get call.respondText(
