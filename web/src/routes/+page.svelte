@@ -34,28 +34,94 @@
 				return;
 			}
 
+			const data = await res.json();
 			magnetUri = '';
 			addError = '';
+
+			// Add torrent to local list immediately for responsive UI
+			const newTorrent = {
+				id: data.id,
+				name: uri.substring(uri.indexOf('&dn=') + 4) || 'Unknown',
+				state: 'downloading_metadata',
+				progress: 0,
+				downloadRate: 0,
+				uploadRate: 0,
+				peers: 0,
+				savePath: ''
+			};
+			lastSnapshot = [...lastSnapshot, newTorrent];
+
+			// Show success message
+			console.log(`Added torrent: ${data.id}`);
 		} catch (e) {
 			addError = e instanceof Error ? e.message : 'Network error';
 		}
 	}
 
 	async function pauseTorrent(id) {
-		await fetch(`/api/torrents/${id}/pause`, { method: 'PUT' });
+		try {
+			const res = await fetch(`/api/torrents/${id}/pause`, { method: 'PUT' });
+			if (!res.ok) {
+				const err = await res.json().catch(() => ({ error: 'Failed to pause' }));
+				alert(err.error || 'Failed to pause torrent');
+			} else {
+				console.log(`Paused torrent: ${id}`);
+			}
+		} catch (e) {
+			alert(e instanceof Error ? e.message : 'Network error');
+		}
 	}
 
 	async function resumeTorrent(id) {
-		await fetch(`/api/torrents/${id}/resume`, { method: 'PUT' });
+		try {
+			const res = await fetch(`/api/torrents/${id}/resume`, { method: 'PUT' });
+			if (!res.ok) {
+				const err = await res.json().catch(() => ({ error: 'Failed to resume' }));
+				alert(err.error || 'Failed to resume torrent');
+			} else {
+				console.log(`Resumed torrent: ${id}`);
+			}
+		} catch (e) {
+			alert(e instanceof Error ? e.message : 'Network error');
+		}
 	}
 
 	async function removeTorrent(id, deleteFiles) {
 		if (!deleteFiles && !confirm('Remove this torrent without deleting files?')) return;
-		await fetch(`/api/torrents/${id}?deleteFiles=${deleteFiles}`, { method: 'DELETE' });
+		try {
+			const res = await fetch(`/api/torrents/${id}?deleteFiles=${deleteFiles}`, { method: 'DELETE' });
+			if (!res.ok) {
+				const err = await res.json().catch(() => ({ error: 'Failed to remove' }));
+				alert(err.error || 'Failed to remove torrent');
+			} else {
+				console.log(`Removed torrent: ${id}`);
+			}
+		} catch (e) {
+			alert(e instanceof Error ? e.message : 'Network error');
+		}
 	}
 
-	function openInManager(id) {
-		window.open(`/api/torrents/${id}/info`, '_blank');
+	let showInfo = $state(false);
+	let selectedTorrent = $state(null);
+
+	function toggleInfo(torrent) {
+		console.log('toggleInfo called with:', torrent);
+		if (showInfo && selectedTorrent?.id === torrent.id) {
+			console.log('Closing info for torrent:', torrent.id);
+			showInfo = false;
+			selectedTorrent = null;
+		} else {
+			console.log('Opening info for torrent:', torrent.id);
+			selectedTorrent = torrent;
+			showInfo = true;
+		}
+		console.log('Current state:', { showInfo, selectedTorrent: selectedTorrent?.id });
+	}
+
+	function closeInfo() {
+		console.log('closeInfo called');
+		showInfo = false;
+		selectedTorrent = null;
 	}
 
 	// --- WebSocket connection ---
@@ -143,7 +209,7 @@
 		switch (state) {
 			case 'downloading': return '#2196F3';
 			case 'seeding': case 'finished': return '#4CAF50';
-			case 'paused': return '#FF9800';
+			case 'paused': case 'pause_requested': return '#FF9800';
 			case 'error': case 'checking_files': return '#f44336';
 			default: return '#9E9E9E';
 		}
@@ -153,10 +219,15 @@
 		switch (state) {
 			case 'downloading': return '⬇️';
 			case 'seeding': case 'finished': return '⬆️';
-			case 'paused': return '⏸️';
+			case 'paused': case 'pause_requested': return '⏸️';
 			case 'checking_files': case 'checking_resume_data': return '🔍';
 			default: return '❓';
 		}
+	}
+
+	function stateDisplayName(state) {
+		if (state === 'pause_requested') return 'Pausing';
+		return state;
 	}
 
 	onMount(() => {
@@ -210,7 +281,7 @@
 				<article class="torrent-card">
 					<div class="card-header">
 						<span class="state-badge" style="--color: {stateColor(torrent.state)}">
-							{stateIcon(torrent.state)} {torrent.state}
+							{stateIcon(torrent.state)} {stateDisplayName(torrent.state)}
 						</span>
 						<h3 class="torrent-name">{torrent.name}</h3>
 					</div>
@@ -231,13 +302,13 @@
 					{/if}
 
 					<div class="card-actions">
-						{#if torrent.state === 'paused'}
+						{#if torrent.state === 'paused' || torrent.state === 'pause_requested'}
 							<button class="btn btn-resume" on:click={() => resumeTorrent(torrent.id)}>▶ Resume</button>
 						{:else}
 							<button class="btn btn-pause" on:click={() => pauseTorrent(torrent.id)}>⏸ Pause</button>
 						{/if}
 
-						<button class="btn btn-info" on:click={() => openInManager(torrent.id)}>ℹ Info</button>
+						<button class="btn btn-info" on:click={() => toggleInfo(torrent)}>ℹ Info</button>
 
 						<button class="btn btn-remove" on:click={() => removeTorrent(torrent.id, false)}>🗑 Remove</button>
 
@@ -256,16 +327,174 @@
 	</footer>
 </div>
 
+{#if showInfo && selectedTorrent}
+	<div class="modal-overlay" on:click={closeInfo}>
+		<div class="modal-content" on:click={(e) => e.stopPropagation()}>
+			<div class="modal-header">
+				<h2>Torrent Info</h2>
+				<button class="btn-close" on:click={closeInfo}>✕</button>
+			</div>
+			<div class="modal-body">
+				<div class="info-row">
+					<span class="label">Name:</span>
+					<span class="value">{selectedTorrent.name}</span>
+				</div>
+				<div class="info-row">
+					<span class="label">ID:</span>
+					<span class="value">{selectedTorrent.id}</span>
+				</div>
+				<div class="info-row">
+					<span class="label">State:</span>
+					<span class="value state-badge" style="--color: {stateColor(selectedTorrent.state)}">
+						{stateIcon(selectedTorrent.state)} {stateDisplayName(selectedTorrent.state)}
+					</span>
+				</div>
+				<div class="info-row">
+					<span class="label">Progress:</span>
+					<span class="value">{formatProgress(selectedTorrent.progress)}</span>
+				</div>
+				<div class="info-row">
+					<span class="label">Download Speed:</span>
+					<span class="value">{formatBytes(selectedTorrent.downloadRate)}/s</span>
+				</div>
+				<div class="info-row">
+					<span class="label">Upload Speed:</span>
+					<span class="value">{formatBytes(selectedTorrent.uploadRate)}/s</span>
+				</div>
+				<div class="info-row">
+					<span class="label">Peers:</span>
+					<span class="value">{selectedTorrent.peers}</span>
+				</div>
+				{#if selectedTorrent.savePath}
+					<div class="info-row">
+						<span class="label">Save Path:</span>
+						<span class="value path">{selectedTorrent.savePath}</span>
+					</div>
+				{/if}
+			</div>
+			<div class="modal-footer">
+				<button class="btn btn-close-modal" on:click={closeInfo}>Close</button>
+			</div>
+		</div>
+	</div>
+{/if}
+
 <style>
-	:root {
-		--bg: #1a1a2e;
-		--surface: #16213e;
-		--border: #0f3460;
-		--text: #e8e8e8;
-		--muted: #a0a0b0;
-		--accent: #e94560;
-		--input-bg: #1a1a2e;
-	}
+.modal-overlay {
+	position: fixed;
+	top: 0;
+	left: 0;
+	right: 0;
+	bottom: 0;
+	background: rgba(0, 0, 0, 0.7);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	z-index: 1000;
+}
+
+.modal-content {
+	background: var(--surface);
+	border: 1px solid var(--border);
+	border-radius: 8px;
+	width: 90%;
+	max-width: 500px;
+	max-height: 80vh;
+	overflow-y: auto;
+}
+
+.modal-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 1rem;
+	border-bottom: 1px solid var(--border);
+}
+
+.modal-header h2 {
+	font-size: 1.1rem;
+	color: var(--text);
+}
+
+.btn-close {
+	background: none;
+	border: none;
+	color: var(--muted);
+	font-size: 1.2rem;
+	cursor: pointer;
+	padding: 0;
+	width: 32px;
+	height: 32px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: 4px;
+}
+
+.btn-close:hover {
+	background: var(--border);
+	color: var(--text);
+}
+
+.modal-body {
+	padding: 1rem;
+}
+
+.info-row {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	padding: 0.5rem 0;
+	border-bottom: 1px solid var(--border);
+}
+
+.info-row:last-child {
+	border-bottom: none;
+}
+
+.label {
+	font-size: 0.85rem;
+	color: var(--muted);
+	font-weight: 500;
+}
+
+.value {
+	font-size: 0.85rem;
+	color: var(--text);
+	text-align: right;
+	word-break: break-word;
+}
+
+.value.path {
+	font-size: 0.75rem;
+	color: var(--muted);
+}
+
+.modal-footer {
+	padding: 1rem;
+	border-top: 1px solid var(--border);
+	display: flex;
+	justify-content: flex-end;
+}
+
+.btn-close-modal {
+	background: var(--border);
+	color: var(--text);
+}
+
+.btn-close-modal:hover {
+	background: color-mix(in srgb, var(--border) 80%, white);
+}
+
+:root {
+	--bg: #1a1a2e;
+	--surface: #16213e;
+	--border: #0f3460;
+	--text: #e8e8e8;
+	--muted: #a0a0b0;
+	--accent: #e94560;
+	--input-bg: #1a1a2e;
+}
 
 	* {
 		box-sizing: border-box;
