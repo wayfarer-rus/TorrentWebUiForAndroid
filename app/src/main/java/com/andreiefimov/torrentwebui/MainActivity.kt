@@ -7,10 +7,16 @@ import androidx.activity.viewModels
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -23,11 +29,12 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        TorrentServer.start(this.applicationContext)
+        val authManager = DefaultAuthManager(this.applicationContext)
+        TorrentServer.start(this.applicationContext, authManager)
         setContent {
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
-                    TorrentScreen(viewModel)
+                    TorrentScreen(viewModel, authManager)
                 }
             }
         }
@@ -41,16 +48,23 @@ class MainActivity : ComponentActivity() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun TorrentScreen(viewModel: TorrentViewModel) {
+fun TorrentScreen(viewModel: TorrentViewModel, authManager: AuthManager) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     var magnetUri by remember { mutableStateOf("") }
     var diagnosticsExpanded by remember { mutableStateOf(false) }
+    var showSettingsSheet by remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text("Torrent POC") },
                 actions = {
+                    IconButton(onClick = { showSettingsSheet = true }) {
+                        Icon(
+                            imageVector = Icons.Default.Settings,
+                            contentDescription = "Settings"
+                        )
+                    }
                     IconButton(onClick = { diagnosticsExpanded = !diagnosticsExpanded }) {
                         Icon(
                             imageVector = Icons.Default.Info,
@@ -121,6 +135,14 @@ fun TorrentScreen(viewModel: TorrentViewModel) {
             if (state.recentAlerts.isNotEmpty()) {
                 RecentAlertsList(state.recentAlerts)
                 Spacer(modifier = Modifier.height(16.dp))
+            }
+
+            // Settings sheet
+            if (showSettingsSheet) {
+                PasswordSettingsSheet(
+                    authManager = authManager,
+                    onDismiss = { showSettingsSheet = false }
+                )
             }
 
             // Torrent list
@@ -276,4 +298,94 @@ private fun alertSeverity(type: String): AlertType = when (type) {
     "error_alert", "tracker_error_alert" -> AlertType.Error
     "listen_failed_alert", "tracker_warning_alert" -> AlertType.Warning
     else -> AlertType.Info
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun PasswordSettingsSheet(
+    authManager: AuthManager,
+    onDismiss: () -> Unit
+) {
+    var currentPassword by remember { mutableStateOf("") }
+    var newPassword by remember { mutableStateOf("") }
+    var feedbackMessage by remember { mutableStateOf<String?>(null) }
+
+    // Read current password when sheet opens
+    LaunchedEffect(Unit) {
+        currentPassword = "••••••••" // Masked display for security
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = {
+            feedbackMessage = null
+            onDismiss()
+        }
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(24.dp)
+        ) {
+            Text(
+                text = "WebUI Password",
+                style = MaterialTheme.typography.titleLarge,
+                modifier = Modifier.padding(bottom = 16.dp)
+            )
+
+            // Current password display
+            OutlinedTextField(
+                value = currentPassword,
+                onValueChange = {},
+                label = { Text("Current Password") },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = false
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // New password input
+            OutlinedTextField(
+                value = newPassword,
+                onValueChange = { newPassword = it },
+                label = { Text("New Password (min 4 characters)") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Change password button
+            Button(
+                onClick = {
+                    if (newPassword.length < 4) {
+                        feedbackMessage = "New password must be at least 4 characters"
+                    } else {
+                        // Update password via AuthManager
+                        authManager.setPassword(newPassword)
+                        feedbackMessage = "Password changed successfully"
+                        newPassword = ""
+                    }
+                },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Change Password")
+            }
+
+            // Feedback message
+            feedbackMessage?.let { message ->
+                Spacer(modifier = Modifier.height(12.dp))
+                Text(
+                    text = message,
+                    color = if (message.contains("successfully")) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.error
+                    },
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
+
+            Spacer(modifier = Modifier.height(32.dp))
+        }
+    }
 }

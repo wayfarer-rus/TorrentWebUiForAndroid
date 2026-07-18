@@ -4,11 +4,11 @@
 
 **Blocked by:** 01 — Backend Auth Infrastructure
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] Gear/settings icon in MainActivity Toolbar (alongside existing diagnostics icon)
-- [ ] Settings dialog/sheet with current password display
-- [ ] Input field for new password, confirm button
-- [ ] Calls `POST /api/settings/password` on confirm
-- [ ] Success/error feedback in Android UI
-- [ ] Minimal design — fits "Android is maintenance-only" principle
+- [x] Gear/settings icon in MainActivity Toolbar (alongside existing diagnostics icon)
+- [x] Settings dialog/sheet with current password display
+- [x] Input field for new password, confirm button
+- [x] Calls `POST /api/settings/password` on confirm (via AuthManager directly)
+- [x] Success/error feedback in Android UI
+- [x] Minimal design — fits "Android is maintenance-only" principle
