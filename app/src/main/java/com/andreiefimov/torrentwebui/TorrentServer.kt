@@ -35,6 +35,7 @@ import kotlinx.serialization.json.Json
 import io.ktor.server.auth.Authentication
 import io.ktor.server.auth.authenticate
 import io.ktor.server.auth.basic
+import java.io.File
 import java.security.MessageDigest
 
 /**
@@ -235,6 +236,16 @@ object TorrentServer {
                                 call.respond(
                                     HttpStatusCode.BadRequest,
                                     ErrorResponse("Magnet URI is required")
+                                )
+                                return@post
+                            }
+
+                            // Validate destination path: new torrents must specify a non-legacy path.
+                            val requestedDest = body.destinationPath?.trim()
+                            if (requestedDest != null && isLegacySavePath(requestedDest, TorrentDaemon.getLegacySaveDirectory(appContext)?.absolutePath)) {
+                                call.respond(
+                                    HttpStatusCode.BadRequest,
+                                    ErrorResponse("Cannot use legacy save directory as destination for new torrents")
                                 )
                                 return@post
                             }
@@ -491,6 +502,19 @@ object TorrentServer {
     }
 }
 
+/**
+ * Returns true if the given path is the global legacy save directory.
+ *
+ * Legacy paths are the old single-directory app-private downloads folder. They remain
+ * usable for existing torrents but must not be selectable as destinations for new ones.
+ */
+internal fun isLegacySavePath(path: String, globalLegacyPath: String? = null): Boolean {
+    if (globalLegacyPath == null) return false
+    val canonical = try { File(path).canonicalPath } catch (_: Exception) { null }
+    val legacyCanonical = try { File(globalLegacyPath).canonicalPath } catch (_: Exception) { null }
+    return canonical == legacyCanonical
+}
+
 /** Constant-time string comparison to mitigate timing attacks. */
 internal fun constantTimeEquals(a: String, b: String): Boolean {
     val aBytes = a.toByteArray(Charsets.UTF_8)
@@ -507,7 +531,10 @@ object WebUiPrincipal
 
 /** Request body for POST /api/torrents/magnet */
 @Serializable
-data class MagnetRequest(val magnet: String = "")
+data class MagnetRequest(
+    val magnet: String = "",
+    val destinationPath: String? = null
+)
 
 /** Response item for GET /api/torrents — mirrors TorrentStatus fields */
 @Serializable

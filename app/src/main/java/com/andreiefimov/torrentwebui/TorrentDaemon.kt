@@ -20,6 +20,7 @@ import android.os.IBinder
 import android.app.Service.STOP_FOREGROUND_REMOVE
 import androidx.core.app.NotificationCompat
 import com.andreiefimov.torrentwebui.events.AlertDispatcher
+import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
@@ -138,6 +139,11 @@ class TorrentDaemon : Service() {
         @Volatile
         var currentDaemonState: DaemonState? = null
             internal set
+
+        /** Returns the global legacy save directory path used by existing (legacy) torrents. */
+        fun getLegacySaveDirectory(context: Context): File? {
+            return context.getExternalFilesDir("downloads") ?: context.filesDir
+        }
     }
 
     /** Non-sensitive daemon health status for WebUI display. */
@@ -221,8 +227,9 @@ class TorrentDaemon : Service() {
         }
         this.daemonControl = control
 
-        // Initialize queue store
-        val store = FileQueueStore(applicationContext)
+        // Initialize queue store with the global legacy save path
+        val legacySavePath = TorrentDaemon.getLegacySaveDirectory(applicationContext)?.absolutePath
+        val store = FileQueueStore(applicationContext, globalLegacySavePath = legacySavePath)
         this.queueStore = store
 
         // Try to recover queue from previous session (in background)
@@ -336,6 +343,13 @@ class TorrentDaemon : Service() {
         }
 
         android.util.Log.i(TAG, "Recovering ${queue.size} queue entries")
+
+        // Migrate legacy entries (null destinationPath) to use the global save path.
+        val migrated = store.migrateLegacyEntries()
+        if (migrated) {
+            android.util.Log.i(TAG, "Migrated legacy queue entries to global save path")
+        }
+
         var hadBlockedEntries = false
 
         for (entry in queue) {

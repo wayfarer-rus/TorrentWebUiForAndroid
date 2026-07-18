@@ -37,20 +37,47 @@ interface QueueStore {
 
     /** Clears all saved state (queue intent and resume data). */
     suspend fun clearAll()
+
+    /**
+     * Returns the global legacy save directory path.
+     *
+     * Entries with a null [QueueEntry.destinationPath] are treated as legacy entries
+     * whose effective destination is this path. New torrents must always specify a
+     * non-null, approved destination and cannot select a legacy path.
+     */
+    val globalLegacySavePath: String?
+
+    /**
+     * Marks all entries with a null destination as legacy by assigning the global save path.
+     * Returns true if any entries were migrated (had null destination).
+     *
+     * This is called once on startup after the queue is loaded, so that legacy entries
+     * can be exposed in the WebUI as read-only destinations while new torrents are rejected.
+     */
+    suspend fun migrateLegacyEntries(): Boolean
 }
 
 /**
  * A single entry in the persistent queue.
+ *
+ * @param magnetUri The magnet URI identifying this torrent.
+ * @param isPaused Whether the torrent should start in paused state.
+ * @param destinationPath Optional per-torrent canonical filesystem path for downloads.
+ *   When null, the torrent uses the global legacy save directory. New torrents must
+ *   always specify a destination; existing imports may have null until migrated.
  */
 data class QueueEntry(
     val magnetUri: String,
-    val isPaused: Boolean = false
+    val isPaused: Boolean = false,
+    val destinationPath: String? = null
 )
 
 /**
  * In-memory [QueueStore] implementation for testing.
  */
-class InMemoryQueueStore : QueueStore {
+class InMemoryQueueStore(
+    override val globalLegacySavePath: String? = null
+) : QueueStore {
 
     private val queueIntent = AtomicReference<List<QueueEntry>>(emptyList())
     private val resumeData = mutableMapOf<Long, ByteArray>()
@@ -79,6 +106,24 @@ class InMemoryQueueStore : QueueStore {
         queueIntent.set(emptyList())
         resumeData.clear()
     }
+
+    /** Returns true if every entry in the current queue has a non-null destination. */
+    fun allEntriesHaveDestination(): Boolean = queueIntent.get().all { it.destinationPath != null }
+
+    override suspend fun migrateLegacyEntries(): Boolean {
+        val path = globalLegacySavePath ?: return false
+        val current = queueIntent.get()
+        val hasNulls = current.any { it.destinationPath == null }
+        if (hasNulls) {
+            val migrated = current.map { entry ->
+                if (entry.destinationPath == null) {
+                    entry.copy(destinationPath = path)
+                } else entry
+            }
+            queueIntent.set(migrated)
+        }
+        return hasNulls
+    }
 }
 
 /**
@@ -86,7 +131,10 @@ class InMemoryQueueStore : QueueStore {
  *
  * Uses atomic file replacement (write to temp, then rename) to ensure durability.
  */
-class FileQueueStore(private val context: Context) : QueueStore {
+class FileQueueStore(
+    private val context: Context,
+    override val globalLegacySavePath: String? = null
+) : QueueStore {
 
     private val queueFile = File(context.filesDir, "queue_intent.json")
     private val resumeDir = File(context.filesDir, "resume_data")
@@ -96,7 +144,9 @@ class FileQueueStore(private val context: Context) : QueueStore {
     }
 
     override suspend fun saveQueueIntent(queue: List<QueueEntry>) = withContext(Dispatchers.IO) {
-        val json = queue.joinToString("\n") { "${it.magnetUri}|${it.isPaused}" }
+        val json = queue.joinToString("\n") { entry ->
+            "${entry.magnetUri}|${entry.isPaused}|${entry.destinationPath ?: ""}"
+        }
         writeAtomic(queueFile, json.toByteArray())
     }
 
@@ -105,9 +155,19 @@ class FileQueueStore(private val context: Context) : QueueStore {
         val content = queueFile.readText()
         content.lines().mapNotNull { line ->
             val parts = line.split("|")
-            if (parts.size == 2) {
-                QueueEntry(magnetUri = parts[0], isPaused = parts[1].toBoolean())
-            } else null
+            when (parts.size) {
+                2 -> QueueEntry(
+                    magnetUri = parts[0],
+                    isPaused = parts[1].toBoolean(),
+                    destinationPath = null // legacy entry — no per-torrent path
+                )
+                3 -> QueueEntry(
+                    magnetUri = parts[0],
+                    isPaused = parts[1].toBoolean(),
+                    destinationPath = parts[2].takeIf { it.isNotEmpty() }
+                )
+                else -> null // malformed line, skip
+            }
         }
     }
 
@@ -130,6 +190,47 @@ class FileQueueStore(private val context: Context) : QueueStore {
         withContext(Dispatchers.IO) {
             if (queueFile.exists()) queueFile.delete()
             resumeDir.listFiles()?.forEach { it.delete() }
+        }
+    }
+
+    override suspend fun migrateLegacyEntries(): Boolean {
+        val path = globalLegacySavePath ?: return false
+        return withContext(Dispatchers.IO) {
+            val current = if (!queueFile.exists()) emptyList() else loadFromFile()
+            val hasNulls = current.any { it.destinationPath == null }
+            if (hasNulls) {
+                val migrated = current.map { entry ->
+                    if (entry.destinationPath == null) {
+                        entry.copy(destinationPath = path)
+                    } else entry
+                }
+                val json = migrated.joinToString("\n") { entry ->
+                    "${entry.magnetUri}|${entry.isPaused}|${entry.destinationPath ?: ""}"
+                }
+                writeAtomic(queueFile, json.toByteArray())
+            }
+            hasNulls
+        }
+    }
+
+    private fun loadFromFile(): List<QueueEntry> {
+        if (!queueFile.exists()) return emptyList()
+        val content = queueFile.readText()
+        return content.lines().mapNotNull { line ->
+            val parts = line.split("|")
+            when (parts.size) {
+                2 -> QueueEntry(
+                    magnetUri = parts[0],
+                    isPaused = parts[1].toBoolean(),
+                    destinationPath = null
+                )
+                3 -> QueueEntry(
+                    magnetUri = parts[0],
+                    isPaused = parts[1].toBoolean(),
+                    destinationPath = parts[2].takeIf { it.isNotEmpty() }
+                )
+                else -> null
+            }
         }
     }
 
