@@ -122,6 +122,7 @@ class TorrentDaemon : Service() {
     }
 
     /** Non-sensitive daemon health status for WebUI display. */
+    @kotlinx.serialization.Serializable
     data class DaemonHealthStatus(
         val lifecycleState: String,
         val recoveryBlocked: Boolean,
