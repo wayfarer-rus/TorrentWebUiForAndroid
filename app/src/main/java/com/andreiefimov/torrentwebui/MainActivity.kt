@@ -32,7 +32,10 @@ class MainActivity : ComponentActivity() {
         val authManager = DefaultAuthManager(this.applicationContext)
         // Wire the daemon control seam: production uses TorrentSession, tests can inject mocks.
         viewModel.daemonControl = DaemonControlFactory.create()
-        TorrentServer.start(this.applicationContext, authManager)
+
+        // Start the foreground daemon service (owns session + WebUI lifecycle).
+        TorrentDaemon.start(this.applicationContext)
+
         setContent {
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
@@ -44,7 +47,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        TorrentServer.stop()
+        // The daemon service owns the session and WebUI lifecycle.
+        // MainActivity does not stop them here; only an explicit user action (Stop downloads)
+        // or system termination does that.
     }
 }
 
