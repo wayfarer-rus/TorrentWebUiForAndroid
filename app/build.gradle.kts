@@ -106,4 +106,5 @@ dependencies {
     testImplementation(libs.ktor.server.test.host)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
+    androidTestImplementation("com.squareup.okhttp3:okhttp:4.12.0")
 }
