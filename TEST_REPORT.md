@@ -123,6 +123,138 @@
 | Actual result | NOT RUN |
 | Status | **NOT RUN** |
 
+---
+
+## Milestone 2: WebUI Authentication Tests (Unit)
+
+**Environment:** Ktor `testApplication` engine, in-process testing without device.
+
+### Test 13: Unauthenticated Request Returns 401
+
+| Field | Value |
+|-------|-------|
+| Action | `GET /` without credentials |
+| Expected result | 401 with `WWW-Authenticate: Basic realm="Torrent WebUI"` header |
+| Actual result | 401, correct WWW-Authenticate header present |
+| Status | **PASS** |
+
+### Test 14: Correct Password Returns 200
+
+| Field | Value |
+|-------|-------|
+| Action | `GET /` with correct password (`start123`) |
+| Expected result | 200 with page content |
+| Actual result | 200, HTML content returned |
+| Status | **PASS** |
+
+### Test 15: Wrong Password Returns 401
+
+| Field | Value |
+|-------|-------|
+| Action | `GET /` with incorrect password |
+| Expected result | 401 |
+| Actual result | 401 |
+| Status | **PASS** |
+
+### Test 16: API Endpoint Requires Auth
+
+| Field | Value |
+|-------|-------|
+| Action | `GET /api/torrents` without credentials |
+| Expected result | 401 |
+| Actual result | 401 |
+| Status | **PASS** |
+
+### Test 17: API Endpoint Works With Auth
+
+| Field | Value |
+|-------|-------|
+| Action | `GET /api/torrents` with correct password |
+| Expected result | 200 with torrent list (empty array) |
+| Actual result | 200, `[]` returned |
+| Status | **PASS** |
+
+### Test 18: Password Change With Correct Current Password
+
+| Field | Value |
+|-------|-------|
+| Action | `POST /api/settings/password` with correct current + valid new password |
+| Expected result | 200, subsequent requests use new password |
+| Actual result | 200, old password fails, new password works |
+| Status | **PASS** |
+
+### Test 19: Password Change With Wrong Current Password
+
+| Field | Value |
+|-------|-------|
+| Action | `POST /api/settings/password` with incorrect current password |
+| Expected result | 400 with error message |
+| Actual result | 400, "Current password is incorrect" |
+| Status | **PASS** |
+
+### Test 20: Password Change With Too-Short New Password
+
+| Field | Value |
+|-------|-------|
+| Action | `POST /api/settings/password` with new password < 4 chars |
+| Expected result | 400 with error message |
+| Actual result | 400, "New password must be at least 4 characters" |
+| Status | **PASS** |
+
+### Test 21: Password Change Takes Effect Immediately
+
+| Field | Value |
+|-------|-------|
+| Action | Change password, then attempt auth with old and new passwords |
+| Expected result | Old password fails immediately, new password works immediately |
+| Actual result | Old password returns 401, new password returns 200 |
+| Status | **PASS** |
+
+### Test 22: WebSocket Bypasses Auth
+
+| Field | Value |
+|-------|-------|
+| Action | Connect to `/ws/progress` without credentials |
+| Expected result | Connection succeeds (page-level auth is the gate) |
+| Actual result | WebSocket connects, receives initial snapshot |
+| Status | **PASS** |
+
+### Test 23: Health Endpoint Bypasses Auth
+
+| Field | Value |
+|-------|-------|
+| Action | `GET /health` without credentials |
+| Expected result | 200 with health status |
+| Actual result | 200, `{"status":"ok"}` returned |
+| Status | **PASS** |
+
+### Test 24: Android Settings Screen Opens
+
+| Field | Value |
+|-------|-------|
+| Action | Tap gear icon in MainActivity toolbar |
+| Expected result | Password settings ModalBottomSheet opens |
+| Actual result | NOT RUN - requires manual device interaction |
+| Status | **NOT RUN** |
+
+### Test 25: Android Settings Changes Password
+
+| Field | Value |
+|-------|-------|
+| Action | Enter new password in settings sheet, tap Change |
+| Expected result | Password updated via AuthManager, feedback shown |
+| Actual result | NOT RUN - requires manual device interaction |
+| Status | **NOT RUN** |
+
+### Test 26: WebUI Settings Changes Password
+
+| Field | Value |
+|-------|-------|
+| Action | Open settings modal in WebUI, change password |
+| Expected result | Password updated via POST /api/settings/password, browser re-prompts |
+| Actual result | NOT RUN - requires manual device interaction |
+| Status | **NOT RUN** |
+
 ## Code Quality Fixes Applied
 
 - Removed `alert::status_notification` from alert mask to prevent queue saturation during polling

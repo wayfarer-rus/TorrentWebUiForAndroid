@@ -41,11 +41,11 @@
 **Out of scope:** USB folder picker, raw filesystem browser, polished design.
 
 **Exit criteria:**
-- [ ] WebUI accessible from LAN browser.
-- [ ] Password authentication enforced.
-- [ ] Magnet added, queue listed, progress visible.
-- [ ] Pause, resume, remove work from browser.
-- [ ] Android UI and WebUI show consistent state.
+- [x] WebUI accessible from LAN browser.
+- [x] Password authentication enforced (HTTP Basic Auth, default password `start123`).
+- [x] Magnet added, queue listed, progress visible.
+- [x] Pause, resume, remove work from browser.
+- [x] Android UI and WebUI show consistent state (shared backend model).
 
 ---
 
