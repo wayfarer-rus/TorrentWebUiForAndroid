@@ -17,6 +17,25 @@ import android.content.Context
 interface DaemonControl : TorrentSessionOps {
 
     /**
+     * Returns the current storage-permission state.
+     *
+     * When not [StoragePermissionState.Ready], storage-changing operations (add with destination,
+     * move) are rejected and the WebUI reports the blocked state.
+     */
+    val storagePermissionState: StoragePermissionState
+        get() = StoragePermissionState.Ready // default for implementations that don't override
+
+    /** Returns true if storage operations are currently enabled (permission is ready). */
+    val isStorageReady: Boolean
+        get() = storagePermissionState == StoragePermissionState.Ready
+
+    /**
+     * Re-checks storage permission state from the OS. Call before storage operations
+     * to detect runtime revocation.
+     */
+    fun refreshStoragePermissionState(context: Context) {}
+
+    /**
      * Initialize the native torrent session. Called once before any operations.
      * @return true if initialization succeeded, false otherwise (check [lastError] for details).
      */
@@ -61,8 +80,13 @@ object DaemonControlFactory {
     /** Creates the default production [DaemonControl]. */
     fun create(): DaemonControl = TorrentSession
 
-    /** Creates a test [DaemonControl] backed by the given [TorrentSessionOps]. */
-    fun createForTest(sessionOps: TorrentSessionOps): DaemonControl = object : DaemonControl {
+    /**
+     * Creates a test [DaemonControl] backed by the given [TorrentSessionOps].
+     *
+     * The test variant defaults to storage-ready; tests can override via the [storagePermissionState]
+     * parameter.
+     */
+    fun createForTest(sessionOps: TorrentSessionOps, storagePermissionState: StoragePermissionState = StoragePermissionState.Ready): DaemonControl = object : DaemonControl {
         override fun init(context: Context): Boolean = true
         override fun destroy() {}
         override fun getDiagnostics(): NativeDiagnostics = NativeDiagnostics(
@@ -72,6 +96,8 @@ object DaemonControlFactory {
             sessionStarted = true,
             lastError = null
         )
+        override val storagePermissionState: StoragePermissionState get() = storagePermissionState
+        override fun refreshStoragePermissionState(context: Context) {}
         // Delegate all ops to the provided sessionOps.
         override fun addMagnet(magnetUri: String): Long = sessionOps.addMagnet(magnetUri)
         override fun pauseTorrent(torrentId: Long): Boolean = sessionOps.pauseTorrent(torrentId)

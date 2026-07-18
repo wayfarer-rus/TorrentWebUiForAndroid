@@ -85,6 +85,19 @@ class MainActivity : ComponentActivity() {
         // MainActivity does not stop them here; only an explicit user action (Stop downloads)
         // or system termination does that.
     }
+
+    /**
+     * Checks storage permission and launches the system settings intent if denied.
+     * Called when the user taps "Grant storage permission" in the fallback UI.
+     */
+    fun requestStoragePermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            if (!android.os.Environment.isExternalStorageManager()) {
+                val intent = StoragePermissionChecker.launchPermissionSettings(this)
+                startActivity(intent)
+            }
+        }
+    }
 }
 
 /**
@@ -112,6 +125,8 @@ fun AndroidFallbackScreen(viewModel: TorrentViewModel, authManager: AuthManager)
                 .fillMaxSize()
                 .padding(16.dp)
         ) {
+            val context = LocalContext.current
+
             // Daemon health card
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -139,6 +154,45 @@ fun AndroidFallbackScreen(viewModel: TorrentViewModel, authManager: AuthManager)
                     type = AlertType.Error,
                     message = "Session failed to start. ${state.diagnostics.lastError ?: "Unknown error"}"
                 )
+            }
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            // Storage permission status card (Milestone 4)
+            val storageState = state.storagePermissionState
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = when (storageState) {
+                        StoragePermissionState.Ready -> MaterialTheme.colorScheme.primaryContainer
+                        StoragePermissionState.DeniedAtStartup,
+                        StoragePermissionState.RevokedRuntime -> MaterialTheme.colorScheme.errorContainer
+                    }
+                )
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text("Storage Permission", style = MaterialTheme.typography.titleSmall)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    DiagnosticRow(
+                        "State",
+                        when (storageState) {
+                            StoragePermissionState.Ready -> "Ready"
+                            StoragePermissionState.DeniedAtStartup -> "Denied (startup) — grant in system settings"
+                            StoragePermissionState.RevokedRuntime -> "Revoked — storage operations blocked"
+                        }
+                    )
+
+                    if (storageState != StoragePermissionState.Ready) {
+                        Spacer(modifier = Modifier.height(12.dp))
+                        val act = context as? MainActivity
+                        Button(
+                            onClick = { act?.requestStoragePermission() },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Grant All Files Access")
+                        }
+                    }
+                }
             }
 
             Spacer(modifier = Modifier.height(24.dp))

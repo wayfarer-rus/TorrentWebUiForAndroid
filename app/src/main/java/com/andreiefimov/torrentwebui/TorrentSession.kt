@@ -36,10 +36,13 @@ object TorrentSession : DaemonControl {
     private var _sessionStarted: Boolean = false
     private var _lastError: String? = null
     private var _version: String = "not loaded"
+    private var _storagePermissionState: StoragePermissionState = StoragePermissionState.Ready
 
     val nativeLoaded get() = _nativeLoaded
     val sessionStarted get() = _sessionStarted
     override val lastError get() = _lastError
+    override val storagePermissionState: StoragePermissionState get() = _storagePermissionState
+    override val isStorageReady: Boolean get() = _storagePermissionState == StoragePermissionState.Ready
     val version get() = _version
 
     // -------------------------------------------------------------------
@@ -80,6 +83,14 @@ object TorrentSession : DaemonControl {
 
     override fun init(context: Context): Boolean {
         return try {
+            // Check storage permission before starting the native session.
+            _storagePermissionState = StoragePermissionChecker.getCurrentState(context)
+            if (_storagePermissionState != StoragePermissionState.Ready) {
+                _lastError = "Storage permission not granted (state: ${_storagePermissionState.name})"
+                EventBus.post(SessionEvent.Error(_lastError ?: ""))
+                return false
+            }
+
             System.loadLibrary("torrent-jni")
             _nativeLoaded = true
             _version = nativeVersion()
@@ -118,9 +129,20 @@ object TorrentSession : DaemonControl {
         } finally {
             sessionId = 0
             _sessionStarted = false
-            // Notify subscribers that the session is shut down.
+            // Preserve storage permission state across daemon restarts.
             EventBus.post(SessionEvent.Stopped)
         }
+    }
+
+    /**
+     * Re-checks the current storage permission state and updates internal state.
+     *
+     * Call this before storage operations (add/move) to detect runtime permission revocation.
+     * If the state transitions from Ready to a denied state, callers should reject the operation
+     * and report [StoragePermissionState.RevokedRuntime] in the WebUI.
+     */
+    override fun refreshStoragePermissionState(context: Context) {
+        _storagePermissionState = StoragePermissionChecker.getCurrentState(context)
     }
 
     // -------------------------------------------------------------------

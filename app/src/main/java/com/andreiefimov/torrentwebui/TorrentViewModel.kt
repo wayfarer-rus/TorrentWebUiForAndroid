@@ -72,7 +72,8 @@ class TorrentViewModel(application: Application) : AndroidViewModel(application)
         )
         _uiState.value = _uiState.value.copy(
             diagnostics = diagnostics,
-            sessionStarted = sessionStarted
+            sessionStarted = sessionStarted,
+            storagePermissionState = daemonControl.storagePermissionState
         )
     }
 
@@ -215,5 +216,6 @@ data class TorrentUiState(
     ),
     val sessionStarted: Boolean = false,
     val addMagnetError: String? = null,
-    val recentAlerts: List<AlertEvent> = emptyList()
+    val recentAlerts: List<AlertEvent> = emptyList(),
+    val storagePermissionState: StoragePermissionState = StoragePermissionState.Ready
 )

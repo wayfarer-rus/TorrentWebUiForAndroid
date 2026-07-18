@@ -217,6 +217,15 @@ object TorrentServer {
                         call.respondText("Fallback: $uri", ContentType.Text.Plain)
                     }
 
+                    // ---- REST API: storage (Milestone 4) ----
+                    route("/api/storage") {
+                        // GET /api/storage/permission — returns current storage permission state.
+                        get("/permission") {
+                            val state = TorrentServer.daemonControl.storagePermissionState
+                            call.respond(StoragePermissionResponse(state.name))
+                        }
+                    }
+
                     // ---- REST API: torrent management ----
                     route("/api/torrents") {
                         // POST /api/torrents/magnet — add a new torrent by magnet URI.
@@ -242,6 +251,26 @@ object TorrentServer {
 
                             // Validate destination path: new torrents must specify a non-legacy path.
                             val requestedDest = body.destinationPath?.trim()
+
+                            // Block storage operations when permission is unavailable.
+                            if (!TorrentServer.daemonControl.isStorageReady) {
+                                call.respond(
+                                    HttpStatusCode.ServiceUnavailable,
+                                    ErrorResponse("Storage permission required. Grant All Files Access in system settings and restart downloads.")
+                                )
+                                return@post
+                            }
+
+                            // Re-check at operation time to catch runtime revocation.
+                            TorrentServer.daemonControl.refreshStoragePermissionState(appContext)
+                            if (!TorrentServer.daemonControl.isStorageReady) {
+                                call.respond(
+                                    HttpStatusCode.ServiceUnavailable,
+                                    ErrorResponse("Storage permission required. Grant All Files Access in system settings and restart downloads.")
+                                )
+                                return@post
+                            }
+
                             if (requestedDest != null && isLegacySavePath(requestedDest, TorrentDaemon.getLegacySaveDirectory(appContext)?.absolutePath)) {
                                 call.respond(
                                     HttpStatusCode.BadRequest,
@@ -528,6 +557,10 @@ object WebUiPrincipal
 // ---------------------------------------------------------------------------
 // Request/Response DTOs for REST API
 // ---------------------------------------------------------------------------
+
+/** Response for GET /api/storage/permission — returns the state name. */
+@Serializable
+data class StoragePermissionResponse(val state: String)
 
 /** Request body for POST /api/torrents/magnet */
 @Serializable
