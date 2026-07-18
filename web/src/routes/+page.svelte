@@ -104,6 +104,42 @@
 	let showInfo = $state(false);
 	let selectedTorrent = $state(null);
 
+	// --- Settings / password change ---
+	let showSettings = $state(false);
+	let currentPassword = $state('');
+	let newPassword = $state('');
+	let settingsMessage = $state('');
+	let settingsError = $state('');
+
+	async function changePassword() {
+		settingsMessage = '';
+		settingsError = '';
+
+		if (newPassword.length < 4) {
+			settingsError = 'New password must be at least 4 characters';
+			return;
+		}
+
+		try {
+			const res = await fetch('/api/settings/password', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ currentPassword, newPassword }),
+			});
+
+			if (res.ok) {
+				settingsMessage = 'Password changed successfully. Your browser will re-prompt for the new password.';
+				currentPassword = '';
+				newPassword = '';
+			} else {
+				const err = await res.json().catch(() => ({ error: 'Unknown error' }));
+				settingsError = err.error || `HTTP ${res.status}`;
+			}
+		} catch (e) {
+			settingsError = e instanceof Error ? e.message : 'Network error';
+		}
+	}
+
 	function toggleInfo(torrent) {
 		console.log('toggleInfo called with:', torrent);
 		if (showInfo && selectedTorrent?.id === torrent.id) {
@@ -246,10 +282,13 @@
 <div class="container">
 	<header>
 		<h1>Torrent WebUI</h1>
-		<div class="status">
-			<span class="ws-indicator" class:connected={wsConnected} class:connecting={wsConnecting}>
-				{wsConnecting ? '⏳ Connecting...' : wsConnected ? '🟢 Connected' : '🔴 Disconnected'}
-			</span>
+		<div class="header-actions">
+			<button class="settings-btn" on:click={() => { showSettings = !showSettings; settingsMessage = ''; settingsError = ''; }} title="Settings">⚙️</button>
+			<div class="status">
+				<span class="ws-indicator" class:connected={wsConnected} class:connecting={wsConnecting}>
+					{wsConnecting ? '⏳ Connecting...' : wsConnected ? '🟢 Connected' : '🔴 Disconnected'}
+				</span>
+			</div>
 		</div>
 	</header>
 
@@ -325,6 +364,50 @@
 	<footer>
 		<p>Torrent WebUI — powered by libtorrent via JNI</p>
 	</footer>
+
+	{#if showSettings}
+		<div class="modal-overlay" on:click={() => { showSettings = false; settingsMessage = ''; settingsError = ''; }}>
+			<div class="modal-content settings-modal" on:click={(e) => e.stopPropagation()}>
+				<div class="modal-header">
+					<h2>Settings</h2>
+					<button class="btn-close" on:click={() => { showSettings = false; settingsMessage = ''; settingsError = ''; }}>✕</button>
+				</div>
+				<div class="modal-body">
+					<p class="settings-description">Change the password used to access this WebUI.</p>
+
+					{#if settingsMessage}
+						<p class="settings-success">{settingsMessage}</p>
+					{/if}
+
+					{#if settingsError}
+						<p class="settings-error">{settingsError}</p>
+					{/if}
+
+					<div class="form-group">
+						<label for="current-password">Current Password</label>
+						<input
+							id="current-password"
+							type="password"
+							bind:value={currentPassword}
+							placeholder="Enter current password"
+						/>
+					</div>
+
+					<div class="form-group">
+						<label for="new-password">New Password</label>
+						<input
+							id="new-password"
+							type="password"
+							bind:value={newPassword}
+							placeholder="Min. 4 characters"
+						/>
+					</div>
+
+					<button class="btn btn-settings-submit" on:click={changePassword}>Change Password</button>
+				</div>
+			</div>
+		</div>
+	{/if}
 </div>
 
 {#if showInfo && selectedTorrent}
@@ -717,6 +800,93 @@
 	.btn-remove { background: #555; color: white; }
 	.btn-delete { background: var(--accent); color: white; }
 
+	/* Header actions */
+
+	.header-actions {
+		display: flex;
+		align-items: center;
+		gap: 0.75rem;
+	}
+
+	.settings-btn {
+		background: none;
+		border: none;
+		font-size: 1.2rem;
+		cursor: pointer;
+		padding: 4px;
+		line-height: 1;
+	}
+
+	.settings-btn:hover {
+		opacity: 0.7;
+	}
+
+	/* Settings modal */
+
+	.settings-modal {
+		max-width: 420px;
+	}
+
+	.settings-description {
+		font-size: 0.85rem;
+		color: var(--muted);
+		margin-bottom: 1rem;
+	}
+
+	.settings-success {
+		background: color-mix(in srgb, #4CAF50 15%, transparent);
+		color: #4CAF50;
+		padding: 0.6rem 0.75rem;
+		border-radius: 4px;
+		font-size: 0.85rem;
+		margin-bottom: 1rem;
+	}
+
+	.settings-error {
+		background: color-mix(in srgb, var(--accent) 15%, transparent);
+		color: var(--accent);
+		padding: 0.6rem 0.75rem;
+		border-radius: 4px;
+		font-size: 0.85rem;
+		margin-bottom: 1rem;
+	}
+
+	.form-group {
+		margin-bottom: 0.75rem;
+	}
+
+	.form-group label {
+		display: block;
+		font-size: 0.85rem;
+		color: var(--muted);
+		margin-bottom: 0.3rem;
+		font-weight: 500;
+	}
+
+	.form-group input {
+		width: 100%;
+		padding: 0.6rem 0.8rem;
+		border-radius: 6px;
+		border: 1px solid var(--border);
+		background: var(--input-bg);
+		color: var(--text);
+		font-size: 0.95rem;
+	}
+
+	.form-group input:focus {
+		outline: none;
+		border-color: var(--accent);
+	}
+
+	.btn-settings-submit {
+		width: 100%;
+		padding: 0.6rem;
+		background: var(--accent);
+		color: white;
+		font-weight: 600;
+		margin-top: 0.5rem;
+	}
+
 	footer {
 		text-align: center;
 		padding-top: 1rem;
@@ -732,5 +902,6 @@
 		header h1 { font-size: 1.1rem; }
 		.input-row { flex-direction: column; }
 		.torrent-meta { flex-wrap: wrap; gap: 0.5rem; }
+		header { flex-wrap: wrap; gap: 0.5rem; }
 	}
 </style>
