@@ -171,13 +171,30 @@ Emulator evidence does not establish reachability from another LAN device. Physi
 
 ---
 
-## Teardown Plan
+## Teardown Performed (2026-07-18)
 
-The following teardown steps will be performed after this report is committed:
+### Pre-Teardown State
+| Item | Status |
+|------|--------|
+| Default password restored | ✅ "start123" confirmed in SharedPreferences |
+| Temporary browser data | ✅ None (all testing used curl CLI) |
+| Port forwarding active | ✅ tcp:8081 → tcp:8080 (removed during teardown) |
+| Emulator running | ✅ emulator-5554 (device) (stopped during teardown) |
 
-1. Remove port forwarding (`adb forward --remove-all`)
-2. Stop the emulator (`adb shell reboot -p` or `killall emulator`)
-3. Verify no ADB devices remain connected
+### Teardown Steps Executed
+1. **Port forwarding removed**: `adb forward --remove-all` → confirmed empty list
+2. **Emulator stopped**: `adb shell reboot -p` sent; remaining processes force-killed
+3. **ADB device disconnected**: `adb devices` → empty list (no devices attached)
+4. **No emulator processes**: Verified via `ps aux` → no qemu-system or netsimd processes
+
+### Post-Teardown State
+```
+$ adb devices
+List of devices attached
+
+$ ps aux | grep -E "(emulator|qemu-system)" | grep -v grep
+(no output)
+```
 
 **Note**: The default password ("start123") was already restored during issue 02 testing. No temporary browser data exists on the host (all testing used curl from command line).
 
