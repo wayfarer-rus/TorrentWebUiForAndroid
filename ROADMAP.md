@@ -1,5 +1,11 @@
 # Roadmap
 
+## Current Delivery Status
+
+- **Next milestone:** **Milestone 3 — Persistent Daemon**.
+- **Last delivered milestone:** Milestone 2 — Browser Control Proof. Its implementation exit criteria are complete.
+- **Outstanding validation:** Physical-device LAN acceptance for Milestone 2 remains a separate follow-up. Earlier Stage 1 manual acceptance gaps remain documented in [TEST_REPORT.md](TEST_REPORT.md) and [STAGE1_STATUS.md](STAGE1_STATUS.md); do not treat them as verified solely because later milestones proceeded.
+
 ## Milestone 1: Native Engine Proof
 
 **Objective:** Prove that our Android app can embed libtorrent-rasterbar and manage a real torrent session safely.
@@ -50,6 +56,8 @@
 ---
 
 ## Milestone 3: Persistent Daemon
+
+**Specification:** [stage-3-persistent-daemon.md](prompts/stage-3-persistent-daemon.md)
 
 **Objective:** Torrent engine survives app backgrounding and process death.
 

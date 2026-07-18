@@ -150,7 +150,7 @@ fun AndroidFallbackScreen(viewModel: TorrentViewModel, authManager: AuthManager)
             ) {
                 val context = LocalContext.current
                 FilledTonalButton(
-                    onClick = { TorrentDaemon.start(context) },
+                    onClick = { TorrentDaemon.resume(context) },
                     modifier = Modifier.weight(1f),
                     enabled = !state.sessionStarted
                 ) {

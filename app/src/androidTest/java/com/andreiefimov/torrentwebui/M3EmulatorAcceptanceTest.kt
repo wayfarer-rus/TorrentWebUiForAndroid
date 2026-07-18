@@ -6,6 +6,7 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.andreiefimov.torrentwebui.events.AlertDispatcher
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import org.junit.After
@@ -34,6 +35,7 @@ class M3EmulatorAcceptanceTest {
     fun setUp() {
         context = ApplicationProvider.getApplicationContext()
         // Clean up any previous test state
+        RecoverySuppressionStore.clearForceStopped(context)
         TorrentDaemon.stop(context)
         AlertDispatcher.stop()
         TorrentSession.destroy()
@@ -138,17 +140,25 @@ class M3EmulatorAcceptanceTest {
 
     @Test
     fun forceStop_preventsAutoRecovery() {
-        // Given: Daemon is running
+        // Given: A durable queue record eligible for automatic recovery
+        val store = FileQueueStore(context)
+        runBlocking {
+            store.saveQueueIntent(listOf(QueueEntry(TEST_MAGNET)))
+        }
         TorrentDaemon.start(context)
         Thread.sleep(2000)
 
-        // When: Force stop (simulated by calling stop with force flag)
-        TorrentDaemon.forceStop(context)
+        // When: Force stop is requested, then the app attempts its ordinary automatic start
+        TorrentDaemon.requestForceStopForTest(context)
+        Thread.sleep(1000)
+        TorrentDaemon.start(context)
         Thread.sleep(1000)
 
-        // Then: Session should be destroyed (or at least no crash)
-        val diagnostics = TorrentSession.getDiagnostics()
-        assertTrue("Force stop should complete without crash", diagnostics != null)
+        // Then: Automatic recovery remains suppressed, but the queue stays available for a user start.
+        assertTrue("Force stop must suppress automatic recovery", RecoverySuppressionStore.isForceStopped(context))
+        assertEquals("Stopped", TorrentDaemon.getHealthStatus(context).lifecycleState)
+        assertEquals(listOf(QueueEntry(TEST_MAGNET)), runBlocking { store.loadQueueIntent() })
+
     }
 
     @Test

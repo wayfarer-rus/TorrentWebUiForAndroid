@@ -18,12 +18,10 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
 /**
- * ViewModel that owns the libtorrent session lifecycle and polls for status.
- * Preserved across configuration changes (screen rotation).
+ * ViewModel for Android fallback state, preserved across configuration changes.
  *
- * Alert processing is delegated to [AlertDispatcher], which polls native alerts
- * and dispatches typed events via [EventBus]. The ViewModel observes those events
- * to stay in sync with the UI state.
+ * The foreground daemon owns the native-session lifecycle. This ViewModel observes daemon health
+ * and delegates controls through [DaemonControl] without initializing the native session itself.
  */
 class TorrentViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -51,30 +49,31 @@ class TorrentViewModel(application: Application) : AndroidViewModel(application)
     private var eventSubscription: Job? = null
 
     init {
-        startSession()
+        startHealthPolling()
     }
 
-    private fun startSession() {
-        AlertDispatcher.start()
-        val ok = daemonControl.init(getApplication())
-        _uiState.value = _uiState.value.copy(
-            diagnostics = daemonControl.getDiagnostics(),
-            sessionStarted = ok
-        )
-        if (ok) {
-            startPolling()
-            subscribeToEvents()
-        }
-    }
-
-    private fun startPolling() {
+    private fun startHealthPolling() {
         pollingJob?.cancel()
         pollingJob = viewModelScope.launch {
             while (true) {
-                refreshTorrents()
-                delay(1000L) // poll at most once per second
+                refreshDaemonHealth()
+                delay(1000L)
             }
         }
+    }
+
+    private fun refreshDaemonHealth() {
+        val health = TorrentDaemon.getHealthStatus(getApplication())
+        val diagnostics = daemonControl.getDiagnostics()
+        val sessionStarted = health.lifecycleState in setOf(
+            TorrentDaemon.DaemonState.Starting.name,
+            TorrentDaemon.DaemonState.Running.name,
+            TorrentDaemon.DaemonState.RecoveryBlocked.name
+        )
+        _uiState.value = _uiState.value.copy(
+            diagnostics = diagnostics,
+            sessionStarted = sessionStarted
+        )
     }
 
     private fun refreshTorrents() {

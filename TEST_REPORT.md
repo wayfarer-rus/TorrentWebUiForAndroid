@@ -295,7 +295,7 @@
 | Test type | Automated emulator acceptance (androidTest) |
 | Device | Android Virtual Device (AVD), arm64-v8a |
 | Android version | Android 13+ (compileSdk 36) |
-| Test date | 2025-07-18 |
+| Test date | 2026-07-18 |
 
 ### M3 Acceptance Test Suite
 
@@ -310,7 +310,7 @@
 | 3 | daemonIdle_continuesRunning | Idle continuity | PASS (compiles) |
 | 4 | safeStop_persistsQueueAndResumeData | Safe stop persistence | PASS (compiles) |
 | 5 | ordinaryTermination_recoveryRestoresQueue | Termination recovery | PASS (compiles) |
-| 6 | forceStop_preventsAutoRecovery | Force-stop behavior | PASS (compiles) |
+| 6 | forceStop_preventsAutoRecovery | Force-stop behavior | PASS (targeted API 36 emulator run only; physical-device validation not run) |
 | 7 | corruptRecoveryData_doesNotCrash | Corrupt recovery handling | PASS (compiles) |
 | 8 | nativeStartupFailure_exposesRecoverableError | Startup failure handling | PASS (compiles) |
 | 9 | storageUnavailability_pausesAffectedEntries | Storage unavailability | PASS (compiles) |
@@ -321,7 +321,7 @@
 | 14 | cleanup_serverStopped | Cleanup: server stopped | PASS (compiles) |
 | 15 | cleanup_fixtureShutDown | Cleanup: fixture shut down | PASS (compiles) |
 
-**Note:** Tests compile successfully. Actual emulator execution requires an AVD with the `torrent-jni` native library built for arm64-v8a. The test suite uses the real JNI/libtorrent session with a deterministic local fixture (Ubuntu 24.04 ISO magnet).
+**Note:** Tests compile successfully. The force-stop acceptance test was run on the `emulator_skill` Android 16/API 36 AVD on 2026-07-18. A separate emulator-only Settings-equivalent validation (`adb shell am force-stop`, followed by app launch) logged `Automatic daemon recovery suppressed after force stop`; the enabled Android **Start downloads** fallback control then started the daemon successfully. This is not physical-device validation. The suite uses the real JNI/libtorrent session with a deterministic local fixture (Ubuntu 24.04 ISO magnet).
 
 ### M3 Exit Criteria Verification
 

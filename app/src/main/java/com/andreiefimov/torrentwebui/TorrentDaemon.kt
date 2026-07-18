@@ -55,6 +55,9 @@ class TorrentDaemon : Service() {
         /** Action to stop the daemon (from notification or external caller). */
         const val ACTION_STOP = "com.andreiefimov.torrentwebui.STOP"
 
+        /** Action for a user request to resume after an explicit force stop. */
+        const val ACTION_USER_START = "com.andreiefimov.torrentwebui.USER_START"
+
         /** Intent extra: whether this is a force stop (vs ordinary stop). */
         const val EXTRA_FORCE_STOP = "force_stop"
 
@@ -69,11 +72,7 @@ class TorrentDaemon : Service() {
             val intent = Intent(context, TorrentDaemon::class.java).apply {
                 action = ACTION_START
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
-            }
+            launchService(context, intent)
         }
 
         /** Stops the daemon service with an explicit user action. */
@@ -84,13 +83,33 @@ class TorrentDaemon : Service() {
             context.startService(intent)
         }
 
-        /** Force stops the daemon (treated as explicit stop, no auto-recovery). */
-        fun forceStop(context: Context) {
+        /** Test helper that records force-stop intent before requesting service shutdown. */
+        internal fun requestForceStopForTest(context: Context) {
+            if (!RecoverySuppressionStore.markForceStopped(context)) {
+                android.util.Log.e(TAG, "Unable to persist force-stop intent")
+                return
+            }
             val intent = Intent(context, TorrentDaemon::class.java).apply {
                 action = ACTION_STOP
                 putExtra(EXTRA_FORCE_STOP, true)
             }
             context.startService(intent)
+        }
+
+        /** Starts the daemon from an explicit user action, allowing suppressed recovery. */
+        fun resume(context: Context) {
+            val intent = Intent(context, TorrentDaemon::class.java).apply {
+                action = ACTION_USER_START
+            }
+            launchService(context, intent)
+        }
+
+        private fun launchService(context: Context, intent: Intent) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
+            }
         }
 
         /** Checks if the daemon is currently running. */
@@ -142,9 +161,6 @@ class TorrentDaemon : Service() {
     /** Job for the checkpoint timer. */
     private var checkpointJob: Job? = null
 
-    /** Flag to track if this is a forced stop (from Android settings). */
-    private var isForceStop = false
-
     override fun onCreate() {
         super.onCreate()
         notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -153,7 +169,8 @@ class TorrentDaemon : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_START -> startDaemon()
+            ACTION_START -> startDaemon(userInitiated = false)
+            ACTION_USER_START -> startDaemon(userInitiated = true)
             ACTION_STOP -> stopDaemon(intent.getBooleanExtra(EXTRA_FORCE_STOP, false))
         }
         return START_STICKY
@@ -161,7 +178,7 @@ class TorrentDaemon : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private fun startDaemon() {
+    private fun startDaemon(userInitiated: Boolean) {
         // Check notification permission (Android 13+)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (!checkNotificationPermission()) {
@@ -172,6 +189,22 @@ class TorrentDaemon : Service() {
                 currentDaemonState = DaemonState.Stopped
                 return
             }
+        }
+
+        if (userInitiated) {
+            if (!RecoverySuppressionStore.clearForceStopped(applicationContext)) {
+                android.util.Log.e(TAG, "Unable to clear force-stop intent")
+                return
+            }
+        } else if (shouldSuppressAutomaticRecovery()) {
+            android.util.Log.i(TAG, "Automatic daemon recovery suppressed after force stop")
+            currentState.set(DaemonState.Stopped)
+            currentDaemonState = DaemonState.Stopped
+            // This invocation arrived through startForegroundService(), so satisfy Android's
+            // foreground-service contract before immediately stopping it.
+            startForeground(NOTIFICATION_ID, buildNotification())
+            cleanupAndStop()
+            return
         }
 
         currentState.set(DaemonState.Starting)
@@ -194,7 +227,7 @@ class TorrentDaemon : Service() {
 
         // Try to recover queue from previous session (in background)
         daemonScope.launch {
-            val recoveryResult = tryRecoverQueue(store, control)
+            val recoveryResult = tryRecoverQueue(store, control, resumePausedEntries = userInitiated)
             if (recoveryResult == RecoveryResult.Blocked) {
                 currentState.set(DaemonState.RecoveryBlocked)
                 currentDaemonState = DaemonState.RecoveryBlocked
@@ -222,7 +255,6 @@ class TorrentDaemon : Service() {
             return
         }
 
-        isForceStop = forceStop
         currentState.set(DaemonState.Stopping)
         currentDaemonState = DaemonState.Stopping
         android.util.Log.i(TAG, "Stopping daemon (force=$forceStop)")
@@ -235,13 +267,17 @@ class TorrentDaemon : Service() {
             return
         }
 
-        // Save queue intent durably before stopping (in background with deadline)
+        // A force stop retains the most recent checkpoint for a later explicit user start.
         daemonScope.launch {
             val saveResult = try {
-                val queue = loadCurrentQueueFromControl(control)
-                withTimeoutOrNull(SAFE_STOP_DEADLINE_MS) {
-                    queueStore?.saveQueueIntent(queue)
-                } != null
+                if (forceStop) {
+                    true
+                } else {
+                    val queue = loadCurrentQueueFromControl(control)
+                    withTimeoutOrNull(SAFE_STOP_DEADLINE_MS) {
+                        queueStore?.saveQueueIntent(queue)
+                    } != null
+                }
             } catch (e: Exception) {
                 android.util.Log.e(TAG, "Failed to save queue intent during safe stop: ${e.message}")
                 false
@@ -282,7 +318,11 @@ class TorrentDaemon : Service() {
      * Attempts to recover queue from previous session.
      * @return RecoveryResult.OK if recovery succeeded, RecoveryResult.Blocked if some entries are blocked.
      */
-    private suspend fun tryRecoverQueue(store: QueueStore, control: DaemonControl): RecoveryResult {
+    private suspend fun tryRecoverQueue(
+        store: QueueStore,
+        control: DaemonControl,
+        resumePausedEntries: Boolean
+    ): RecoveryResult {
         val queue = try {
             store.loadQueueIntent()
         } catch (e: Exception) {
@@ -305,23 +345,38 @@ class TorrentDaemon : Service() {
                 if (resumeData != null) {
                     // Add torrent with resume data (libtorrent will use it for fast resume)
                     val torrentId = control.addMagnet(entry.magnetUri)
-                    if (torrentId > 0 && entry.isPaused) {
+                    if (torrentId > 0 && entry.isPaused && !resumePausedEntries) {
                         control.pauseTorrent(torrentId)
                     }
                 } else {
                     // No resume data — add as new torrent (will start downloading)
                     val torrentId = control.addMagnet(entry.magnetUri)
-                    if (torrentId > 0 && entry.isPaused) {
+                    if (torrentId > 0 && entry.isPaused && !resumePausedEntries) {
                         control.pauseTorrent(torrentId)
                     }
                 }
             } catch (e: Exception) {
-                android.util.Log.w(TAG, "Failed to recover entry ${entry.magnetUri}: ${e.message}")
+                android.util.Log.w(TAG, "Failed to recover queue entry: ${e.message}")
                 hadBlockedEntries = true
             }
         }
 
         return if (hadBlockedEntries) RecoveryResult.Blocked else RecoveryResult.OK
+    }
+
+    private fun shouldSuppressAutomaticRecovery(): Boolean {
+        if (RecoverySuppressionStore.isForceStopped(applicationContext)) return true
+
+        val forceStopExitTimestamp = ForceStopDetector.lastUserRequestedExitTimestamp(applicationContext)
+            ?: return false
+        if (RecoverySuppressionStore.hasHandledForceStopExit(applicationContext, forceStopExitTimestamp)) {
+            return false
+        }
+
+        if (!RecoverySuppressionStore.markDetectedForceStop(applicationContext, forceStopExitTimestamp)) {
+            android.util.Log.e(TAG, "Unable to persist detected force-stop intent")
+        }
+        return true
     }
 
     private fun loadCurrentQueueFromControl(control: DaemonControl): List<QueueEntry> {

@@ -42,6 +42,8 @@ app/
       TorrentViewModel.kt   # ViewModel (routes through DaemonControl seam)
       DaemonControl.kt      # Unified control seam (ops + lifecycle) — M3 addition
       QueueStore.kt         # Durable queue persistence interface + implementations — M3 addition
+      RecoverySuppressionStore.kt # Durable force-stop auto-recovery suppression — M3 addition
+      ForceStopDetector.kt   # Android API 30+ force-stop exit-reason reader — M3 addition
       TorrentStatus.kt      # DTO models
 libtorrent/                 # Git submodule (v2.0.10)
 dep/                        # Boost 1.86.0 headers + checksum file
@@ -104,7 +106,7 @@ scripts/
 - Persistent notification exposes only aggregate state and has one action: **Stop downloads**.
 - Safe stop persists queue intent within a 5-second deadline; on failure, daemon remains running with a recoverable error.
 - On ordinary system termination, the next app launch restores eligible queue entries (at most 30 seconds of transfer progress may be lost).
-- Android Force stop is treated as explicit stop: no automatic recovery, user must explicitly start again.
+- Android Force stop is detected on API 30+ from the latest `REASON_USER_REQUESTED` process exit and persisted as a local suppression marker. App-launch recovery is skipped while queue records remain available; **Start downloads** clears the marker and resumes recovery.
 
 ## WebUI Endpoints (M3)
 
@@ -126,8 +128,8 @@ scripts/
 
 ## Session Lifecycle (M3)
 
-1. `TorrentDaemon.start()` → checks notification permission → creates `DaemonControl` (wraps `TorrentSession`)
-2. Tries to recover queue from `FileQueueStore` (in background coroutine)
+1. `TorrentDaemon.start()` checks notification permission, then evaluates the force-stop suppression marker before creating `DaemonControl` (wraps `TorrentSession`).
+2. `TorrentDaemon.resume()` is the explicit **Start downloads** action; it clears suppression before recovery. Eligible starts recover the queue from `FileQueueStore` (in a background coroutine)
 3. Starts Ktor WebUI server
 4. Starts foreground service with notification
 5. Starts 30-second checkpoint timer (calls `saveTorrentResumeData()` for each torrent)
