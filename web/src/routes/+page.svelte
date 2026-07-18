@@ -115,15 +115,13 @@
 		settingsMessage = '';
 		settingsError = '';
 
-		if (newPassword.length < 4) {
-			settingsError = 'New password must be at least 4 characters';
-			return;
-		}
-
 		try {
 			const res = await fetch('/api/settings/password', {
 				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
+				headers: {
+					'Content-Type': 'application/json',
+					Authorization: 'Basic ' + btoa(':' + currentPassword),
+				},
 				body: JSON.stringify({ currentPassword, newPassword }),
 			});
 

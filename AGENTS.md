@@ -66,6 +66,7 @@ This file is the primary authority for how agents and contributors work in this 
 7. **Do not fabricate test results.**
 8. **Do not claim a device test** unless it actually ran on a physical device.
 9. **Before adding dependencies**, explain why they are needed and document their license.
+10. **After implementing work, run /code-review before committing.** The implement skill requires it; AGENTS.md enforces it in persistent context.
 
 ## Agent Workflow and Timeout Rules
 

@@ -308,11 +308,12 @@ fun PasswordSettingsSheet(
 ) {
     var currentPassword by remember { mutableStateOf("") }
     var newPassword by remember { mutableStateOf("") }
+    var confirmPassword by remember { mutableStateOf("") }
     var feedbackMessage by remember { mutableStateOf<String?>(null) }
 
     // Read current password when sheet opens
     LaunchedEffect(Unit) {
-        currentPassword = "••••••••" // Masked display for security
+        currentPassword = authManager.getPassword()
     }
 
     ModalBottomSheet(
@@ -332,13 +333,24 @@ fun PasswordSettingsSheet(
                 modifier = Modifier.padding(bottom = 16.dp)
             )
 
-            // Current password display
+            // Current password display (read-only)
             OutlinedTextField(
                 value = currentPassword,
                 onValueChange = {},
                 label = { Text("Current Password") },
                 modifier = Modifier.fillMaxWidth(),
                 enabled = false
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Confirm current password (required to prevent unauthorized changes)
+            OutlinedTextField(
+                value = confirmPassword,
+                onValueChange = { confirmPassword = it },
+                label = { Text("Confirm Current Password") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true
             )
 
             Spacer(modifier = Modifier.height(16.dp))
@@ -357,14 +369,25 @@ fun PasswordSettingsSheet(
             // Change password button
             Button(
                 onClick = {
+                    feedbackMessage = null
+
+                    // Validate current password matches stored value
+                    if (confirmPassword != authManager.getPassword()) {
+                        feedbackMessage = "Current password is incorrect"
+                        return@Button
+                    }
+
+                    // Validate new password length
                     if (newPassword.length < 4) {
                         feedbackMessage = "New password must be at least 4 characters"
-                    } else {
-                        // Update password via AuthManager
-                        authManager.setPassword(newPassword)
-                        feedbackMessage = "Password changed successfully"
-                        newPassword = ""
+                        return@Button
                     }
+
+                    // Update password via AuthManager
+                    authManager.setPassword(newPassword)
+                    feedbackMessage = "Password changed successfully"
+                    newPassword = ""
+                    confirmPassword = ""
                 },
                 modifier = Modifier.fillMaxWidth()
             ) {
