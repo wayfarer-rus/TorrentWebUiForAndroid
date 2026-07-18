@@ -141,6 +141,10 @@ class TorrentViewModel(application: Application) : AndroidViewModel(application)
                             Log.e("TorrentViewModel", "Torrent error #$${event.torrentId}: ${event.message}")
                             refreshTorrents()
                         }
+                        is TorrentEvent.DestinationUnavailable -> {
+                            Log.w("TorrentViewModel", "Destination unavailable for torrent #${event.torrentId}: ${event.path}")
+                            refreshTorrents()
+                        }
                     }
                 }
             }

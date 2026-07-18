@@ -30,6 +30,12 @@ sealed class TorrentEvent : AppEvent {
         val message: String,
     ) : TorrentEvent()
 
+    /** The torrent's stored destination is not accessible (USB disconnect, path deleted, etc.). */
+    data class DestinationUnavailable(
+        val torrentId: Long,
+        val path: String,
+    ) : TorrentEvent()
+
     companion object {
         /** Human-readable name for a torrent state code. */
         fun stateLabel(state: String): String = when (state) {

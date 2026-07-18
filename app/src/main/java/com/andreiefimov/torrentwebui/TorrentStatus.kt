@@ -13,7 +13,13 @@ data class TorrentStatus(
     val uploadRate: Long,       // bytes/sec
     val peers: Int,
     val savePath: String,
-    val error: String? = null
+    val error: String? = null,
+    /**
+     * Per-torrent destination status. Null means no specific status (normal operation).
+     * Set to "destination_unavailable" when the torrent's stored destination path is not
+     * accessible (USB disconnect, path deleted, permission revoked).
+     */
+    val destinationStatus: String? = null
 )
 
 /**

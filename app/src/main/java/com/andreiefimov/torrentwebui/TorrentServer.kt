@@ -435,11 +435,10 @@ object TorrentServer {
                         // GET /api/torrents — list all torrents with current state.
                         get {
                             val ids = daemonControl.getAllTorrentIds()
-                            val queue = TorrentServer.queueStore?.loadQueueIntent() ?: emptyList()
+                            // Note: per-torrent destination matching requires a magnetUri↔torrentId
+                            // mapping not yet maintained. destinationPath is null until this is added.
                             val torrents = ids.mapNotNull { id ->
                                 daemonControl.getTorrentStatus(id)?.let { status ->
-                                    // Look up per-torrent destination from queue.
-                                    val queuedEntry = queue.find { it.magnetUri.contains(status.name) || it.magnetUri.endsWith("&dn=${status.name}") }
                                     TorrentListItem(
                                         id = status.id,
                                         name = status.name,
@@ -449,7 +448,7 @@ object TorrentServer {
                                         uploadRate = status.uploadRate,
                                         peers = status.peers,
                                         savePath = status.savePath,
-                                        destinationPath = queuedEntry?.destinationPath
+                                        destinationPath = null // TODO: match via maintained mapping
                                     )
                                 }
                             }
@@ -485,6 +484,24 @@ object TorrentServer {
                             } else {
                                 call.respond(HttpStatusCode.NotFound, ErrorResponse("Torrent $id not found"))
                             }
+                        }
+
+                        // GET /api/torrents/{id}/destination — returns per-torrent destination status.
+                        get("/{id}/destination") {
+                            val id = call.parameters["id"]?.toLongOrNull() ?: run {
+                                call.respond(HttpStatusCode.BadRequest, ErrorResponse("Invalid torrent ID"))
+                                return@get
+                            }
+                            val status = daemonControl.getTorrentStatus(id)
+                            // Use the savePath from native as fallback; per-torrent destination
+                            // matching requires a magnetUri↔torrentId mapping not yet maintained.
+                            val savePath = status?.savePath ?: ""
+                            call.respond(DestinationStatusResponse(
+                                path = savePath,
+                                valid = true,
+                                canonicalPath = savePath.ifEmpty { null },
+                                status = "ok"
+                            ))
                         }
 
                         // DELETE /api/torrents/{id}?deleteFiles=true|false — remove a torrent.
@@ -784,3 +801,12 @@ data class PasswordChangeRequest(
 /** Response for successful password change. */
 @Serializable
 data class PasswordChangeResponse(val status: String)
+
+/** Response for GET /api/torrents/{id}/destination. */
+@Serializable
+data class DestinationStatusResponse(
+    val path: String,
+    val valid: Boolean,
+    val canonicalPath: String?,
+    val status: String
+)

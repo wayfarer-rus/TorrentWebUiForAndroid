@@ -20,6 +20,8 @@ import android.os.IBinder
 import android.app.Service.STOP_FOREGROUND_REMOVE
 import androidx.core.app.NotificationCompat
 import com.andreiefimov.torrentwebui.events.AlertDispatcher
+import com.andreiefimov.torrentwebui.events.EventBus
+import com.andreiefimov.torrentwebui.events.TorrentEvent
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
@@ -361,19 +363,44 @@ class TorrentDaemon : Service() {
 
         for (entry in queue) {
             try {
+                // Validate destination if present.
+                val isDestinationAvailable = entry.destinationPath?.let { path ->
+                    val validation = DirectoryValidationService.validate(applicationContext, path)
+                    validation.isValid
+                } ?: true // No destination → use global save path (legacy or default)
+
+                if (!isDestinationAvailable && entry.destinationPath != null) {
+                    // Destination unavailable — pause and mark for recovery.
+                    android.util.Log.w(TAG, "Destination unavailable for ${entry.magnetUri}: ${entry.destinationPath}")
+                    EventBus.post(TorrentEvent.DestinationUnavailable(
+                        torrentId = entry.hashCode().toLong(),
+                        path = entry.destinationPath!!
+                    ))
+                }
+
                 // Try to load resume data
                 val resumeData = control.loadTorrentResumeData(entry.hashCode().toLong())
                 if (resumeData != null) {
                     // Add torrent with resume data (libtorrent will use it for fast resume)
                     val torrentId = control.addMagnet(entry.magnetUri)
-                    if (torrentId > 0 && entry.isPaused && !resumePausedEntries) {
-                        control.pauseTorrent(torrentId)
+                    if (torrentId > 0) {
+                        // If destination is unavailable, pause immediately.
+                        if (!isDestinationAvailable && entry.destinationPath != null) {
+                            control.pauseTorrent(torrentId)
+                        } else if (entry.isPaused && !resumePausedEntries) {
+                            control.pauseTorrent(torrentId)
+                        }
                     }
                 } else {
                     // No resume data — add as new torrent (will start downloading)
                     val torrentId = control.addMagnet(entry.magnetUri)
-                    if (torrentId > 0 && entry.isPaused && !resumePausedEntries) {
-                        control.pauseTorrent(torrentId)
+                    if (torrentId > 0) {
+                        // If destination is unavailable, pause immediately.
+                        if (!isDestinationAvailable && entry.destinationPath != null) {
+                            control.pauseTorrent(torrentId)
+                        } else if (entry.isPaused && !resumePausedEntries) {
+                            control.pauseTorrent(torrentId)
+                        }
                     }
                 }
             } catch (e: Exception) {
