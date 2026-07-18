@@ -45,10 +45,27 @@ This file defines the domain vocabulary used across the Torrent WebUI project. C
 
 ## Android UI
 
+### Android Fallback Control
+- The Android app provides onboarding, permissions, daemon health, and emergency override only.
+- It is not a day-to-day torrent-control surface in Milestone 3; the WebUI is the sole primary control surface.
+- Its M3 emergency actions are limited to viewing daemon health and starting or stopping downloads; it does not duplicate the queue list or individual torrent controls.
+
 ### MainActivity
-- The Android app's main screen, showing torrent list and controls.
-- Provides gear icon to open password settings sheet.
+- The Android app's bootstrap, health, and fallback-control screen.
+- M3: deliberately minimal — shows daemon health and Start/Stop downloads only.
+- No queue list, magnet input, or per-torrent controls (those are WebUI-only).
+- Provides gear icon to open password settings sheet (WebUI-only in M3; Android fallback removed).
 - Creates `DefaultAuthManager` and passes it to `TorrentServer.start()`.
+
+### Daemon Control Seam
+- `DaemonControl` interface unifies session operations with lifecycle management (init/destroy).
+- `TorrentSession` implements `DaemonControl` directly; `DaemonControlFactory` provides production and test entry points.
+- `TorrentServer` and `TorrentViewModel` both talk through `DaemonControl`, so the native session can move behind a foreground service without changing callers.
+
+### Queue Store
+- `QueueStore` interface provides durable queue intent and per-torrent resume data storage.
+- `FileQueueStore` uses atomic file replacement for durability; lives in app-private storage.
+- Recovery records are never exposed through WebUI responses, notifications, or logs.
 
 ### Password Settings Sheet
 - Material 3 `ModalBottomSheet` opened from MainActivity toolbar.
@@ -69,12 +86,63 @@ This file defines the domain vocabulary used across the Torrent WebUI project. C
 - VPN split tunneling is external deployment configuration (not app logic).
 
 ### Emulator Acceptance
-- A partial validation run on an Android Virtual Device (AVD).
-- Covers Android UI and emulator-local WebUI behavior, but does not establish reachability from another LAN device.
+- A fully automated end-to-end validation run on an Android Virtual Device (AVD).
+- Milestone 3 uses this as its acceptance environment. It covers installed-app daemon lifecycle and emulator-local WebUI behavior, but does not establish reachability from another LAN device.
+- It exercises the real JNI/libtorrent session with a deterministic local fixture; fakes may supplement unit tests but cannot satisfy M3 end-to-end acceptance.
+- Every run verifies teardown: daemon stopped, recovery records and test downloads removed, local fixture shut down, and no test credentials or torrent metadata left in logs.
 
 ### Physical-Device LAN Acceptance
 - Validation on a physical Android device from a separate LAN browser.
-- The required acceptance gate for the WebUI's LAN-accessibility claim.
+- It remains the required acceptance gate for the WebUI's LAN-accessibility claim, but is deferred from Milestone 3.
+
+## Service Lifecycle
+
+### Torrent Daemon
+- The foreground Android service that is the sole Android-side lifecycle owner of the native torrent session and WebUI server.
+- Android UI and WebUI observe and control the daemon through the shared backend/domain model; neither UI owns the native session lifecycle.
+- The WebUI remains reachable on the LAN while the daemon is active, even if `MainActivity` is backgrounded.
+- The daemon stays active after its transfer queue becomes idle, so the LAN WebUI remains available; only the user’s explicit **Stop downloads** action stops it.
+
+### System-Termination Recovery
+- The daemon restores its persisted queue when Android terminates the torrent service and the user next opens the app.
+- Torrents that were active before system termination are eligible to resume; an explicit user stop is never treated as system termination.
+- Automatic recovery after device reboot is outside Milestone 3.
+
+### Explicit Stop
+- A user-requested stop is durable intent: automatic recovery must leave the torrent service stopped until the user starts it again.
+- Android Force stop is equivalent to explicit stop. It must not trigger automatic recovery; the user must explicitly start downloads again.
+- **Start downloads** resumes every healthy unfinished queue entry, including entries that were individually paused before the explicit stop. Entries with a recoverable error remain paused.
+
+### Recovery Record
+- The app-private record used to restore a queue entry after system termination.
+- Contains typed queue metadata and opaque native resume data. It must not be exposed through the WebUI or written to logs, because it can contain magnet URIs or private tracker URLs.
+
+### Daemon Notification
+- The persistent foreground-service notification exposes aggregate, non-sensitive transfer state only: active-torrent count, overall progress, and aggregate transfer rate.
+- Torrent names, magnet URIs, tracker data, and filesystem paths are never shown in the notification by default, including on the lock screen.
+- It offers one action: **Stop downloads**. This records explicit-stop intent and removes the foreground service; individual torrent controls remain in the WebUI and Android UI.
+- On Android 13+, notification permission is a prerequisite for starting the daemon, so its state and Stop action remain visible.
+
+### Recovery Failure
+- If native resume data is unreadable or rejected, the daemon restores the safe queue metadata as paused with a recoverable error.
+- It neither crashes nor silently discards the record; the user can retry or remove it. Broader corrupted-state recovery is deferred to Milestone 9.
+
+### Daemon Start Failure
+- If native-session startup or restoration fails, the daemon stops cleanly and exposes a non-sensitive recoverable health error.
+- It does not automatically retry in the background; a user-initiated **Start downloads** action retries startup.
+
+### Safe Lifecycle Restart
+- A restart in which the download storage remains available and the daemon can use its recovery records directly.
+- Queue mutations are durable immediately; native resume data is atomically checkpointed at most every 30 seconds. A system termination may therefore lose no more than 30 seconds of transfer progress, never the queue or a previously valid record.
+
+### Safe Stop
+- An explicit **Stop downloads** request that persists queue intent and the latest resume checkpoint before the daemon exits.
+- Persistence has a five-second deadline. On failure or timeout, the daemon remains running and exposes a recoverable error rather than claiming a safe stop.
+
+### Storage Interruption
+- An unexpected loss of download-storage availability, distinct from a safe lifecycle restart.
+- In Milestone 3, the daemon pauses affected entries with a recoverable error and never treats the event as ordinary recovery.
+- Automatic reconnection detection and downloaded-data verification before resuming are Milestone 9 responsibilities.
 
 ## Storage
 

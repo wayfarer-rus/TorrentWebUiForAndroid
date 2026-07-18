@@ -32,13 +32,17 @@ app/
   build.gradle.kts          # Android app module config
   CMakeLists.txt            # Native build (libtorrent + JNI)
   src/main/
-    AndroidManifest.xml     # App manifest, INTERNET permission
-    jni/torrent_jni.cpp     # JNI bridge implementation
+    AndroidManifest.xml     # App manifest, INTERNET/FOREGROUND_SERVICE/POST_NOTIFICATIONS permissions
+    jni/torrent_jni.cpp     # JNI bridge implementation (includes resume data methods)
     java/.../
-      MainActivity.kt       # Compose activity + UI
-      TorrentSession.kt     # Kotlin JNI interface
+      MainActivity.kt       # Compose activity (M3: minimal fallback — health + Start/Stop only)
+      TorrentDaemon.kt      # Foreground service (M3: owns session + WebUI lifecycle)
+      TorrentServer.kt      # Ktor server (M3: adds /api/daemon/health and /api/daemon/stop)
+      TorrentSession.kt     # Kotlin JNI interface (implements DaemonControl)
+      TorrentViewModel.kt   # ViewModel (routes through DaemonControl seam)
+      DaemonControl.kt      # Unified control seam (ops + lifecycle) — M3 addition
+      QueueStore.kt         # Durable queue persistence interface + implementations — M3 addition
       TorrentStatus.kt      # DTO models
-      TorrentViewModel.kt   # ViewModel with polling
 libtorrent/                 # Git submodule (v2.0.10)
 dep/                        # Boost 1.86.0 headers + checksum file
 scripts/
@@ -76,14 +80,59 @@ scripts/
 - **libtorrent**: Pinned git submodule at tag `v2.0.10` (commit `74bc93a37`). Submodule deps (`try_signal`, `asio-gnutls`) are also pinned.
 - **Boost 1.86.0**: Downloaded via `scripts/bootstrap-deps.sh` with SHA-256 verification. Checksum pinned in `dep/boost-sha256.txt` and in the bootstrap script. Not tracked in git (headers-only, ~200MB).
 
-## Session Lifecycle
+## Daemon Control Seam (M3)
 
-1. `TorrentViewModel.init()` calls `TorrentSession.init(context)`
-2. `TorrentSession.init()` loads `libtorrent-jni.so`, creates native session, sets save path
-3. ViewModel starts 1-second polling coroutine
-4. Each poll cycle: `popAlerts()` → `getAllTorrentIds()` → `getTorrentStatus()` for each
-5. On `onCleared()`, ViewModel stops polling and calls `TorrentSession.destroy()`
-6. Native `nativeDestroy()` removes session from global map
+- **`DaemonControl`** interface unifies session operations (`TorrentSessionOps`) with lifecycle management (`init`, `destroy`, `getDiagnostics`, resume data methods).
+- **`TorrentSession`** object implements `DaemonControl` directly.
+- **`DaemonControlFactory`** provides production (`TorrentSession`) and test (mock-backed) entry points.
+- **`TorrentServer`** and **`TorrentViewModel`** both talk through `DaemonControl`, so the native session can move behind a foreground service without changing callers.
+
+## Queue Persistence (M3)
+
+- **`QueueStore`** interface provides durable queue intent and per-torrent resume data storage.
+- **`FileQueueStore`** implementation uses atomic file replacement (write to temp, rename) for durability.
+- **`InMemoryQueueStore`** implementation for unit tests.
+- Queue mutations are made durable before reporting success to the initiating control surface.
+- Native resume data is checkpointed with atomic replacement no less frequently than once every 30 seconds.
+- Recovery records live only in app-private storage and are never exposed through WebUI responses, notifications, or logs.
+
+## Foreground Daemon (M3)
+
+- **`TorrentDaemon`** is a foreground `Service` that owns both the native torrent session and Ktor WebUI server.
+- Lifecycle states: `Stopped`, `Starting`, `Running`, `Stopping`, `RecoveryBlocked`.
+- Android 13+ requires `POST_NOTIFICATIONS` permission before starting as a foreground service.
+- Persistent notification exposes only aggregate state and has one action: **Stop downloads**.
+- Safe stop persists queue intent within a 5-second deadline; on failure, daemon remains running with a recoverable error.
+- On ordinary system termination, the next app launch restores eligible queue entries (at most 30 seconds of transfer progress may be lost).
+- Android Force stop is treated as explicit stop: no automatic recovery, user must explicitly start again.
+
+## WebUI Endpoints (M3)
+
+- **`GET /api/daemon/health`** — returns non-sensitive daemon health status (lifecycle state, recovery blocked flag).
+- **`POST /api/daemon/stop`** — initiates safe stop of the daemon (invokes shared safe-stop behavior).
+- After Stop downloads, the WebUI is unavailable (Ktor server stops) and Android fallback is the required restart path.
+
+## Android Fallback UI (M3)
+
+- **`MainActivity`** is now a deliberately minimal fallback: daemon health display + Start/Stop downloads buttons only.
+- No queue list, magnet input, or per-torrent controls (those are WebUI-only).
+- Password changes remain a WebUI control surface (`POST /api/settings/password`).
+
+## JNI Resume Data Methods (M3)
+
+- **`nativeSaveTorrentResumeData(sessionId, torrentId)`** — calls `torrent_handle::save_resume_data()` (asynchronous).
+- **`nativeLoadTorrentResumeData(sessionId, torrentId)`** — returns serialized `add_torrent_params` as `jbyteArray`.
+- **`nativeRemoveTorrentResumeData(sessionId, torrentId)`** — clears resume data for a torrent.
+
+## Session Lifecycle (M3)
+
+1. `TorrentDaemon.start()` → checks notification permission → creates `DaemonControl` (wraps `TorrentSession`)
+2. Tries to recover queue from `FileQueueStore` (in background coroutine)
+3. Starts Ktor WebUI server
+4. Starts foreground service with notification
+5. Starts 30-second checkpoint timer (calls `saveTorrentResumeData()` for each torrent)
+6. On user **Stop downloads**: cancels timer, saves queue intent with 5s deadline, stops WebUI, destroys session
+7. On ordinary termination: next launch recovers queue and resumes healthy entries
 
 ## Data Flow: Native to Compose UI
 
@@ -96,13 +145,10 @@ scripts/
 7. ViewModel: Polls every 1s, updates `MutableStateFlow<TorrentUiState>`
 8. Compose: `collectAsStateWithLifecycle()` drives UI updates
 
-## Known Limitations (Stage 1)
+## Known Limitations
 
-- **No session persistence across process death.** Session is lost on app kill.
-- **No WebUI.** Android UI only.
-- **No SAF.** App-private storage only.
-- **No foreground service.** Torrents stop when app is backgrounded.
-- **Single session.** No multi-session support.
+- **No SAF.** App-private storage only (Milestone 4 adds user-selectable destinations via SAF).
 - **No encryption/HTTPS tracker support.** OpenSSL disabled.
 - **Polling-based.** No alert-driven updates (alerts are consumed for queue management only).
-- **Magnet-only.** No `.torrent` file support in Stage 1.
+- **Magnet-only.** No `.torrent` file support.
+- **No physical-device LAN acceptance yet.** Emulator acceptance tests compile and are ready for AVD execution.
