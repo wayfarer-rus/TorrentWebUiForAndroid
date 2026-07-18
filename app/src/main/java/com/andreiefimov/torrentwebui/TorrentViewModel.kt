@@ -145,6 +145,10 @@ class TorrentViewModel(application: Application) : AndroidViewModel(application)
                             Log.w("TorrentViewModel", "Destination unavailable for torrent #${event.torrentId}: ${event.path}")
                             refreshTorrents()
                         }
+                        is TorrentEvent.MoveInterrupted -> {
+                            Log.w("TorrentViewModel", "Move interrupted for torrent #${event.torrentId}: ${event.sourcePath} → ${event.targetPath}")
+                            refreshTorrents()
+                        }
                     }
                 }
             }

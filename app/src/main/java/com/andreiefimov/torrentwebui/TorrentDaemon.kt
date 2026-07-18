@@ -255,6 +255,9 @@ class TorrentDaemon : Service() {
                 currentDaemonState = DaemonState.RecoveryBlocked
                 android.util.Log.w(TAG, "Recovery blocked; daemon running with empty queue")
             }
+
+            // Recover interrupted moves — preserves both source and target, never auto-deletes.
+            recoverInterruptedMoves(control)
         }
 
         // Start the Ktor WebUI server
@@ -416,6 +419,56 @@ class TorrentDaemon : Service() {
         }
 
         return if (hadBlockedEntries) RecoveryResult.Blocked else RecoveryResult.OK
+    }
+
+    /**
+     * Inspects the move journal for interrupted moves after queue recovery.
+     * For each interrupted move, pauses the affected torrent and posts a MoveInterrupted event.
+     */
+    private suspend fun recoverInterruptedMoves(control: DaemonControl) {
+        val journal = TorrentServer.moveJournal ?: return
+        val interruptedMoves = try {
+            journal.getInterruptedMoves()
+        } catch (e: Exception) {
+            android.util.Log.e(TAG, "Failed to load move journal: ${e.message}")
+            return
+        }
+
+        if (interruptedMoves.isEmpty()) {
+            android.util.Log.i(TAG, "No interrupted moves to recover")
+            return
+        }
+
+        android.util.Log.w(TAG, "Found ${interruptedMoves.size} interrupted move(s) — preserving both source and target")
+
+        for (move in interruptedMoves) {
+            try {
+                // Find the torrent ID matching this move's source path in the queue.
+                val queue = withContext(Dispatchers.IO) {
+                    queueStore?.loadQueueIntent() ?: emptyList()
+                }
+                val entry = queue.find { it.destinationPath == move.sourcePath }
+                    ?: queue.find { it.magnetUri.contains("torrent_${move.torrentId}") }
+
+                if (entry != null) {
+                    val torrentId = control.addMagnet(entry.magnetUri)
+                    if (torrentId > 0) {
+                        // Pause the torrent — user must explicitly retry or cancel.
+                        control.pauseTorrent(torrentId)
+                        android.util.Log.w(TAG, "Paused torrent $torrentId (move interrupted: ${move.sourcePath} → ${move.targetPath})")
+                        EventBus.post(TorrentEvent.MoveInterrupted(
+                            torrentId = torrentId,
+                            sourcePath = move.sourcePath,
+                            targetPath = move.targetPath
+                        ))
+                    }
+                } else {
+                    android.util.Log.w(TAG, "Interrupted move for torrent ${move.torrentId} has no queue entry — journal retained")
+                }
+            } catch (e: Exception) {
+                android.util.Log.w(TAG, "Failed to recover interrupted move for torrent ${move.torrentId}: ${e.message}")
+            }
+        }
     }
 
     private fun shouldSuppressAutomaticRecovery(): Boolean {

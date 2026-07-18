@@ -342,6 +342,22 @@ object TorrentServer {
                             val state = TorrentServer.daemonControl.storagePermissionState
                             call.respond(StoragePermissionResponse(state.name))
                         }
+
+                        // GET /api/moves — lists all interrupted moves requiring user action.
+                        get("/moves") {
+                            val journal = TorrentServer.moveJournal
+                                ?: run { call.respond(emptyList<InterruptedMoveResponse>()); return@get }
+                            val interrupted = journal.getInterruptedMoves()
+                            call.respond(interrupted.map { move ->
+                                InterruptedMoveResponse(
+                                    torrentId = move.torrentId,
+                                    sourcePath = move.sourcePath,
+                                    targetPath = move.targetPath,
+                                    phase = move.phase.name,
+                                    createdAt = move.createdAt
+                                )
+                            })
+                        }
                     }
 
                     // ---- REST API: torrent management ----
@@ -916,4 +932,14 @@ data class MoveResponse(
     val status: String, // "ok", "interrupted", "error"
     val phase: String,
     val error: String? = null
+)
+
+/** Response item for GET /api/moves — lists interrupted moves requiring user action. */
+@Serializable
+data class InterruptedMoveResponse(
+    val torrentId: Long,
+    val sourcePath: String,
+    val targetPath: String,
+    val phase: String,
+    val createdAt: Long
 )

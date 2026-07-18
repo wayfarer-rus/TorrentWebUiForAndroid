@@ -36,6 +36,13 @@ sealed class TorrentEvent : AppEvent {
         val path: String,
     ) : TorrentEvent()
 
+    /** A data move was interrupted (crash, USB loss, permission revocation). */
+    data class MoveInterrupted(
+        val torrentId: Long,
+        val sourcePath: String,
+        val targetPath: String,
+    ) : TorrentEvent()
+
     companion object {
         /** Human-readable name for a torrent state code. */
         fun stateLabel(state: String): String = when (state) {

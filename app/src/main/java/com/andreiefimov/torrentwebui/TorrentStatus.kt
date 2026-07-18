@@ -19,7 +19,13 @@ data class TorrentStatus(
      * Set to "destination_unavailable" when the torrent's stored destination path is not
      * accessible (USB disconnect, path deleted, permission revoked).
      */
-    val destinationStatus: String? = null
+    val destinationStatus: String? = null,
+    /**
+     * Move status. Null means no move in progress.
+     * Set to "move_interrupted" when a data move was interrupted (crash, USB loss, etc.)
+     * and requires explicit user action to retry or cancel.
+     */
+    val moveStatus: String? = null
 )
 
 /**
