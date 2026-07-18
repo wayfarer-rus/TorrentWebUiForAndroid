@@ -14,6 +14,9 @@
 /gen/
 /out/
 
+# Generated SvelteKit bundle copied into APK assets by the copyWebAssets pre-build task
+/app/src/main/assets/www/
+
 # Gradle files
 .gradle/
 /build/
@@ -26,6 +29,9 @@ local.properties
 
 # Log Files
 *.log
+
+# Local Pi subagent review/run artifacts
+/.pi-subagents/
 
 # Android Studio Navigation editor temp files
 .navigation/
