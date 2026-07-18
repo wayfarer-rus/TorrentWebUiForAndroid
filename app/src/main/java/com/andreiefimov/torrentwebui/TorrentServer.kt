@@ -357,8 +357,39 @@ object TorrentServer {
                                 return@post
                             }
 
-                            // Validate destination path: new torrents must specify a non-legacy path.
-                            val requestedDest = body.destinationPath?.trim()
+                            // Determine destination: use provided, or default to latest-selected.
+                            var destinationPath = body.destinationPath?.trim()
+                            val catalog = TorrentServer.destinationCatalog
+
+                            if (destinationPath == null || destinationPath.isEmpty()) {
+                                // Default to latest-selected.
+                                if (catalog != null) {
+                                    destinationPath = catalog.getLatestSelected()
+                                }
+                            } else {
+                                // Validate the provided destination.
+                                if (isLegacySavePath(destinationPath, TorrentDaemon.getLegacySaveDirectory(appContext)?.absolutePath)) {
+                                    call.respond(
+                                        HttpStatusCode.BadRequest,
+                                        ErrorResponse("Cannot use legacy save directory as destination for new torrents")
+                                    )
+                                    return@post
+                                }
+
+                                val validation = DirectoryValidationService.validate(appContext, destinationPath)
+                                if (!validation.isValid) {
+                                    call.respond(
+                                        HttpStatusCode.BadRequest,
+                                        ErrorResponse(validation.rejectionReason ?: "Invalid destination path")
+                                    )
+                                    return@post
+                                }
+
+                                // Ensure it's in the catalog.
+                                if (catalog != null && !catalog.contains(validation.canonicalPath!!)) {
+                                    catalog.addDestination(validation.canonicalPath!!)
+                                }
+                            }
 
                             // Block storage operations when permission is unavailable.
                             if (!TorrentServer.daemonControl.isStorageReady) {
@@ -379,16 +410,19 @@ object TorrentServer {
                                 return@post
                             }
 
-                            if (requestedDest != null && isLegacySavePath(requestedDest, TorrentDaemon.getLegacySaveDirectory(appContext)?.absolutePath)) {
-                                call.respond(
-                                    HttpStatusCode.BadRequest,
-                                    ErrorResponse("Cannot use legacy save directory as destination for new torrents")
-                                )
-                                return@post
-                            }
-
                             val torrentId = daemonControl.addMagnet(magnetUri)
                             if (torrentId > 0) {
+                                // Persist the destination in the queue.
+                                if (destinationPath != null && TorrentServer.queueStore != null) {
+                                    val queue = TorrentServer.queueStore!!.loadQueueIntent()
+                                    val updatedQueue = queue + QueueEntry(
+                                        magnetUri = magnetUri,
+                                        isPaused = false,
+                                        destinationPath = destinationPath
+                                    )
+                                    TorrentServer.queueStore!!.saveQueueIntent(updatedQueue)
+                                }
+
                                 call.respond(MagnetResponse(id = torrentId, status = "ok"))
                             } else {
                                 call.respond(
@@ -401,8 +435,11 @@ object TorrentServer {
                         // GET /api/torrents — list all torrents with current state.
                         get {
                             val ids = daemonControl.getAllTorrentIds()
+                            val queue = TorrentServer.queueStore?.loadQueueIntent() ?: emptyList()
                             val torrents = ids.mapNotNull { id ->
                                 daemonControl.getTorrentStatus(id)?.let { status ->
+                                    // Look up per-torrent destination from queue.
+                                    val queuedEntry = queue.find { it.magnetUri.contains(status.name) || it.magnetUri.endsWith("&dn=${status.name}") }
                                     TorrentListItem(
                                         id = status.id,
                                         name = status.name,
@@ -411,7 +448,8 @@ object TorrentServer {
                                         downloadRate = status.downloadRate,
                                         uploadRate = status.uploadRate,
                                         peers = status.peers,
-                                        savePath = status.savePath
+                                        savePath = status.savePath,
+                                        destinationPath = queuedEntry?.destinationPath
                                     )
                                 }
                             }
@@ -716,7 +754,8 @@ data class TorrentListItem(
     val downloadRate: Long,
     val uploadRate: Long,
     val peers: Int,
-    val savePath: String
+    val savePath: String,
+    val destinationPath: String? = null
 )
 
 /** Generic success response with status field. */
