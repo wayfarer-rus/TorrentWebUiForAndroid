@@ -100,8 +100,10 @@ dependencies {
     implementation(libs.ktor.server.content.negotiation)
     implementation(libs.ktor.serialization.json)
     implementation(libs.ktor.server.websockets)
+    implementation(libs.ktor.server.auth)
 
     testImplementation(libs.junit)
+    testImplementation(libs.ktor.server.test.host)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
 }

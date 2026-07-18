@@ -68,6 +68,14 @@ This file defines the domain vocabulary used across the Torrent WebUI project. C
 - Accessible from any device on the same LAN.
 - VPN split tunneling is external deployment configuration (not app logic).
 
+### Emulator Acceptance
+- A partial validation run on an Android Virtual Device (AVD).
+- Covers Android UI and emulator-local WebUI behavior, but does not establish reachability from another LAN device.
+
+### Physical-Device LAN Acceptance
+- Validation on a physical Android device from a separate LAN browser.
+- The required acceptance gate for the WebUI's LAN-accessibility claim.
+
 ## Storage
 
 ### Save Path

@@ -67,6 +67,7 @@ This file is the primary authority for how agents and contributors work in this 
 8. **Do not claim a device test** unless it actually ran on a physical device.
 9. **Before adding dependencies**, explain why they are needed and document their license.
 10. **After implementing work, run /code-review before committing.** The implement skill requires it; AGENTS.md enforces it in persistent context.
+11. **Treat grilling as a hard execution boundary.** Start by declaring grilling active and, before every tool call, classify it as read-only planning, permitted glossary/ADR documentation, or operational. During a grilling session, perform only read-only fact finding and domain-glossary/ADR updates. Do not build, test, install, launch, deploy, start/stop an emulator or server, use ADB port forwarding, change code/configuration, or update test results until the user explicitly authorizes execution *after* a complete plan recap. Individual approvals, constraints, supplied commands/values, and new operational-sounding requests never constitute that authorization or silently end grilling; ask the user to explicitly pause/end grilling or authorize the final gate. The mandatory final question is: **"Do you authorize execution of this plan now?"**
 
 ## Agent Workflow and Timeout Rules
 
