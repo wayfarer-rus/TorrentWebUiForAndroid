@@ -101,13 +101,24 @@ class TorrentDaemon : Service() {
 
         /** Returns the current daemon health status (non-sensitive). */
         fun getHealthStatus(context: Context): DaemonHealthStatus {
-            // This is a simplified implementation; in production, you'd query the daemon's state.
-            return DaemonHealthStatus(
+            // Query the actual daemon state from the static holder
+            return currentDaemonState?.let { state ->
+                DaemonHealthStatus(
+                    lifecycleState = state.name,
+                    recoveryBlocked = (state == DaemonState.RecoveryBlocked),
+                    lastRecoverableError = null // TODO: Track recoverable errors
+                )
+            } ?: DaemonHealthStatus(
                 lifecycleState = "Stopped",
                 recoveryBlocked = false,
                 lastRecoverableError = null
             )
         }
+
+        /** Static holder for the current daemon state (updated by the service). */
+        @Volatile
+        var currentDaemonState: DaemonState? = null
+            internal set
     }
 
     /** Non-sensitive daemon health status for WebUI display. */
@@ -159,12 +170,14 @@ class TorrentDaemon : Service() {
         }
 
         currentState.set(DaemonState.Starting)
+        currentDaemonState = DaemonState.Starting
 
         // Initialize the daemon control (currently wraps TorrentSession)
         val control = DaemonControlFactory.create()
         if (!control.init(applicationContext)) {
             android.util.Log.e(TAG, "Failed to initialize daemon control: ${control.lastError}")
             currentState.set(DaemonState.Stopped)
+            currentDaemonState = DaemonState.Stopped
             stopSelf()
             return
         }
@@ -179,6 +192,7 @@ class TorrentDaemon : Service() {
             val recoveryResult = tryRecoverQueue(store, control)
             if (recoveryResult == RecoveryResult.Blocked) {
                 currentState.set(DaemonState.RecoveryBlocked)
+                currentDaemonState = DaemonState.RecoveryBlocked
                 android.util.Log.w(TAG, "Recovery blocked; daemon running with empty queue")
             }
         }
@@ -194,6 +208,7 @@ class TorrentDaemon : Service() {
         startCheckpointTimer()
 
         currentState.set(DaemonState.Running)
+        currentDaemonState = DaemonState.Running
         android.util.Log.i(TAG, "Daemon started successfully")
     }
 
@@ -204,6 +219,7 @@ class TorrentDaemon : Service() {
 
         isForceStop = forceStop
         currentState.set(DaemonState.Stopping)
+        currentDaemonState = DaemonState.Stopping
         android.util.Log.i(TAG, "Stopping daemon (force=$forceStop)")
 
         // Cancel checkpoint timer
@@ -230,6 +246,7 @@ class TorrentDaemon : Service() {
                 // Safe stop failed or timed out — remain running with recoverable error
                 android.util.Log.w(TAG, "Safe stop failed; daemon remains running")
                 currentState.set(DaemonState.Running)
+                currentDaemonState = DaemonState.Running
                 return@launch
             }
 
