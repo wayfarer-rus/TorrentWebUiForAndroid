@@ -149,7 +149,7 @@ scripts/
 
 ## Known Limitations
 
-- **No SAF.** App-private storage only (Milestone 4 adds user-selectable destinations via SAF).
+- **No path-based destination model yet.** The current implementation remains app-private/global-path; Milestone 4's target design is specified in [docs/milestone-4-storage-model.md](docs/milestone-4-storage-model.md).
 - **No encryption/HTTPS tracker support.** OpenSSL disabled.
 - **Polling-based.** No alert-driven updates (alerts are consumed for queue management only).
 - **Magnet-only.** No `.torrent` file support.

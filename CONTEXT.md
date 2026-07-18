@@ -7,9 +7,9 @@ This file defines the domain vocabulary used across the Torrent WebUI project. C
 ### Password
 - The secret credential used to authenticate WebUI access.
 - Stored in Android `SharedPreferences` under key `webui_password`.
-- Default value: `start123`.
+- Default value: `start123`; changing it is optional, but the WebUI continues to remind the user until it changes.
 - Minimum length: 4 characters. No maximum (passphrases allowed).
-- Changed via `POST /api/settings/password` or Android settings screen.
+- Changed via `POST /api/settings/password` or the Setup Wizard.
 - Takes effect immediately on next auth check (no cache).
 
 ### Authentication (HTTP Basic)
@@ -33,15 +33,19 @@ This file defines the domain vocabulary used across the Torrent WebUI project. C
 ## WebUI
 
 ### Torrent WebUI
-- The primary user interface, accessible via LAN browser.
-- Built with SvelteKit 5 (runes).
-- Served by Ktor server from Android assets.
-- Protected by HTTP Basic Authentication.
+- The primary remote state and control interface, accessible via LAN browser after Android startup is ready.
+- Built with SvelteKit 5 (runes), served by Ktor server from Android assets, and protected by HTTP Basic Authentication.
+- It controls application-specific settings and torrent behavior, but not Android platform-permission onboarding. Milestone 4 limits those settings to storage.
 
 ### WebSocket Endpoint
 - `/ws/progress` provides real-time torrent status updates.
 - Bypasses HTTP Basic Auth (page-level auth is the gate).
 - Used by WebUI JavaScript to receive live progress and alerts.
+
+### Android Startup Permission Onboarding
+- The native first-run flow that requests and verifies all Android platform permissions required before the torrent service is usable.
+- It does not own application-specific configuration, which remains a Torrent WebUI control.
+_Avoid_: WebUI setup wizard
 
 ## Android UI
 
@@ -87,13 +91,13 @@ This file defines the domain vocabulary used across the Torrent WebUI project. C
 
 ### Emulator Acceptance
 - A fully automated end-to-end validation run on an Android Virtual Device (AVD).
-- Milestone 3 uses this as its acceptance environment. It covers installed-app daemon lifecycle and emulator-local WebUI behavior, but does not establish reachability from another LAN device.
-- It exercises the real JNI/libtorrent session with a deterministic local fixture; fakes may supplement unit tests but cannot satisfy M3 end-to-end acceptance.
+- It is Milestone 4's primary automated acceptance environment: real APK/JNI, Android permission flow, shared-storage paths, and emulator-local WebUI/API behavior.
+- It exercises the real JNI/libtorrent session with a deterministic local fixture; fakes may supplement unit tests but cannot satisfy M4 end-to-end acceptance.
 - Every run verifies teardown: daemon stopped, recovery records and test downloads removed, local fixture shut down, and no test credentials or torrent metadata left in logs.
 
 ### Physical-Device LAN Acceptance
-- Validation on a physical Android device from a separate LAN browser.
-- It remains the required acceptance gate for the WebUI's LAN-accessibility claim, but is deferred from Milestone 3.
+- Validation on a physical Android device from a separate LAN browser, optionally including Termux/SSH path comparison.
+- It is an optional final deployment check for M4; it confirms the operational path contract in the target environment but does not replace Emulator Acceptance.
 
 ## Service Lifecycle
 
@@ -147,9 +151,49 @@ This file defines the domain vocabulary used across the Torrent WebUI project. C
 ## Storage
 
 ### Save Path
-- The directory where torrent files are downloaded.
+- The directory where one torrent's files are downloaded.
 - In Stage 1: app-private external storage (`/storage/emulated/0/Android/data/...`).
-- In Stage 4+: user-selected via SAF, represented as named logical destinations.
+- In Stage 4+: the verified, copyable device filesystem path of that torrent's Approved Destination.
+
+### Approved Destination
+- A user-approved storage folder that has Android All Files Access and a verified, usable device filesystem path.
+- Each torrent references one Approved Destination. Every verified selection persists in the reusable destination catalog and is removable only when no torrent references it. Its canonical, real, copyable filesystem path is its sole identity everywhere; generic SAF selections are not Approved Destinations.
+
+### Latest Selected Destination
+- The most recently chosen Approved Destination, used as the default for adding a new torrent.
+- It does not change the destination of an existing torrent.
+
+### Legacy Destination
+- The real app-private download path retained by an existing torrent after an upgrade to the path-based destination model.
+- It remains available only to preserve or move that torrent's data; no new torrent may select it.
+
+### Torrent Data Move
+- An explicit operation that relocates the downloaded and partial data of one torrent from its current Approved Destination to another.
+- It pauses only that torrent while it copies and verifies target data, changes the destination only on success, and removes the source only afterward. Failure or cancellation retains the source and leaves the torrent paused with a recoverable error; a move is never implied by changing the Latest Selected Destination or another torrent's destination. Existing target files are never overwritten and may be reused only after normal piece verification.
+
+### Move Interrupted
+- The recoverable paused state after a Torrent Data Move is interrupted by process termination, reboot, storage loss, or All Files Access revocation.
+- The app preserves both source and target data and requires an explicit retry or cancel; it never deletes either side automatically.
+
+### Verified Device Path
+- The actual absolute filesystem path for an Approved Destination, confirmed usable by the app and intended to be copied into device SSH sessions and operational tooling.
+- It is the destination's sole identity: never inferred, fabricated, substituted with a document URI, or accompanied by a label or alias.
+
+### Path Visibility
+- The authenticated WebUI/API and explicit user-requested diagnostics may show a Verified Device Path for operational use.
+- Routine Android logs, notifications, broadcasts, and generic error text never include it.
+
+### All Files Access
+- The broad Android storage permission required for the path-based destination model to access the real device filesystem path used by torrent operations.
+- It is a prerequisite for approving a destination, but it does not itself confine the product to approved folders; backend validation does that. Denial blocks daemon startup; revocation pauses affected torrents until permission is restored and the user explicitly resumes them.
+
+### Storage Volume
+- A real shared or external device filesystem root reported by the backend as a possible starting point for destination selection.
+- It is shown in the WebUI by its actual path, not an inferred or cosmetic alias. Approved Destinations must have a canonical writable path within one.
+
+### WebUI Directory Browser
+- The browser-based destination selector that lists Storage Volumes, accepts pasted device paths, and navigates only backend-validated directories.
+- It never invents paths or delegates selection to an Android file picker after All Files Access is available.
 
 ## Relationships
 

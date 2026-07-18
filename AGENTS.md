@@ -5,9 +5,9 @@ This file is the primary authority for how agents and contributors work in this 
 ## Product Principles
 
 - **Browser-first product.** The main user experience is a modern LAN-accessible WebUI.
-- **Android UI is onboarding, permissions, service health, and fallback control.** The native app exists to bootstrap permissions, manage service lifecycle, and provide emergency overrides.
+- **Android UI is platform-permission bootstrap, service health, and fallback control.** The native app requests required Android permissions at startup, manages service lifecycle, and provides emergency overrides; WebUI owns application-specific controls.
 - **Consumer defaults first.** Advanced torrent settings are hidden by default. The default experience targets a non-technical household user.
-- **Do not expose raw Android paths in the WebUI.** Storage destinations must be represented as human-readable, app-approved logical locations.
+- **Expose only verified canonical paths in the authenticated WebUI.** A storage destination is its real, copyable filesystem path; do not invent aliases, labels, document URIs, or synthetic paths.
 - **No Note 20-specific product strings, hostnames, or assumptions.** The app is device-agnostic.
 - **No dependency on root, Termux, private LAN naming, or a specific VPN provider.** VPN split tunneling is external deployment configuration, not app logic.
 
@@ -28,14 +28,14 @@ This file is the primary authority for how agents and contributors work in this 
 - **No public Internet exposure features** by default.
 - **No router port-forwarding guidance** inside the app.
 - **Do not attempt to inspect or control another VPN app.** Treat VPN routing as external configuration.
-- **Do not log** credentials, tokens, magnet URIs, private tracker URLs, or personal paths unnecessarily.
+- **Do not log** credentials, tokens, magnet URIs, private tracker URLs, or destination paths routinely. Paths are permitted only in authenticated WebUI/API responses and explicit user-requested diagnostics.
 - **Prefer local-only operation** with no cloud dependency.
 
 ## Storage Rules
 
-- Future shared/external storage access must use **Android-supported permission models (SAF)**.
-- Never pretend a browser WebUI can browse arbitrary Android filesystem paths.
-- WebUI destination selection must use **app-approved logical locations**.
+- Milestone 4 shared/external storage uses Android **All Files Access** with an application-level validated storage-volume boundary; generic SAF document URIs are not destinations.
+- The WebUI may browse only backend-validated directories beneath reported shared/external storage volumes.
+- WebUI destination selection uses verified canonical filesystem paths, never inferred paths or document URIs.
 - USB disconnect/reconnect and revoked permissions must be treated as **normal recoverable states**.
 - App-private storage is acceptable only for proof-of-concept stages.
 
@@ -52,7 +52,7 @@ This file is the primary authority for how agents and contributors work in this 
 - **Do not claim success because code compiles.** Real-device validation is required for Android/native/network behavior.
 - Device validation belongs in [TEST_REPORT.md](TEST_REPORT.md).
 - Keep [ARCHITECTURE.md](ARCHITECTURE.md), [ROADMAP.md](ROADMAP.md), [DECISIONS.md](DECISIONS.md), and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) current when relevant changes are made.
-- Add tests where realistic, but **prioritize real-device validation** for Android/native/network behavior.
+- **Add tests where realistic.** Milestone 4 uses emulator E2E as primary automated Android/native/storage acceptance; physical-device/Termux validation is an optional final deployment check.
 - **Do not silently broaden scope** into future stages.
 
 ## Agent Workflow Rules

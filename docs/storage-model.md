@@ -1,45 +1,37 @@
 # Storage Model
 
-## Overview
+## Milestone 4 Model
 
-The app uses a two-phase storage model:
+Milestone 4 uses a path-based storage model. Each torrent has a real, canonical, SSH-copyable filesystem save path rather than a global session path or generic SAF document URI. The complete contract is specified in [Milestone 4 — Path-Based Storage Model](milestone-4-storage-model.md).
 
-1. **Proof-of-concept phase:** App-private external storage only. Used during early development and testing.
-2. **Production phase:** SAF (Storage Access Framework) with user-approved named locations.
+## Permission Ownership
 
-## SAF Model (Production)
+Android requests All Files Access during app startup. It is a prerequisite for daemon storage operations, but it is broad permission: the backend—not Android permission scope—confines the product to approved folders.
 
-### Permission Ownership
+- If denied at startup, the daemon does not start and Android presents retry guidance.
+- If revoked while running, affected torrents pause; the authenticated WebUI shows `storage_permission_required`; add and move actions are rejected.
+- After restoration, the user explicitly resumes affected torrents.
 
-- The Android app is responsible for acquiring folder permissions via SAF.
-- The browser WebUI cannot invoke Android permission pickers directly.
-- Permissions are persisted where possible (`takePersistableUriPermission`).
+## Approved Destinations
 
-### Named Destinations
+An Approved Destination is an existing writable directory with a canonical path under a backend-reported shared/external storage volume. The path itself is its only identity in persistence and the authenticated WebUI/API.
 
-- Approved folders are presented as named, human-readable destinations.
-- Examples: "Internal Storage / Downloads", "USB Drive / Media".
-- Raw Android paths and document URIs are never exposed to users or the WebUI.
+- No labels, aliases, opaque IDs, raw `content://` URIs, or synthetic paths.
+- The WebUI lists reported volume roots, browses validated child directories, and accepts a pasted absolute path.
+- The backend rejects system paths, app-private paths, inaccessible paths, and symlink escapes.
+- Every verified selection is reusable and becomes the default for the next torrent.
+- A destination cannot be removed while a torrent or move journal references it.
 
-### WebUI Storage Selector
+## Per-Torrent Save Paths and Moves
 
-- The WebUI shows a list of approved named destinations.
-- Users select from the list; they cannot browse arbitrary filesystem paths.
-- Adding a new destination requires using the Android app's SAF picker.
+New torrents default to the latest selected destination but may select another Approved Destination. Target files are never overwritten; reuse requires libtorrent piece verification.
 
-### Recovery States
+A move operates on one torrent only: pause it, persist a journal, copy/move and verify data, persist the new path, then remove the source. Failure, cancellation, reboot, storage loss, or permission revocation preserves both copies and leaves the torrent in `move_interrupted` until explicit retry or cancel.
 
-| Event | Behavior |
-|-------|----------|
-| USB disconnect | Destination marked unavailable; torrents paused; resumes on reconnect |
-| USB reconnect | Destination revalidated; torrents resumed |
-| Permission revoked | Destination removed from list; user re-authorizes via Android app |
-| Storage full | Torrents paused; user notified via WebUI and notification |
-| Device reboot | Persisted permissions revalidated; non-persisted permissions require re-authorization |
+## Legacy Data
 
-## Constraints
+Existing app-private M3 downloads retain their actual paths as Legacy Destinations. They can continue or be moved one torrent at a time, but new torrents cannot select them.
 
-- The WebUI never sees raw Android paths.
-- The WebUI never sees document URIs (`content://`).
-- Storage operations are mediated entirely by the Android app.
-- Multiple destinations may be supported; the first implementation targets one approved destination.
+## Path Visibility
+
+Canonical paths may appear in authenticated WebUI/API responses and explicit user-requested diagnostics. They must not appear in routine Android logs, notifications, broadcasts, or generic errors.

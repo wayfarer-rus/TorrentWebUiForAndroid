@@ -1,0 +1,3 @@
+# Per-Torrent Destinations and Explicit Moves
+
+Each torrent owns its destination instead of inheriting an immutable global save path. The WebUI defaults a new torrent to the most recently selected folder, permits the user to choose another verified destination, and supports an explicit move of one torrent's data at a time; it never moves data silently or as a side effect of changing a default. Every verified selection remains in a reusable destination catalog and may be removed only after no torrent references it. A move pauses only its target torrent, copies and verifies data before changing the destination, removes the source only after success, and leaves the source intact with the torrent paused after a failure or cancellation.

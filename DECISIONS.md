@@ -27,10 +27,10 @@
 ## ADR-004: SAF Logical Destination Model
 
 - **Date:** 2026-06-28
-- **Status:** Accepted
+- **Status:** Superseded by [ADR 0015](docs/adr/0015-path-based-destinations-use-all-files-access.md) and [ADR 0023](docs/adr/0023-canonical-path-is-the-destination-identity.md)
 - **Context:** Android's scoped storage model prevents arbitrary filesystem access. The WebUI runs in a browser and cannot invoke Android pickers directly.
-- **Decision:** Android app acquires SAF permissions for specific folders. WebUI presents these as named, human-readable destinations. No raw paths or document URIs exposed.
-- **Consequences:** WebUI storage selection is limited to app-approved locations. Permission revocation requires Android app re-authorization.
+- **Decision:** Superseded. Milestone 4 uses validated canonical filesystem paths with All Files Access, not generic SAF logical destinations.
+- **Consequences:** The current storage contract is [Milestone 4 — Path-Based Storage Model](docs/milestone-4-storage-model.md).
 
 ## ADR-005: No VPN-Provider Coupling
 

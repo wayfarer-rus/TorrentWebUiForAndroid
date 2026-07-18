@@ -73,21 +73,29 @@
 
 ---
 
-## Milestone 4: Storage Model
+## Milestone 4: Path-Based Storage Model
 
-**Objective:** User-selectable download destinations via SAF.
+**Specification:** [milestone-4-storage-model.md](docs/milestone-4-storage-model.md)
+
+**Objective:** Per-torrent download destinations represented by their real, canonical, SSH-copyable filesystem paths.
 
 **Scope:**
-- SAF onboarding flow in Android app.
-- One approved destination at first.
-- Named destination model exposed to WebUI.
-- No raw path selection in WebUI.
+- Android startup requests All Files Access; permission loss is recoverable.
+- WebUI browser/paste selection of backend-validated shared/external storage paths.
+- Reusable canonical-path catalog; latest selection defaults new torrents.
+- Per-torrent save paths, explicit one-torrent moves, conflict verification, and durable move recovery.
+- Legacy preservation of existing app-private downloads.
+
+**Out of scope:** Generic SAF destinations, labels/aliases/opaque IDs, port and torrent-parameter settings, bulk moves, and automatic deletion after interrupted moves.
 
 **Exit criteria:**
-- [ ] User can approve a folder via SAF.
-- [ ] Approved folder appears as named destination in WebUI.
-- [ ] Torrents download to approved location.
-- [ ] Permission revocation handled gracefully.
+- [ ] Android startup handles All Files Access grant/denial and runtime revocation safely.
+- [ ] WebUI exposes only canonical, backend-validated paths and never synthetic/URI destinations.
+- [ ] New torrents use an explicit per-torrent destination; existing target data is never overwritten.
+- [ ] A one-torrent move is recoverable after failure, cancellation, or process termination.
+- [ ] Legacy downloads remain usable or movable without data loss.
+- [ ] Required emulator E2E validates real APK/JNI, permissions, paths, WebUI/API, moves, recovery, and cleanup.
+- [ ] Optional physical-device Termux/SSH results, if run, are recorded in TEST_REPORT.md.
 
 ---
 
