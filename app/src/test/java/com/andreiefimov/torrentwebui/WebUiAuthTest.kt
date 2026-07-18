@@ -11,7 +11,7 @@ import org.junit.Assert.assertEquals
  * level by verifying the same logic used by the Ktor auth middleware and password
  * change endpoint.
  *
- * The auth middleware validates: `credentials.password == authManager.getPassword()`
+ * The auth middleware validates using constant-time comparison.
  * The password change endpoint validates:
  *   - current password matches stored password
  *   - new password is non-empty and at least 4 characters
@@ -26,7 +26,7 @@ class WebUiAuthTest {
         val manager = InMemoryAuthManager("start123")
         val storedPassword = manager.getPassword()
         val result = validateCredentials("anyuser", "start123", storedPassword)
-        assert(result != null) { "Correct password should authenticate" }
+        assert(result) { "Correct password should authenticate" }
     }
 
     @Test
@@ -34,7 +34,7 @@ class WebUiAuthTest {
         val manager = InMemoryAuthManager("start123")
         val storedPassword = manager.getPassword()
         val result = validateCredentials("anyuser", "wrongpass", storedPassword)
-        assertEquals(null, result)
+        assertEquals(false, result)
     }
 
     @Test
@@ -42,7 +42,7 @@ class WebUiAuthTest {
         val manager = InMemoryAuthManager("start123")
         val storedPassword = manager.getPassword()
         val result = validateCredentials("", "", storedPassword)
-        assertEquals(null, result)
+        assertEquals(false, result)
     }
 
     // ---- Password change validation (mirrors endpoint logic) ----
@@ -116,11 +116,11 @@ class WebUiAuthTest {
 
         // Old password should fail
         val oldAuth = validateCredentials("user", "start123", manager.getPassword())
-        assertEquals(null, oldAuth)
+        assertEquals(false, oldAuth)
 
         // New password should work
         val newAuth = validateCredentials("user", "changed1", manager.getPassword())
-        assert(newAuth != null) { "New password should authenticate immediately" }
+        assert(newAuth) { "New password should authenticate immediately" }
     }
 
     // ---- InMemoryAuthManager defaults ----
@@ -151,13 +151,9 @@ class WebUiAuthTest {
         username: String,
         password: String,
         storedPassword: String
-    ): WebUiPrincipal? {
-        // Production: username is ignored; only password is validated
-        return if (password == storedPassword) {
-            WebUiPrincipal(storedPassword)
-        } else {
-            null
-        }
+    ): Boolean {
+        // Production: username is ignored; only password is validated (constant-time comparison)
+        return constantTimeEquals(password, storedPassword)
     }
 
     /** Mirrors the POST /api/settings/password endpoint logic. */
@@ -166,9 +162,9 @@ class WebUiAuthTest {
         currentPassword: String,
         newPassword: String
     ): PasswordChangeResult {
-        // Validate current password
+        // Validate current password (constant-time comparison)
         val currentStored = manager.getPassword()
-        if (currentPassword != currentStored) {
+        if (!constantTimeEquals(currentPassword, currentStored)) {
             return PasswordChangeResult.WrongCurrentPassword
         }
 

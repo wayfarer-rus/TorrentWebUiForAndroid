@@ -35,6 +35,7 @@ import kotlinx.serialization.json.Json
 import io.ktor.server.auth.Authentication
 import io.ktor.server.auth.authenticate
 import io.ktor.server.auth.basic
+import java.security.MessageDigest
 
 /**
  * Ktor HTTP server that serves the SvelteKit WebUI static assets and provides
@@ -57,7 +58,11 @@ object TorrentServer {
     private lateinit var appContext: Context
 
     /** Auth manager — injected for testability. */
-    private var authManager: AuthManager = DefaultAuthManager(null!!)
+    private var authManager: AuthManager = object : AuthManager {
+        @Volatile private var password: String = "start123"
+        override fun getPassword(): String = password
+        override fun setPassword(newPassword: String) { password = newPassword }
+    }
 
     /** Torrent session operations — injected for testability. Defaults to real TorrentSession. */
     internal var sessionOps: TorrentSessionOps = TorrentSession
@@ -103,11 +108,11 @@ object TorrentServer {
 
         // Basic Authentication — protects all routes except /health and /ws/progress.
         application.install(io.ktor.server.auth.Authentication) {
-            basic("webui") {
+            basic("Torrent WebUI") {
                 validate { credentials ->
                     val storedPassword = authManager.getPassword()
-                    if (credentials.password == storedPassword) {
-                        WebUiPrincipal(storedPassword)
+                    if (constantTimeEquals(credentials.password, storedPassword)) {
+                        WebUiPrincipal
                     } else {
                         null
                     }
@@ -167,7 +172,7 @@ object TorrentServer {
 
             // ---- Authenticated routes ----
             route("") {
-                authenticate("webui") {
+                authenticate("Torrent WebUI") {
                     // Serve the WebUI entry point.
                     get("/") {
                         val html = assetReader("www/index.html") ?: return@get call.respondText(
@@ -322,7 +327,7 @@ object TorrentServer {
 
                             // Validate current password.
                             val currentStored = authManager.getPassword()
-                            if (body.currentPassword != currentStored) {
+                            if (!constantTimeEquals(body.currentPassword, currentStored)) {
                                 call.respond(
                                     HttpStatusCode.BadRequest,
                                     ErrorResponse("Current password is incorrect")
@@ -444,7 +449,11 @@ object TorrentServer {
 
     /** Resets test configuration to production defaults. Call after each test. */
     internal fun resetToDefaults() {
-        this.authManager = DefaultAuthManager(null!!)
+        this.authManager = object : AuthManager {
+            @Volatile private var password: String = "start123"
+            override fun getPassword(): String = password
+            override fun setPassword(newPassword: String) { password = newPassword }
+        }
         this.sessionOps = TorrentSession
         this.assetReader = ::readAssetFromAssets
     }
@@ -461,8 +470,15 @@ object TorrentServer {
     }
 }
 
+/** Constant-time string comparison to mitigate timing attacks. */
+internal fun constantTimeEquals(a: String, b: String): Boolean {
+    val aBytes = a.toByteArray(Charsets.UTF_8)
+    val bBytes = b.toByteArray(Charsets.UTF_8)
+    return MessageDigest.isEqual(aBytes, bBytes)
+}
+
 /** Principal for authenticated WebUI requests. Username is ignored; password is the credential. */
-class WebUiPrincipal(private val password: String)
+object WebUiPrincipal
 
 // ---------------------------------------------------------------------------
 // Request/Response DTOs for REST API
