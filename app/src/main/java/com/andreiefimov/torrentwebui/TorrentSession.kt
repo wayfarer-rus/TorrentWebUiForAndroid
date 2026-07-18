@@ -8,12 +8,27 @@ import com.andreiefimov.torrentwebui.events.SessionEvent
 import com.andreiefimov.torrentwebui.events.TorrentEvent
 
 /**
+ * Abstraction over torrent session operations used by the Ktor server.
+ * Allows the server to be tested without native code.
+ */
+interface TorrentSessionOps {
+    fun addMagnet(magnetUri: String): Long
+    fun pauseTorrent(torrentId: Long): Boolean
+    fun resumeTorrent(torrentId: Long): Boolean
+    fun removeTorrent(torrentId: Long, deleteFiles: Boolean): Boolean
+    fun getAllTorrentIds(): List<Long>
+    fun getTorrentStatus(torrentId: Long): TorrentStatus?
+    fun popAlerts(): String
+    val lastError: String?
+}
+
+/**
  * Kotlin-facing JNI bridge to libtorrent.
  *
  * The native layer owns all libtorrent objects. Kotlin never directly
  * owns or destroys native handles. This class is the sole JNI entry point.
  */
-object TorrentSession {
+object TorrentSession : TorrentSessionOps {
 
     private const val TAG = "TorrentSession"
     private var sessionId: Long = 0
@@ -24,7 +39,7 @@ object TorrentSession {
 
     val nativeLoaded get() = _nativeLoaded
     val sessionStarted get() = _sessionStarted
-    val lastError get() = _lastError
+    override val lastError get() = _lastError
     val version get() = _version
 
     // -------------------------------------------------------------------
@@ -112,7 +127,7 @@ object TorrentSession {
     // Torrent operations
     // -------------------------------------------------------------------
 
-    fun addMagnet(magnetUri: String): Long {
+    override fun addMagnet(magnetUri: String): Long {
         return try {
             if (sessionId <= 0) {
                 _lastError = "Session not initialized"
@@ -129,7 +144,7 @@ object TorrentSession {
         }
     }
 
-    fun pauseTorrent(torrentId: Long): Boolean {
+    override fun pauseTorrent(torrentId: Long): Boolean {
         return try {
             if (sessionId <= 0) return false
             nativePauseTorrent(sessionId, torrentId)
@@ -139,7 +154,7 @@ object TorrentSession {
         }
     }
 
-    fun resumeTorrent(torrentId: Long): Boolean {
+    override fun resumeTorrent(torrentId: Long): Boolean {
         return try {
             if (sessionId <= 0) return false
             nativeResumeTorrent(sessionId, torrentId)
@@ -149,7 +164,7 @@ object TorrentSession {
         }
     }
 
-    fun removeTorrent(torrentId: Long, deleteFiles: Boolean): Boolean {
+    override fun removeTorrent(torrentId: Long, deleteFiles: Boolean): Boolean {
         return try {
             if (sessionId <= 0) return false
             nativeRemoveTorrent(sessionId, torrentId, deleteFiles)
@@ -163,7 +178,7 @@ object TorrentSession {
     // Status queries
     // -------------------------------------------------------------------
 
-    fun getAllTorrentIds(): List<Long> {
+    override fun getAllTorrentIds(): List<Long> {
         return try {
             if (sessionId <= 0) return emptyList()
             nativeGetAllTorrentIds(sessionId).toList()
@@ -173,7 +188,7 @@ object TorrentSession {
         }
     }
 
-    fun getTorrentStatus(torrentId: Long): TorrentStatus? {
+    override fun getTorrentStatus(torrentId: Long): TorrentStatus? {
         return try {
             if (sessionId <= 0) return null
             val raw = nativeGetTorrentStatus(sessionId, torrentId) ?: return null
@@ -209,7 +224,7 @@ object TorrentSession {
      * Each alert is an object with: type, message, category, info_hash (hex).
      * Returns "[]" if no alerts or on error.
      */
-    fun popAlerts(): String {
+    override fun popAlerts(): String {
         return try {
             if (sessionId <= 0) return "[]"
             val json = nativeGetAllAlerts(sessionId) ?: "[]"
