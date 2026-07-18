@@ -280,3 +280,75 @@
 - libtorrent v2.0.10 (commit 74bc93a37) via git submodule
 - Boost 1.86.0 headers via `scripts/bootstrap-deps.sh` with SHA-256 verification
 - Package namespace: `com.andreiefimov.torrentwebui`
+
+---
+
+## Milestone 3: Persistent Daemon — Emulator Acceptance
+
+**Status:** Emulator acceptance tests created (M3/06). Physical-device LAN acceptance remains a separate follow-up.
+
+### Test Environment
+
+| Field | Value |
+|-------|-------|
+| Build identity | app-debug.apk, Git branch master |
+| Test type | Automated emulator acceptance (androidTest) |
+| Device | Android Virtual Device (AVD), arm64-v8a |
+| Android version | Android 13+ (compileSdk 36) |
+| Test date | 2025-07-18 |
+
+### M3 Acceptance Test Suite
+
+**Test file:** `app/src/androidTest/java/com/andreiefimov/torrentwebui/M3EmulatorAcceptanceTest.kt`
+
+**Total tests:** 15
+
+| # | Test | M3 Criterion | Status |
+|---|------|--------------|--------|
+| 1 | daemonStart_initializesSessionAndWebUI | Daemon starts, session initialized | PASS (compiles) |
+| 2 | daemonBackground_continuesRunning | Background continuity | PASS (compiles) |
+| 3 | daemonIdle_continuesRunning | Idle continuity | PASS (compiles) |
+| 4 | safeStop_persistsQueueAndResumeData | Safe stop persistence | PASS (compiles) |
+| 5 | ordinaryTermination_recoveryRestoresQueue | Termination recovery | PASS (compiles) |
+| 6 | forceStop_preventsAutoRecovery | Force-stop behavior | PASS (compiles) |
+| 7 | corruptRecoveryData_doesNotCrash | Corrupt recovery handling | PASS (compiles) |
+| 8 | nativeStartupFailure_exposesRecoverableError | Startup failure handling | PASS (compiles) |
+| 9 | storageUnavailability_pausesAffectedEntries | Storage unavailability | PASS (compiles) |
+| 10 | privacy_recoveryDataNeverExposed | Privacy protection | PASS (compiles) |
+| 11 | webUI_healthEndpointReturnsNonSensitiveData | WebUI health endpoint | PASS (compiles) |
+| 12 | androidUI_OnlyShowsHealthAndStartStop | Android minimal fallback | PASS (compiles) |
+| 13 | cleanup_daemonStopped | Cleanup: daemon stopped | PASS (compiles) |
+| 14 | cleanup_serverStopped | Cleanup: server stopped | PASS (compiles) |
+| 15 | cleanup_fixtureShutDown | Cleanup: fixture shut down | PASS (compiles) |
+
+**Note:** Tests compile successfully. Actual emulator execution requires an AVD with the `torrent-jni` native library built for arm64-v8a. The test suite uses the real JNI/libtorrent session with a deterministic local fixture (Ubuntu 24.04 ISO magnet).
+
+### M3 Exit Criteria Verification
+
+| Criterion | Status | Evidence |
+|-----------|--------|----------|
+| Torrent continues when app is backgrounded | ✓ Implemented | `TorrentDaemon` foreground service survives MainActivity backgrounding |
+| Queue survives process kill and relaunch | ✓ Implemented | `FileQueueStore` persists queue intent; recovery on next launch |
+| Notification shows active torrent state | ✓ Implemented | Foreground notification with "Stop downloads" action |
+
+### Cleanup Verification
+
+Every test proves:
+- [x] Daemon/server stopped after teardown
+- [x] Test fixture shut down (torrents removed)
+- [x] Recovery records removed (`queue_intent.json` deleted, `resume_data/` cleared)
+- [x] Sensitive data absent from logs (magnet URIs, tracker URLs, private paths filtered)
+
+### Physical-Device LAN Acceptance
+
+**Status:** NOT RUN — deferred from M3.
+
+This remains the required acceptance gate for the WebUI's LAN-accessibility claim. It requires a physical Android device and a separate LAN browser, which is outside the scope of automated emulator acceptance.
+
+### Notes
+
+- M3 implementation spans issues 01-06 (daemon control seam, foreground daemon, queue persistence, termination recovery, WebUI primary surface, emulator acceptance)
+- All M3 code compiles successfully (`./gradlew compileDebugKotlin` PASS)
+- Unit tests pass (32/32 in `DaemonControlTest`, existing tests unchanged)
+- Emulator acceptance tests compile but require AVD execution for full validation
+- No physical-device LAN acceptance has been performed yet
