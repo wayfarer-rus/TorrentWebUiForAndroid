@@ -4,13 +4,13 @@
 
 **Blocked by:** 01 — Backend Auth Infrastructure
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] Settings gear icon or link in WebUI header
-- [ ] Settings panel/section with password change form
-- [ ] Form fields: current password, new password
-- [ ] Submit calls `POST /api/settings/password` with Basic Auth header
-- [ ] Success message displayed on 200 response
-- [ ] Error message displayed on 400 response (wrong current password, empty new password)
-- [ ] New password takes effect immediately — browser re-prompts on next navigation
-- [ ] Form uses Svelte 5 runes (`$state`)
+- [x] Settings gear icon or link in WebUI header
+- [x] Settings panel/section with password change form
+- [x] Form fields: current password, new password
+- [x] Submit calls `POST /api/settings/password` with Basic Auth header
+- [x] Success message displayed on 200 response
+- [x] Error message displayed on 400 response (wrong current password, empty new password)
+- [x] New password takes effect immediately — browser re-prompts on next navigation
+- [x] Form uses Svelte 5 runes (`$state`)
