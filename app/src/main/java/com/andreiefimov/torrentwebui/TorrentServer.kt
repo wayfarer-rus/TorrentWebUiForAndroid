@@ -74,6 +74,17 @@ object TorrentServer {
     internal var daemonControl: DaemonControl = TorrentSession
 
     /**
+     * Destination catalog — injected for testability. Defaults to a file-backed catalog
+     * rooted in app-private configuration.
+     */
+    internal var destinationCatalog: DestinationCatalog? = null
+
+    /**
+     * Queue store reference — used by destination removal to check for references.
+     */
+    internal var queueStore: QueueStore? = null
+
+    /**
      * Starts the Ktor server on [PORT] bound to 0.0.0.0.
      * Must be called before [stop]. Safe to call multiple times (idempotent).
      *
@@ -219,6 +230,103 @@ object TorrentServer {
 
                     // ---- REST API: storage (Milestone 4) ----
                     route("/api/storage") {
+                        // GET /api/storage/volumes — returns reported storage volume roots.
+                        get("/volumes") {
+                            val volumes = StorageVolumeService.listVolumes(appContext)
+                            call.respond(volumes.map { VolumeResponse(it.path, it.description, it.isRemovable) })
+                        }
+
+                        // GET /api/storage/children/{path} — lists validated child directories.
+                        get("/children/{path}") {
+                            val parentPath = call.parameters["path"] ?: run {
+                                call.respond(HttpStatusCode.BadRequest, ErrorResponse("Missing path parameter"))
+                                return@get
+                            }
+                            val children = DirectoryValidationService.listValidChildren(appContext, parentPath)
+                            call.respond(children)
+                        }
+
+                        // POST /api/storage/validate — validates a pasted absolute path.
+                        post("/validate") {
+                            val body = try {
+                                call.receive<ValidateRequest>()
+                            } catch (e: Exception) {
+                                call.respond(HttpStatusCode.BadRequest, ErrorResponse("Invalid request body"))
+                                return@post
+                            }
+                            val result = DirectoryValidationService.validate(appContext, body.path)
+                            call.respond(ValidateResponse(
+                                path = result.path,
+                                canonicalPath = result.canonicalPath,
+                                isValid = result.isValid,
+                                rejectionReason = result.rejectionReason
+                            ))
+                        }
+
+                        // GET /api/storage/catalog — lists all approved destinations.
+                        get("/catalog") {
+                            val catalog = TorrentServer.destinationCatalog
+                                ?: run { call.respond(emptyList<String>()); return@get }
+                            val destinations = catalog.listDestinations()
+                            call.respond(destinations)
+                        }
+
+                        // POST /api/storage/destinations/{path} — adds a validated path to the catalog.
+                        post("/destinations/{path}") {
+                            val destPath = call.parameters["path"] ?: run {
+                                call.respond(HttpStatusCode.BadRequest, ErrorResponse("Missing path parameter"))
+                                return@post
+                            }
+                            val catalog = TorrentServer.destinationCatalog
+                                ?: run { call.respond(HttpStatusCode.ServiceUnavailable, ErrorResponse("Storage service unavailable")); return@post }
+
+                            // Validate first.
+                            val validation = DirectoryValidationService.validate(appContext, destPath)
+                            if (!validation.isValid) {
+                                call.respond(HttpStatusCode.BadRequest, ErrorResponse(validation.rejectionReason ?: "Invalid path"))
+                                return@post
+                            }
+
+                            val added = catalog.addDestination(validation.canonicalPath!!)
+                            if (added) {
+                                call.respond(AddDestinationResponse(status = "ok", path = validation.canonicalPath))
+                            } else {
+                                call.respond(HttpStatusCode.InternalServerError, ErrorResponse("Failed to add destination"))
+                            }
+                        }
+
+                        // DELETE /api/storage/destinations/{path} — removes a destination (only if unreferenced).
+                        delete("/destinations/{path}") {
+                            val destPath = call.parameters["path"] ?: run {
+                                call.respond(HttpStatusCode.BadRequest, ErrorResponse("Missing path parameter"))
+                                return@delete
+                            }
+                            val catalog = TorrentServer.destinationCatalog
+                                ?: run { call.respond(HttpStatusCode.ServiceUnavailable, ErrorResponse("Storage service unavailable")); return@delete }
+                            val queueStore = TorrentServer.queueStore
+                                ?: run { call.respond(HttpStatusCode.InternalServerError, ErrorResponse("Queue store unavailable")); return@delete }
+
+                            val removed = catalog.removeDestination(destPath, queueStore)
+                            if (removed) {
+                                call.respond(ControlResponse("ok"))
+                            } else {
+                                val queue = queueStore.loadQueueIntent()
+                                if (queue.any { it.destinationPath == destPath }) {
+                                    call.respond(HttpStatusCode.Conflict, ErrorResponse("Destination is still referenced by a queue entry"))
+                                } else {
+                                    call.respond(HttpStatusCode.NotFound, ErrorResponse("Destination not found in catalog"))
+                                }
+                            }
+                        }
+
+                        // GET /api/storage/latest-selected — returns the latest selected destination.
+                        get("/latest-selected") {
+                            val catalog = TorrentServer.destinationCatalog
+                                ?: run { call.respond(LatestSelectedResponse(null)); return@get }
+                            val latest = catalog.getLatestSelected()
+                            call.respond(LatestSelectedResponse(latest))
+                        }
+
                         // GET /api/storage/permission — returns current storage permission state.
                         get("/permission") {
                             val state = TorrentServer.daemonControl.storagePermissionState
@@ -561,6 +669,35 @@ object WebUiPrincipal
 /** Response for GET /api/storage/permission — returns the state name. */
 @Serializable
 data class StoragePermissionResponse(val state: String)
+
+/** Request body for POST /api/storage/validate. */
+@Serializable
+data class ValidateRequest(val path: String = "")
+
+/** Response for POST /api/storage/validate. */
+@Serializable
+data class ValidateResponse(
+    val path: String,
+    val canonicalPath: String?,
+    val isValid: Boolean,
+    val rejectionReason: String?
+)
+
+/** Response item for GET /api/storage/volumes. */
+@Serializable
+data class VolumeResponse(
+    val path: String,
+    val description: String = "",
+    val isRemovable: Boolean = false
+)
+
+/** Response for POST /api/storage/destinations/{path}. */
+@Serializable
+data class AddDestinationResponse(val status: String, val path: String)
+
+/** Response for GET /api/storage/latest-selected. */
+@Serializable
+data class LatestSelectedResponse(val path: String?)
 
 /** Request body for POST /api/torrents/magnet */
 @Serializable

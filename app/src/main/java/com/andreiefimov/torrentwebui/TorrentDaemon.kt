@@ -232,6 +232,13 @@ class TorrentDaemon : Service() {
         val store = FileQueueStore(applicationContext, globalLegacySavePath = legacySavePath)
         this.queueStore = store
 
+        // Initialize destination catalog.
+        val catalog = DestinationCatalog(applicationContext)
+
+        // Expose catalog and queue store to the WebUI server.
+        TorrentServer.destinationCatalog = catalog
+        TorrentServer.queueStore = store
+
         // Try to recover queue from previous session (in background)
         daemonScope.launch {
             val recoveryResult = tryRecoverQueue(store, control, resumePausedEntries = userInitiated)
