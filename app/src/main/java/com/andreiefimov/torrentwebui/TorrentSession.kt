@@ -28,7 +28,7 @@ interface TorrentSessionOps {
  * The native layer owns all libtorrent objects. Kotlin never directly
  * owns or destroys native handles. This class is the sole JNI entry point.
  */
-object TorrentSession : TorrentSessionOps {
+object TorrentSession : DaemonControl {
 
     private const val TAG = "TorrentSession"
     private var sessionId: Long = 0
@@ -78,7 +78,7 @@ object TorrentSession : TorrentSessionOps {
     // Lifecycle
     // -------------------------------------------------------------------
 
-    fun init(context: Context): Boolean {
+    override fun init(context: Context): Boolean {
         return try {
             System.loadLibrary("torrent-jni")
             _nativeLoaded = true
@@ -108,7 +108,7 @@ object TorrentSession : TorrentSessionOps {
         }
     }
 
-    fun destroy() {
+    override fun destroy() {
         try {
             if (sessionId > 0) {
                 nativeDestroy(sessionId)
@@ -273,7 +273,7 @@ object TorrentSession : TorrentSessionOps {
     // -------------------------------------------------------------------
 
 
-    fun getDiagnostics(): NativeDiagnostics {
+    override fun getDiagnostics(): NativeDiagnostics {
         return NativeDiagnostics(
             abi = android.os.Build.SUPPORTED_ABIS.getOrNull(0) ?: "unknown",
             libtorrentVersion = _version,

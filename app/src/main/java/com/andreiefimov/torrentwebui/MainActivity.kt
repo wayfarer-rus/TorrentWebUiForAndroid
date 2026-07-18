@@ -30,6 +30,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val authManager = DefaultAuthManager(this.applicationContext)
+        // Wire the daemon control seam: production uses TorrentSession, tests can inject mocks.
+        viewModel.daemonControl = DaemonControlFactory.create()
         TorrentServer.start(this.applicationContext, authManager)
         setContent {
             MaterialTheme {

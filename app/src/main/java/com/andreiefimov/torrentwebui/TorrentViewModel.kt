@@ -31,6 +31,15 @@ class TorrentViewModel(application: Application) : AndroidViewModel(application)
     // Ubuntu 24.04 LTS Desktop ISO (legal, public domain).
     private val TEST_MAGNET = "magnet:?xt=urn:btih:2e62854a660074367b8104bd09472b04b44d870e&dn=ubuntu-24.04.1-desktop-amd64.iso&tr=udp://tracker.opentrackr.org:1337/announce&tr=udp://open.stealth.si:80/announce&tr=udp://tracker.torrent.eu.org:451/announce&tr=udp://tracker.openbittorrent.com:6969/announce&tr=udp://exodus.desync.com:6969/announce&tr=udp://open.demonii.com:1337/announce"
 
+    /**
+     * Daemon control seam — defaults to production [TorrentSession], injectable for tests.
+     *
+     * This is the unified seam that provides both session operations and lifecycle management.
+     * Future milestones swap in a foreground-service-backed implementation without changing callers.
+     */
+    @Volatile
+    var daemonControl: DaemonControl = TorrentSession
+
     fun addTestMagnet() {
         addMagnet(TEST_MAGNET)
     }
@@ -47,9 +56,9 @@ class TorrentViewModel(application: Application) : AndroidViewModel(application)
 
     private fun startSession() {
         AlertDispatcher.start()
-        val ok = TorrentSession.init(getApplication())
+        val ok = daemonControl.init(getApplication())
         _uiState.value = _uiState.value.copy(
-            diagnostics = TorrentSession.getDiagnostics(),
+            diagnostics = daemonControl.getDiagnostics(),
             sessionStarted = ok
         )
         if (ok) {
@@ -70,16 +79,16 @@ class TorrentViewModel(application: Application) : AndroidViewModel(application)
 
     private fun refreshTorrents() {
         // Alert processing is now handled by AlertDispatcher + EventBus.
-        val ids = TorrentSession.getAllTorrentIds()
+        val ids = daemonControl.getAllTorrentIds()
         val statuses = ids.mapNotNull { id ->
-            TorrentSession.getTorrentStatus(id)
+            daemonControl.getTorrentStatus(id)
         }
         if (statuses.isNotEmpty()) {
             Log.d("TorrentViewModel", "Poll: ${statuses.size} torrents, first=${statuses[0].state} progress=${(statuses[0].progress * 100).toInt()}%")
         }
         _uiState.value = _uiState.value.copy(
             torrents = statuses,
-            diagnostics = TorrentSession.getDiagnostics()
+            diagnostics = daemonControl.getDiagnostics()
         )
     }
 
@@ -92,13 +101,13 @@ class TorrentViewModel(application: Application) : AndroidViewModel(application)
                         is SessionEvent.Started -> {
                             _uiState.value = _uiState.value.copy(
                                 sessionStarted = true,
-                                diagnostics = TorrentSession.getDiagnostics()
+                                diagnostics = daemonControl.getDiagnostics()
                             )
                         }
                         is SessionEvent.Error -> {
                             _uiState.value = _uiState.value.copy(
                                 sessionStarted = false,
-                                diagnostics = TorrentSession.getDiagnostics()
+                                diagnostics = daemonControl.getDiagnostics()
                             )
                         }
                         is SessionEvent.Warning -> {
@@ -107,7 +116,7 @@ class TorrentViewModel(application: Application) : AndroidViewModel(application)
                         is SessionEvent.Stopped -> {
                             _uiState.value = _uiState.value.copy(
                                 sessionStarted = false,
-                                diagnostics = TorrentSession.getDiagnostics()
+                                diagnostics = daemonControl.getDiagnostics()
                             )
                         }
                     }
@@ -159,29 +168,29 @@ class TorrentViewModel(application: Application) : AndroidViewModel(application)
     fun addMagnet(uri: String) {
         Log.d("TorrentViewModel", "Adding magnet: ${uri.take(60)}...")
         viewModelScope.launch {
-            val id = TorrentSession.addMagnet(uri)
+            val id = daemonControl.addMagnet(uri)
             if (id > 0) {
                 Log.d("TorrentViewModel", "Magnet added, id=$id")
                 _uiState.value = _uiState.value.copy(addMagnetError = null)
             } else {
-                Log.e("TorrentViewModel", "Failed to add magnet: ${TorrentSession.lastError}")
+                Log.e("TorrentViewModel", "Failed to add magnet: ${daemonControl.lastError}")
                 _uiState.value = _uiState.value.copy(
-                    addMagnetError = TorrentSession.lastError
+                    addMagnetError = daemonControl.lastError
                 )
             }
         }
     }
 
     fun pauseTorrent(id: Long) {
-        TorrentSession.pauseTorrent(id)
+        daemonControl.pauseTorrent(id)
     }
 
     fun resumeTorrent(id: Long) {
-        TorrentSession.resumeTorrent(id)
+        daemonControl.resumeTorrent(id)
     }
 
     fun removeTorrent(id: Long, deleteFiles: Boolean) {
-        TorrentSession.removeTorrent(id, deleteFiles)
+        daemonControl.removeTorrent(id, deleteFiles)
     }
 
     override fun onCleared() {
@@ -189,7 +198,7 @@ class TorrentViewModel(application: Application) : AndroidViewModel(application)
         pollingJob?.cancel()
         eventSubscription?.cancel()
         AlertDispatcher.stop()
-        TorrentSession.destroy()
+        daemonControl.destroy()
     }
 }
 

@@ -64,8 +64,13 @@ object TorrentServer {
         override fun setPassword(newPassword: String) { password = newPassword }
     }
 
-    /** Torrent session operations — injected for testability. Defaults to real TorrentSession. */
-    internal var sessionOps: TorrentSessionOps = TorrentSession
+    /**
+     * Daemon control seam — injected for testability. Defaults to the production [TorrentSession].
+     *
+     * This is the unified seam that provides both session operations and lifecycle management.
+     * Future milestones swap in a foreground-service-backed implementation without changing callers.
+     */
+    internal var daemonControl: DaemonControl = TorrentSession
 
     /**
      * Starts the Ktor server on [PORT] bound to 0.0.0.0.
@@ -234,22 +239,22 @@ object TorrentServer {
                                 return@post
                             }
 
-                            val torrentId = sessionOps.addMagnet(magnetUri)
+                            val torrentId = daemonControl.addMagnet(magnetUri)
                             if (torrentId > 0) {
                                 call.respond(MagnetResponse(id = torrentId, status = "ok"))
                             } else {
                                 call.respond(
                                     HttpStatusCode.InternalServerError,
-                                    ErrorResponse(sessionOps.lastError ?: "Failed to add magnet")
+                                    ErrorResponse(daemonControl.lastError ?: "Failed to add magnet")
                                 )
                             }
                         }
 
                         // GET /api/torrents — list all torrents with current state.
                         get {
-                            val ids = sessionOps.getAllTorrentIds()
+                            val ids = daemonControl.getAllTorrentIds()
                             val torrents = ids.mapNotNull { id ->
-                                sessionOps.getTorrentStatus(id)?.let { status ->
+                                daemonControl.getTorrentStatus(id)?.let { status ->
                                     TorrentListItem(
                                         id = status.id,
                                         name = status.name,
@@ -273,7 +278,7 @@ object TorrentServer {
                                 return@put
                             }
                             Log.i(TAG, "Pause request for torrent $id")
-                            if (sessionOps.pauseTorrent(id)) {
+                            if (daemonControl.pauseTorrent(id)) {
                                 Log.i(TAG, "Pause successful for torrent $id")
                                 call.respond(ControlResponse("ok"))
                             } else {
@@ -289,7 +294,7 @@ object TorrentServer {
                                 call.respond(HttpStatusCode.BadRequest, ErrorResponse("Invalid torrent ID"))
                                 return@put
                             }
-                            if (sessionOps.resumeTorrent(id)) {
+                            if (daemonControl.resumeTorrent(id)) {
                                 call.respond(ControlResponse("ok"))
                             } else {
                                 call.respond(HttpStatusCode.NotFound, ErrorResponse("Torrent $id not found"))
@@ -303,7 +308,7 @@ object TorrentServer {
                                 return@delete
                             }
                             val deleteFiles = call.request.queryParameters["deleteFiles"]?.toBooleanStrictOrNull() ?: false
-                            if (sessionOps.removeTorrent(id, deleteFiles)) {
+                            if (daemonControl.removeTorrent(id, deleteFiles)) {
                                 call.respond(ControlResponse("ok"))
                             } else {
                                 call.respond(HttpStatusCode.NotFound, ErrorResponse("Torrent $id not found"))
@@ -357,9 +362,9 @@ object TorrentServer {
 
     /** Builds a JSON snapshot of all torrents and pending alerts. */
     private fun buildSnapshotJson(): String {
-        val ids = sessionOps.getAllTorrentIds()
+        val ids = daemonControl.getAllTorrentIds()
         val torrents = ids.mapNotNull { id ->
-            sessionOps.getTorrentStatus(id)?.let { s ->
+            daemonControl.getTorrentStatus(id)?.let { s ->
                 TorrentListItem(
                     id = s.id, name = s.name, state = s.state, progress = s.progress,
                     downloadRate = s.downloadRate, uploadRate = s.uploadRate,
@@ -380,7 +385,7 @@ object TorrentServer {
         val envelope = """{"type":"torrents","data":$torrentsJson}"""
 
         // Append any pending alerts as separate messages.
-        val alertJson = sessionOps.popAlerts()
+        val alertJson = daemonControl.popAlerts()
         if (alertJson != "[]") {
             return envelope + alertJson
         }
@@ -439,11 +444,11 @@ object TorrentServer {
      */
     internal fun configureForTest(
         authManager: AuthManager,
-        sessionOps: TorrentSessionOps,
+        daemonControl: DaemonControl,
         assetReader: (String) -> String? = { null }
     ) {
         this.authManager = authManager
-        this.sessionOps = sessionOps
+        this.daemonControl = daemonControl
         this.assetReader = assetReader
     }
 
@@ -454,7 +459,7 @@ object TorrentServer {
             override fun getPassword(): String = password
             override fun setPassword(newPassword: String) { password = newPassword }
         }
-        this.sessionOps = TorrentSession
+        this.daemonControl = TorrentSession
         this.assetReader = ::readAssetFromAssets
     }
 
