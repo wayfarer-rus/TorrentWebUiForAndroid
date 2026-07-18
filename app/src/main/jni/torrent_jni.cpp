@@ -525,7 +525,8 @@ Java_com_andreiefimov_torrentwebui_TorrentSession_nativeGetTorrentIdByHash(
 // ---------------------------------------------------------------------------
 // JNI: Save torrent resume data (for checkpointing)
 // Asynchronous: calls save_resume_data() and returns immediately.
-// The actual data is retrieved via nativeGetTorrentResumeData().
+// The actual data is retrieved via the save_resume_data_alert posted to the alert queue.
+// For M3, we use the QueueStore for durable persistence; this method is a no-op placeholder.
 // ---------------------------------------------------------------------------
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_andreiefimov_torrentwebui_TorrentSession_nativeSaveTorrentResumeData(
@@ -551,60 +552,24 @@ Java_com_andreiefimov_torrentwebui_TorrentSession_nativeSaveTorrentResumeData(
 
 // ---------------------------------------------------------------------------
 // JNI: Load torrent resume data (for recovery)
-// Returns jbyteArray with the resume data, or null if none exists.
+// Returns null — native resume data is not available in libtorrent 2.0.10
+// without processing the save_resume_data_alert asynchronously.
+// QueueStore handles durable persistence for M3.
 // ---------------------------------------------------------------------------
 extern "C" JNIEXPORT jbyteArray JNICALL
 Java_com_andreiefimov_torrentwebui_TorrentSession_nativeLoadTorrentResumeData(
-        JNIEnv* env, jobject, jlong jId, jlong jTorrentId) {
-    try {
-        std::lock_guard<std::mutex> lock(g_mutex);
-        uint64_t sid = static_cast<uint64_t>(jId);
-        auto sit = g_sessions.find(sid);
-        if (sit == g_sessions.end()) return nullptr;
-
-        uint64_t tid = static_cast<uint64_t>(jTorrentId);
-        auto tit = sit->second.torrents.find(tid);
-        if (tit == sit->second.torrents.end()) return nullptr;
-
-        // Load resume data from the torrent handle
-        lt::add_torrent_params params = tit->second.status().resume_data;
-        if (params.info_hashes.is_all_zeros()) return nullptr;
-
-        // Serialize the resume data to a byte array
-        lt::entry e = params.make_entry();
-        std::vector<char> buf;
-        lt::bencode(std::back_inserter(buf), e);
-
-        jbyteArray result = env->NewByteArray(static_cast<jsize>(buf.size()));
-        env->SetByteArrayRegion(result, 0, static_cast<jsize>(buf.size()),
-                                reinterpret_cast<const jbyte*>(buf.data()));
-        return result;
-    } catch (std::exception const& e) {
-        LOGE("nativeLoadTorrentResumeData failed: %s", e.what());
-        return nullptr;
-    }
+        JNIEnv*, jobject, jlong, jlong) {
+    // Native resume data requires async alert processing; not available synchronously.
+    // QueueStore handles durable persistence for M3.
+    return nullptr;
 }
 
 // ---------------------------------------------------------------------------
 // JNI: Remove torrent resume data (called when removing a torrent)
+// No-op for M3 — QueueStore handles cleanup.
 // ---------------------------------------------------------------------------
 extern "C" JNIEXPORT void JNICALL
 Java_com_andreiefimov_torrentwebui_TorrentSession_nativeRemoveTorrentResumeData(
-        JNIEnv*, jobject, jlong jId, jlong jTorrentId) {
-    try {
-        std::lock_guard<std::mutex> lock(g_mutex);
-        uint64_t sid = static_cast<uint64_t>(jId);
-        auto sit = g_sessions.find(sid);
-        if (sit == g_sessions.end()) return;
-
-        uint64_t tid = static_cast<uint64_t>(jTorrentId);
-        auto tit = sit->second.torrents.find(tid);
-        if (tit == sit->second.torrents.end()) return;
-
-        // Clear resume data by removing the torrent and re-adding without resume params
-        // This is a simplified approach; a more robust solution would track resume data separately
-        LOGI("Removed resume data for torrent %llu", tid);
-    } catch (std::exception const& e) {
-        LOGE("nativeRemoveTorrentResumeData failed: %s", e.what());
-    }
+        JNIEnv*, jobject, jlong, jlong) {
+    // No-op for M3 — QueueStore handles cleanup.
 }

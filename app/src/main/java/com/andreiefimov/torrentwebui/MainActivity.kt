@@ -1,8 +1,13 @@
 package com.andreiefimov.torrentwebui
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -20,10 +25,26 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 
 class MainActivity : ComponentActivity() {
     private val viewModel: TorrentViewModel by viewModels()
+
+    /** Permission launcher for POST_NOTIFICATIONS (Android 13+) */
+    private val notificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            TorrentDaemon.start(this.applicationContext)
+        } else {
+            Toast.makeText(
+                this,
+                "Notification permission is required for the daemon to run as a foreground service.",
+                Toast.LENGTH_LONG
+            ).show()
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -31,8 +52,21 @@ class MainActivity : ComponentActivity() {
         // Wire the daemon control seam: production uses TorrentSession, tests can inject mocks.
         viewModel.daemonControl = DaemonControlFactory.create()
 
-        // Start the foreground daemon service (owns session + WebUI lifecycle).
-        TorrentDaemon.start(this.applicationContext)
+        // Request notification permission (Android 13+) before starting daemon
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val permissionGranted = ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+
+            if (permissionGranted) {
+                TorrentDaemon.start(this.applicationContext)
+            } else {
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        } else {
+            TorrentDaemon.start(this.applicationContext)
+        }
 
         setContent {
             MaterialTheme {

@@ -164,7 +164,11 @@ class TorrentDaemon : Service() {
         // Check notification permission (Android 13+)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (!checkNotificationPermission()) {
-                android.util.Log.w(TAG, "Notification permission denied; daemon cannot start as foreground service")
+                android.util.Log.w(TAG, "Notification permission denied; cannot start foreground service")
+                // Don't call stopSelf() here — MainActivity should have requested permission first.
+                // If we reach here, something went wrong with the permission flow.
+                currentState.set(DaemonState.Stopped)
+                currentDaemonState = DaemonState.Stopped
                 return
             }
         }
@@ -200,7 +204,7 @@ class TorrentDaemon : Service() {
         // Start the Ktor WebUI server
         TorrentServer.start(applicationContext)
 
-        // Start as foreground service with notification
+        // Start as foreground service with notification (MUST be called within 5 seconds of startForegroundService)
         val notification = buildNotification()
         startForeground(NOTIFICATION_ID, notification)
 
