@@ -355,6 +355,22 @@ object TorrentServer {
                             call.respond(PasswordChangeResponse(status = "ok"))
                         }
                     }
+
+                    // ---- REST API: daemon health and control ----
+                    route("/api/daemon") {
+                        // GET /api/daemon/health — returns non-sensitive daemon health status.
+                        get("/health") {
+                            val health = TorrentDaemon.getHealthStatus(appContext)
+                            call.respond(health)
+                        }
+
+                        // POST /api/daemon/stop — initiates safe stop of the daemon.
+                        post("/stop") {
+                            Log.i(TAG, "Stop downloads requested from WebUI")
+                            TorrentDaemon.stop(appContext)
+                            call.respond(ControlResponse("ok"))
+                        }
+                    }
                 }
             }
         }

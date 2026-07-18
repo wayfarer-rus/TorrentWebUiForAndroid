@@ -98,7 +98,24 @@ class TorrentDaemon : Service() {
             // This is a simplified check; in production, you'd track service state.
             return false
         }
+
+        /** Returns the current daemon health status (non-sensitive). */
+        fun getHealthStatus(context: Context): DaemonHealthStatus {
+            // This is a simplified implementation; in production, you'd query the daemon's state.
+            return DaemonHealthStatus(
+                lifecycleState = "Stopped",
+                recoveryBlocked = false,
+                lastRecoverableError = null
+            )
+        }
     }
+
+    /** Non-sensitive daemon health status for WebUI display. */
+    data class DaemonHealthStatus(
+        val lifecycleState: String,
+        val recoveryBlocked: Boolean,
+        val lastRecoverableError: String?
+    )
 
     private var daemonControl: DaemonControl? = null
     private var queueStore: QueueStore? = null
