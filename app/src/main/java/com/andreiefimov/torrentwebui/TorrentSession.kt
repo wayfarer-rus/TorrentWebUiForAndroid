@@ -315,6 +315,38 @@ object TorrentSession : DaemonControl {
     private fun stateCodeToString(code: Int): String = mapState(code, paused = false)
 
     // -------------------------------------------------------------------
+    // Resume data checkpointing (for M3 persistence)
+    // -------------------------------------------------------------------
+
+    override fun saveTorrentResumeData(torrentId: Long): Boolean {
+        return try {
+            if (sessionId <= 0) return false
+            nativeSaveTorrentResumeData(sessionId, torrentId)
+        } catch (e: Exception) {
+            _lastError = e.message
+            false
+        }
+    }
+
+    override fun loadTorrentResumeData(torrentId: Long): ByteArray? {
+        return try {
+            if (sessionId <= 0) return null
+            nativeLoadTorrentResumeData(sessionId, torrentId)
+        } catch (e: Exception) {
+            _lastError = e.message
+            null
+        }
+    }
+
+    override fun removeTorrentResumeData(torrentId: Long) {
+        try {
+            if (sessionId > 0) nativeRemoveTorrentResumeData(sessionId, torrentId)
+        } catch (e: Exception) {
+            _lastError = e.message
+        }
+    }
+
+    // -------------------------------------------------------------------
     // JNI entry points (extern)
     // -------------------------------------------------------------------
 
@@ -332,4 +364,7 @@ object TorrentSession : DaemonControl {
     private external fun nativeSetSavePath(sessionId: Long, path: String)
 
     private external fun nativeGetSavePath(sessionId: Long): String
+    private external fun nativeSaveTorrentResumeData(sessionId: Long, torrentId: Long): Boolean
+    private external fun nativeLoadTorrentResumeData(sessionId: Long, torrentId: Long): ByteArray?
+    private external fun nativeRemoveTorrentResumeData(sessionId: Long, torrentId: Long)
 }

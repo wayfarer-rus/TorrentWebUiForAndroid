@@ -31,6 +31,23 @@ interface DaemonControl : TorrentSessionOps {
      * Returns diagnostics data from the native layer (ABI, version, load status, etc.).
      */
     fun getDiagnostics(): NativeDiagnostics
+
+    /**
+     * Saves native resume data for a specific torrent. Called during checkpointing.
+     * @return true if save was successful, false otherwise.
+     */
+    fun saveTorrentResumeData(torrentId: Long): Boolean
+
+    /**
+     * Loads native resume data for a specific torrent. Called during recovery.
+     * @return the resume data, or null if none exists.
+     */
+    fun loadTorrentResumeData(torrentId: Long): ByteArray?
+
+    /**
+     * Removes native resume data for a specific torrent. Called when removing a torrent.
+     */
+    fun removeTorrentResumeData(torrentId: Long)
 }
 
 /**
@@ -65,5 +82,9 @@ object DaemonControlFactory {
         override fun getTorrentStatus(torrentId: Long): TorrentStatus? = sessionOps.getTorrentStatus(torrentId)
         override fun popAlerts(): String = sessionOps.popAlerts()
         override val lastError: String? get() = sessionOps.lastError
+        // Resume data methods (test variant always returns null/false)
+        override fun saveTorrentResumeData(torrentId: Long): Boolean = false
+        override fun loadTorrentResumeData(torrentId: Long): ByteArray? = null
+        override fun removeTorrentResumeData(torrentId: Long) {}
     }
 }
