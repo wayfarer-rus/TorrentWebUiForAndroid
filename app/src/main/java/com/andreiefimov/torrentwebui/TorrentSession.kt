@@ -182,7 +182,7 @@ object TorrentSession {
             TorrentStatus(
                 id = raw[0],
                 name = name,
-                state = stateCodeToString(raw[5].toInt()),
+                state = mapState(raw[5].toInt(), raw[6] == 1L),
                 progress = raw[1].toFloat() / 1000f,
                 downloadRate = raw[2],
                 uploadRate = raw[3],
@@ -272,7 +272,12 @@ object TorrentSession {
     // State mapping
     // -------------------------------------------------------------------
 
-    private fun stateCodeToString(code: Int): String {
+    private fun mapState(code: Int, paused: Boolean): String {
+        // If the torrent is explicitly paused (pause flag set), report it as paused
+        // regardless of current state code. This handles the case where pause() is called
+        // during metadata download (state=2) but libtorrent keeps reporting "downloading_metadata".
+        if (paused && code != 10) return "paused"
+
         return when (code) {
             0 -> "queued_for_checking"
             1 -> "checking_files"
@@ -288,6 +293,11 @@ object TorrentSession {
             else -> "unknown($code)"
         }
     }
+
+    /** @deprecated Use [mapState] instead. Kept for backward compatibility with any callers that
+     *  still reference the old name. */
+    @Suppress("unused")
+    private fun stateCodeToString(code: Int): String = mapState(code, paused = false)
 
     // -------------------------------------------------------------------
     // JNI entry points (extern)

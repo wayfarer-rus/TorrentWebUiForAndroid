@@ -180,8 +180,10 @@ Java_com_andreiefimov_torrentwebui_TorrentSession_nativePauseTorrent(
         auto tit = sit->second.torrents.find(tid);
         if (tit == sit->second.torrents.end()) return JNI_FALSE;
 
-        LOGI("Pausing torrent %llu", tid);
-        tit->second.pause();
+        LOGI("Pausing torrent %llu", (uint64_t)tid);
+        // Use set_flags to explicitly set the paused flag, ensuring it's reflected immediately
+        // in torrent_status.flags. The pause() method may not set the flag synchronously.
+        tit->second.set_flags(lt::torrent_flags::paused);
         return JNI_TRUE;
     } catch (std::exception const& e) {
         LOGE("nativePauseTorrent failed: %s", e.what());
@@ -254,19 +256,25 @@ Java_com_andreiefimov_torrentwebui_TorrentSession_nativeGetTorrentStatus(
         if (tit == sit->second.torrents.end()) return nullptr;
 
         lt::torrent_status st = tit->second.status(lt::torrent_handle::query_name);
-        LOGI("Torrent %llu state=%d name=%s", tid, (int)st.state, st.name.c_str());
+        // Check if torrent is paused by examining the pause flag from handle flags (more reliable than status.flags).
+        lt::torrent_flags_t handleFlags = tit->second.flags();
+        bool paused = (handleFlags & lt::torrent_flags::paused) != 0;
+        LOGI("Torrent %llu state=%d name=%s paused=%d (handleFlags=0x%x, status.flags=0x%x)",
+             (uint64_t)tid, (int)st.state, st.name.c_str(), (int)paused,
+             static_cast<unsigned>(handleFlags), static_cast<unsigned>(st.flags));
 
-        jlong values[6] = {
+        jlong values[7] = {
             static_cast<jlong>(tid),
             static_cast<jlong>(st.progress * 1000.0f),
             static_cast<jlong>(st.download_rate),
             static_cast<jlong>(st.upload_rate),
             static_cast<jlong>(st.num_peers),
-            static_cast<jlong>(static_cast<int>(st.state))
+            static_cast<jlong>(static_cast<int>(st.state)),
+            static_cast<jlong>(paused ? 1 : 0)
         };
 
-        jlongArray arr = env->NewLongArray(6);
-        env->SetLongArrayRegion(arr, 0, 6, values);
+        jlongArray arr = env->NewLongArray(7);
+        env->SetLongArrayRegion(arr, 0, 7, values);
         return arr;
     } catch (std::exception const& e) {
         LOGE("nativeGetTorrentStatus failed: %s", e.what());

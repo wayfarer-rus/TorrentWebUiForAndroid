@@ -64,9 +64,18 @@ android {
     ndkVersion = "29.0.14206865"
 }
 
-// Pre-build: rename _app → app-build before Gradle's asset merge filters underscore dirs.
-// This is handled by the npm copy-assets script (web/package.json), which runs before Gradle.
-// The assets directory should already contain app-build/ (not _app/) at build time.
+// Pre-build: automatically copy SvelteKit build output to assets/www/ before Gradle assembles the APK.
+tasks.register("copyWebAssets", Exec::class) {
+    group = "build"
+    description = "Runs npm run copy-assets to build SvelteKit and deploy to assets/www/"
+    workingDir = rootProject.file("web")
+    commandLine("npm", "run", "copy-assets")
+}
+
+// Wire copyWebAssets to run before any APK assembly task.
+tasks.named("preBuild").configure {
+    dependsOn(tasks.named("copyWebAssets"))
+}
 
 dependencies {
     implementation(libs.androidx.core.ktx)
