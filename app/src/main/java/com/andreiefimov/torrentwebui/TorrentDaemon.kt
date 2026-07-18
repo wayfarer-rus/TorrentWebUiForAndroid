@@ -237,9 +237,15 @@ class TorrentDaemon : Service() {
         // Initialize destination catalog.
         val catalog = DestinationCatalog(applicationContext)
 
-        // Expose catalog and queue store to the WebUI server.
+        // Initialize move journal and service.
+        val moveJournal = MoveJournal(applicationContext)
+        val moveService = MoveService(applicationContext, store, moveJournal)
+
+        // Expose catalog, queue store, and move service to the WebUI server.
         TorrentServer.destinationCatalog = catalog
         TorrentServer.queueStore = store
+        TorrentServer.moveJournal = moveJournal
+        TorrentServer.moveService = moveService
 
         // Try to recover queue from previous session (in background)
         daemonScope.launch {

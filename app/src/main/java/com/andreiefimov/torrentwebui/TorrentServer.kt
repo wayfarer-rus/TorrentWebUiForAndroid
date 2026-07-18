@@ -85,6 +85,16 @@ object TorrentServer {
     internal var queueStore: QueueStore? = null
 
     /**
+     * Move journal — tracks active and interrupted move operations.
+     */
+    internal var moveJournal: MoveJournal? = null
+
+    /**
+     * Move service — executes safe torrent data moves between destinations.
+     */
+    internal var moveService: MoveService? = null
+
+    /**
      * Starts the Ktor server on [PORT] bound to 0.0.0.0.
      * Must be called before [stop]. Safe to call multiple times (idempotent).
      *
@@ -504,6 +514,91 @@ object TorrentServer {
                             ))
                         }
 
+                        // POST /api/torrents/{id}/move — moves a torrent to a new destination.
+                        post("/{id}/move") {
+                            val id = call.parameters["id"]?.toLongOrNull() ?: run {
+                                call.respond(HttpStatusCode.BadRequest, ErrorResponse("Invalid torrent ID"))
+                                return@post
+                            }
+
+                            // Check storage permission.
+                            if (!daemonControl.isStorageReady) {
+                                call.respond(
+                                    HttpStatusCode.ServiceUnavailable,
+                                    ErrorResponse("Storage permission required")
+                                )
+                                return@post
+                            }
+
+                            val moveService = TorrentServer.moveService
+                                ?: run { call.respond(HttpStatusCode.ServiceUnavailable, ErrorResponse("Move service unavailable")); return@post }
+
+                            val body = try {
+                                call.receive<MoveRequest>()
+                            } catch (e: Exception) {
+                                call.respond(HttpStatusCode.BadRequest, ErrorResponse("Invalid request body"))
+                                return@post
+                            }
+
+                            val result = moveService.startMove(id, body.destinationPath)
+                            when (result.status) {
+                                "ok" -> call.respond(MoveResponse(status = "ok", phase = "completed"))
+                                "interrupted" -> call.respond(
+                                    HttpStatusCode.Conflict,
+                                    MoveResponse(status = "interrupted", phase = "interrupted", error = result.recoverableError)
+                                )
+                                else -> call.respond(
+                                    HttpStatusCode.BadRequest,
+                                    MoveResponse(status = "error", phase = "error", error = result.recoverableError)
+                                )
+                            }
+                        }
+
+                        // POST /api/torrents/{id}/move/cancel — cancels an active move.
+                        post("/{id}/move/cancel") {
+                            val id = call.parameters["id"]?.toLongOrNull() ?: run {
+                                call.respond(HttpStatusCode.BadRequest, ErrorResponse("Invalid torrent ID"))
+                                return@post
+                            }
+
+                            val moveService = TorrentServer.moveService
+                                ?: run { call.respond(HttpStatusCode.ServiceUnavailable, ErrorResponse("Move service unavailable")); return@post }
+
+                            val cancelled = moveService.cancelMove(id)
+                            if (cancelled) {
+                                call.respond(ControlResponse("ok"))
+                            } else {
+                                call.respond(HttpStatusCode.NotFound, ErrorResponse("No active move to cancel"))
+                            }
+                        }
+
+                        // POST /api/torrents/{id}/move/retry — retries an interrupted move.
+                        post("/{id}/move/retry") {
+                            val id = call.parameters["id"]?.toLongOrNull() ?: run {
+                                call.respond(HttpStatusCode.BadRequest, ErrorResponse("Invalid torrent ID"))
+                                return@post
+                            }
+
+                            val body = try {
+                                call.receive<MoveRequest>()
+                            } catch (e: Exception) {
+                                call.respond(HttpStatusCode.BadRequest, ErrorResponse("Invalid request body"))
+                                return@post
+                            }
+
+                            val moveService = TorrentServer.moveService
+                                ?: run { call.respond(HttpStatusCode.ServiceUnavailable, ErrorResponse("Move service unavailable")); return@post }
+
+                            val result = moveService.retryMove(id, body.destinationPath)
+                            when (result.status) {
+                                "ok" -> call.respond(MoveResponse(status = "ok", phase = "completed"))
+                                else -> call.respond(
+                                    HttpStatusCode.BadRequest,
+                                    MoveResponse(status = "error", phase = "error", error = result.recoverableError)
+                                )
+                            }
+                        }
+
                         // DELETE /api/torrents/{id}?deleteFiles=true|false — remove a torrent.
                         delete("/{id}") {
                             val id = call.parameters["id"]?.toLongOrNull() ?: run {
@@ -809,4 +904,16 @@ data class DestinationStatusResponse(
     val valid: Boolean,
     val canonicalPath: String?,
     val status: String
+)
+
+/** Request body for POST /api/torrents/{id}/move and retry. */
+@Serializable
+data class MoveRequest(val destinationPath: String = "")
+
+/** Response for move operations. */
+@Serializable
+data class MoveResponse(
+    val status: String, // "ok", "interrupted", "error"
+    val phase: String,
+    val error: String? = null
 )
