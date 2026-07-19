@@ -94,6 +94,10 @@ object TorrentServer {
      */
     internal var moveService: MoveService? = null
 
+    /** Stable queue/runtime correlation and serialized durable mutation seam. */
+    internal var queueBindings: QueueRuntimeBindings? = null
+    internal var durableOperations: DurableTorrentOperations? = null
+
     /**
      * Starts the Ktor server on [PORT] bound to 0.0.0.0.
      * Must be called before [stop]. Safe to call multiple times (idempotent).
@@ -347,15 +351,19 @@ object TorrentServer {
                         get("/moves") {
                             val journal = TorrentServer.moveJournal
                                 ?: run { call.respond(emptyList<InterruptedMoveResponse>()); return@get }
+                            val bindings = TorrentServer.queueBindings
+                                ?: run { call.respond(emptyList<InterruptedMoveResponse>()); return@get }
                             val interrupted = journal.getInterruptedMoves()
-                            call.respond(interrupted.map { move ->
-                                InterruptedMoveResponse(
-                                    torrentId = move.torrentId,
-                                    sourcePath = move.sourcePath,
-                                    targetPath = move.targetPath,
-                                    phase = move.phase.name,
-                                    createdAt = move.createdAt
-                                )
+                            call.respond(interrupted.mapNotNull { move ->
+                                bindings.runtimeIdFor(move.queueId)?.let { runtimeId ->
+                                    InterruptedMoveResponse(
+                                        torrentId = runtimeId,
+                                        sourcePath = move.sourcePath,
+                                        targetPath = move.targetPath,
+                                        phase = move.phase.name,
+                                        createdAt = move.createdAt
+                                    )
+                                }
                             })
                         }
                     }
@@ -417,6 +425,15 @@ object TorrentServer {
                                 }
                             }
 
+                            // Legacy destination protection: reject even when it came from the catalog default.
+                            if (destinationPath != null && isLegacySavePath(destinationPath, TorrentDaemon.getLegacySaveDirectory(appContext)?.absolutePath)) {
+                                call.respond(
+                                    HttpStatusCode.BadRequest,
+                                    ErrorResponse("Cannot use legacy save directory as destination for new torrents")
+                                )
+                                return@post
+                            }
+
                             // Block storage operations when permission is unavailable.
                             if (!TorrentServer.daemonControl.isStorageReady) {
                                 call.respond(
@@ -436,37 +453,51 @@ object TorrentServer {
                                 return@post
                             }
 
-                            val torrentId = daemonControl.addMagnet(magnetUri)
-                            if (torrentId > 0) {
-                                // Persist the destination in the queue.
-                                if (destinationPath != null && TorrentServer.queueStore != null) {
-                                    val queue = TorrentServer.queueStore!!.loadQueueIntent()
-                                    val updatedQueue = queue + QueueEntry(
-                                        magnetUri = magnetUri,
-                                        isPaused = false,
-                                        destinationPath = destinationPath
-                                    )
-                                    TorrentServer.queueStore!!.saveQueueIntent(updatedQueue)
-                                }
-
-                                call.respond(MagnetResponse(id = torrentId, status = "ok"))
-                            } else {
+                            val operations = TorrentServer.durableOperations ?: run {
+                                call.respond(
+                                    HttpStatusCode.ServiceUnavailable,
+                                    ErrorResponse("Queue persistence is unavailable")
+                                )
+                                return@post
+                            }
+                            val added = try {
+                                operations.add(magnetUri, TorrentDestination(destinationPath!!))
+                            } catch (e: Exception) {
                                 call.respond(
                                     HttpStatusCode.InternalServerError,
-                                    ErrorResponse(daemonControl.lastError ?: "Failed to add magnet")
+                                    ErrorResponse("Unable to add and persist the torrent")
                                 )
+                                return@post
                             }
+
+                            call.respond(
+                                MagnetResponse(
+                                    id = added.runtimeId,
+                                    queueId = added.queueId.value,
+                                    status = "ok"
+                                )
+                            )
                         }
 
                         // GET /api/torrents — list all torrents with current state.
                         get {
                             val ids = daemonControl.getAllTorrentIds()
-                            // Note: per-torrent destination matching requires a magnetUri↔torrentId
-                            // mapping not yet maintained. destinationPath is null until this is added.
+                            val journal = TorrentServer.moveJournal
+                            val bindings = TorrentServer.queueBindings
+                            val queueStore = TorrentServer.queueStore
+                            val queueEntries = queueStore?.loadQueueIntent() ?: emptyList()
                             val torrents = ids.mapNotNull { id ->
                                 daemonControl.getTorrentStatus(id)?.let { status ->
+                                    val queueId = bindings?.queueIdFor(status.id)
+                                    val moveEntry = queueId?.let { qId -> journal?.getMove(qId) }
+                                    val moveState = when {
+                                        moveEntry != null -> moveEntry.phase.name.lowercase().replace('_', '-')
+                                        else -> null
+                                    }
+                                    val queueEntry = queueId?.let { qId -> queueEntries.find { it.queueId == qId } }
                                     TorrentListItem(
                                         id = status.id,
+                                        queueId = queueId?.value,
                                         name = status.name,
                                         state = status.state,
                                         progress = status.progress,
@@ -474,7 +505,9 @@ object TorrentServer {
                                         uploadRate = status.uploadRate,
                                         peers = status.peers,
                                         savePath = status.savePath,
-                                        destinationPath = null // TODO: match via maintained mapping
+                                        destinationPath = queueEntry?.destinationPath?.ifEmpty { null }
+                                            ?: status.savePath.ifEmpty { null },
+                                        moveState = moveState
                                     )
                                 }
                             }
@@ -488,14 +521,14 @@ object TorrentServer {
                                 call.respond(HttpStatusCode.BadRequest, ErrorResponse("Invalid torrent ID"))
                                 return@put
                             }
-                            Log.i(TAG, "Pause request for torrent $id")
-                            if (daemonControl.pauseTorrent(id)) {
-                                Log.i(TAG, "Pause successful for torrent $id")
-                                call.respond(ControlResponse("ok"))
-                            } else {
-                                Log.i(TAG, "Pause failed for torrent $id")
-                                call.respond(HttpStatusCode.NotFound, ErrorResponse("Torrent $id not found"))
+                            val queueId = try {
+                                TorrentServer.durableOperations?.pause(id)
+                                    ?: throw IllegalStateException("Queue persistence unavailable")
+                            } catch (e: Exception) {
+                                call.respond(HttpStatusCode.Conflict, ErrorResponse("Unable to durably pause torrent"))
+                                return@put
                             }
+                            call.respond(ControlResponse("ok", queueId.value))
                         }
 
                         // PUT /api/torrents/{id}/resume — resume a paused torrent.
@@ -505,11 +538,14 @@ object TorrentServer {
                                 call.respond(HttpStatusCode.BadRequest, ErrorResponse("Invalid torrent ID"))
                                 return@put
                             }
-                            if (daemonControl.resumeTorrent(id)) {
-                                call.respond(ControlResponse("ok"))
-                            } else {
-                                call.respond(HttpStatusCode.NotFound, ErrorResponse("Torrent $id not found"))
+                            val queueId = try {
+                                TorrentServer.durableOperations?.resume(id)
+                                    ?: throw IllegalStateException("Queue persistence unavailable")
+                            } catch (e: Exception) {
+                                call.respond(HttpStatusCode.Conflict, ErrorResponse("Unable to durably resume torrent"))
+                                return@put
                             }
+                            call.respond(ControlResponse("ok", queueId.value))
                         }
 
                         // GET /api/torrents/{id}/destination — returns per-torrent destination status.
@@ -530,7 +566,7 @@ object TorrentServer {
                             ))
                         }
 
-                        // POST /api/torrents/{id}/move — moves a torrent to a new destination.
+                        // POST /api/torrents/{id}/move — initiate async move to new destination.
                         post("/{id}/move") {
                             val id = call.parameters["id"]?.toLongOrNull() ?: run {
                                 call.respond(HttpStatusCode.BadRequest, ErrorResponse("Invalid torrent ID"))
@@ -558,7 +594,7 @@ object TorrentServer {
 
                             val result = moveService.startMove(id, body.destinationPath)
                             when (result.status) {
-                                "ok" -> call.respond(MoveResponse(status = "ok", phase = "completed"))
+                                "ok" -> call.respond(MoveResponse(status = "ok", phase = "moving"))
                                 "interrupted" -> call.respond(
                                     HttpStatusCode.Conflict,
                                     MoveResponse(status = "interrupted", phase = "interrupted", error = result.recoverableError)
@@ -570,28 +606,85 @@ object TorrentServer {
                             }
                         }
 
-                        // POST /api/torrents/{id}/move/cancel — cancels an active move.
+                        // GET /api/torrents/{id}/move/status — returns current move state.
+                        get("/{id}/move/status") {
+                            val id = call.parameters["id"]?.toLongOrNull() ?: run {
+                                call.respond(HttpStatusCode.BadRequest, ErrorResponse("Invalid torrent ID"))
+                                return@get
+                            }
+                            val journal = TorrentServer.moveJournal ?: run {
+                                call.respond(HttpStatusCode.ServiceUnavailable, ErrorResponse("Move journal unavailable"))
+                                return@get
+                            }
+                            val bindings = TorrentServer.queueBindings ?: run {
+                                call.respond(HttpStatusCode.ServiceUnavailable, ErrorResponse("Queue bindings unavailable"))
+                                return@get
+                            }
+                            val queueId = bindings.queueIdFor(id) ?: run {
+                                call.respond(HttpStatusCode.NotFound, ErrorResponse("Torrent not found"))
+                                return@get
+                            }
+                            val entry = journal.getMove(queueId)
+                            if (entry != null) {
+                                call.respond(MoveStatusResponse(
+                                    phase = entry.phase.name.lowercase().replace('_', '-'),
+                                    sourcePath = entry.sourcePath,
+                                    targetPath = entry.targetPath
+                                ))
+                            } else {
+                                call.respond(MoveStatusResponse(
+                                    phase = "none",
+                                    sourcePath = null,
+                                    targetPath = null
+                                ))
+                            }
+                        }
+
+                        // POST /api/torrents/{id}/move/cancel — cancel only from move_interrupted.
                         post("/{id}/move/cancel") {
                             val id = call.parameters["id"]?.toLongOrNull() ?: run {
                                 call.respond(HttpStatusCode.BadRequest, ErrorResponse("Invalid torrent ID"))
                                 return@post
                             }
-
-                            val moveService = TorrentServer.moveService
-                                ?: run { call.respond(HttpStatusCode.ServiceUnavailable, ErrorResponse("Move service unavailable")); return@post }
-
-                            val cancelled = moveService.cancelMove(id)
-                            if (cancelled) {
+                            val journal = TorrentServer.moveJournal ?: run {
+                                call.respond(HttpStatusCode.ServiceUnavailable, ErrorResponse("Move journal unavailable"))
+                                return@post
+                            }
+                            val bindings = TorrentServer.queueBindings ?: run {
+                                call.respond(HttpStatusCode.ServiceUnavailable, ErrorResponse("Queue bindings unavailable"))
+                                return@post
+                            }
+                            val queueId = bindings.queueIdFor(id) ?: run {
+                                call.respond(HttpStatusCode.NotFound, ErrorResponse("Torrent not found"))
+                                return@post
+                            }
+                            val entry = journal.getMove(queueId)
+                            if (entry == null || entry.phase != MovePhase.Interrupted) {
+                                call.respond(
+                                    HttpStatusCode.Conflict,
+                                    ErrorResponse("Cancel available only when move is interrupted")
+                                )
+                                return@post
+                            }
+                            if (journal.removeMove(queueId)) {
                                 call.respond(ControlResponse("ok"))
                             } else {
-                                call.respond(HttpStatusCode.NotFound, ErrorResponse("No active move to cancel"))
+                                call.respond(HttpStatusCode.InternalServerError, ErrorResponse("Unable to cancel move"))
                             }
                         }
 
-                        // POST /api/torrents/{id}/move/retry — retries an interrupted move.
+                        // POST /api/torrents/{id}/move/retry — retry from move_interrupted.
                         post("/{id}/move/retry") {
                             val id = call.parameters["id"]?.toLongOrNull() ?: run {
                                 call.respond(HttpStatusCode.BadRequest, ErrorResponse("Invalid torrent ID"))
+                                return@post
+                            }
+
+                            if (!daemonControl.isStorageReady) {
+                                call.respond(
+                                    HttpStatusCode.ServiceUnavailable,
+                                    ErrorResponse("Storage permission required")
+                                )
                                 return@post
                             }
 
@@ -607,10 +700,10 @@ object TorrentServer {
 
                             val result = moveService.retryMove(id, body.destinationPath)
                             when (result.status) {
-                                "ok" -> call.respond(MoveResponse(status = "ok", phase = "completed"))
+                                "ok" -> call.respond(MoveResponse(status = "ok", phase = "moving"))
                                 else -> call.respond(
-                                    HttpStatusCode.BadRequest,
-                                    MoveResponse(status = "error", phase = "error", error = result.recoverableError)
+                                    HttpStatusCode.Conflict,
+                                    MoveResponse(status = result.status, phase = "interrupted", error = result.recoverableError)
                                 )
                             }
                         }
@@ -622,11 +715,14 @@ object TorrentServer {
                                 return@delete
                             }
                             val deleteFiles = call.request.queryParameters["deleteFiles"]?.toBooleanStrictOrNull() ?: false
-                            if (daemonControl.removeTorrent(id, deleteFiles)) {
-                                call.respond(ControlResponse("ok"))
-                            } else {
-                                call.respond(HttpStatusCode.NotFound, ErrorResponse("Torrent $id not found"))
+                            val queueId = try {
+                                TorrentServer.durableOperations?.delete(id, deleteFiles)
+                                    ?: throw IllegalStateException("Queue persistence unavailable")
+                            } catch (e: Exception) {
+                                call.respond(HttpStatusCode.Conflict, ErrorResponse("Unable to durably remove torrent"))
+                                return@delete
                             }
+                            call.respond(ControlResponse("ok", queueId.value))
                         }
                     }
 
@@ -691,14 +787,21 @@ object TorrentServer {
     }
 
     /** Builds a JSON snapshot of all torrents and pending alerts. */
-    private fun buildSnapshotJson(): String {
+    private suspend fun buildSnapshotJson(): String {
         val ids = daemonControl.getAllTorrentIds()
+        val journal = TorrentServer.moveJournal
+        val bindings = TorrentServer.queueBindings
         val torrents = ids.mapNotNull { id ->
             daemonControl.getTorrentStatus(id)?.let { s ->
+                val qId = bindings?.queueIdFor(s.id)
+                val moveEntry = qId?.let { journal?.getMove(it) }
                 TorrentListItem(
                     id = s.id, name = s.name, state = s.state, progress = s.progress,
                     downloadRate = s.downloadRate, uploadRate = s.uploadRate,
-                    peers = s.peers, savePath = s.savePath
+                    peers = s.peers, savePath = s.savePath,
+                    destinationPath = s.savePath.ifEmpty { null },
+                    queueId = qId?.value,
+                    moveState = moveEntry?.phase?.name?.lowercase()?.replace('_', '-')
                 )
             }
         }
@@ -708,7 +811,18 @@ object TorrentServer {
             append("[")
             torrents.forEachIndexed { index, item ->
                 if (index > 0) append(",")
-                append("{\"id\":${item.id},\"name\":\"${escapeJson(item.name)}\",\"state\":\"${escapeJson(item.state)}\",\"progress\":${item.progress},\"downloadRate\":${item.downloadRate},\"uploadRate\":${item.uploadRate},\"peers\":${item.peers},\"savePath\":\"${escapeJson(item.savePath)}\"}")
+                append("{\"id\":${item.id}")
+                append(",\"name\":\"${escapeJson(item.name)}\"")
+                append(",\"state\":\"${escapeJson(item.state)}\"")
+                append(",\"progress\":${item.progress}")
+                append(",\"downloadRate\":${item.downloadRate}")
+                append(",\"uploadRate\":${item.uploadRate}")
+                append(",\"peers\":${item.peers}")
+                append(",\"savePath\":\"${escapeJson(item.savePath)}\"")
+                append(",\"destinationPath\":\"${escapeJson(item.destinationPath ?: "")}\"")
+                append(",\"queueId\":\"${escapeJson(item.queueId ?: "")}\"")
+                append(",\"moveState\":\"${escapeJson(item.moveState ?: "")}\"")
+                append("}")
             }
             append("]")
         }
@@ -883,16 +997,18 @@ data class TorrentListItem(
     val uploadRate: Long,
     val peers: Int,
     val savePath: String,
-    val destinationPath: String? = null
+    val destinationPath: String? = null,
+    val queueId: String? = null,
+    val moveState: String? = null
 )
 
 /** Generic success response with status field. */
 @Serializable
-data class ControlResponse(val status: String)
+data class ControlResponse(val status: String, val queueId: String? = null)
 
 /** Magnet add response with torrent ID. */
 @Serializable
-data class MagnetResponse(val id: Long, val status: String)
+data class MagnetResponse(val id: Long, val queueId: String? = null, val status: String)
 
 /** Health check response. */
 @Serializable
@@ -932,6 +1048,14 @@ data class MoveResponse(
     val status: String, // "ok", "interrupted", "error"
     val phase: String,
     val error: String? = null
+)
+
+/** Response for GET /api/torrents/{id}/move/status. */
+@Serializable
+data class MoveStatusResponse(
+    val phase: String, // "none", "moving", "interrupted"
+    val sourcePath: String?,
+    val targetPath: String?
 )
 
 /** Response item for GET /api/moves — lists interrupted moves requiring user action. */

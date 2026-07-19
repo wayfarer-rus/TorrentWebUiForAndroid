@@ -37,6 +37,7 @@ class M4EmulatorAcceptanceTest {
     @Before
     fun setUp() {
         context = ApplicationProvider.getApplicationContext()
+        StartupPermissionTestHelper.ensureGranted(context)
 
         // Clean up any previous test state
         RecoverySuppressionStore.clearForceStopped(context)
@@ -194,6 +195,19 @@ class M4EmulatorAcceptanceTest {
     }
 
     @Test
+    fun catalog_selectingExistingDestinationUpdatesLatest() = runBlocking {
+        val dir1 = File(context.getExternalFilesDir(null), "m4_test_reselect1").apply { mkdirs() }
+        val dir2 = File(context.getExternalFilesDir(null), "m4_test_reselect2").apply { mkdirs() }
+        val catalog = DestinationCatalog(context)
+
+        catalog.addDestination(dir1.absolutePath)
+        catalog.addDestination(dir2.absolutePath)
+        catalog.addDestination(dir1.absolutePath)
+
+        assertEquals("Selecting an approved path should update latest", dir1.absolutePath, catalog.getLatestSelected())
+    }
+
+    @Test
     fun catalog_removeWhenUnreferenced() = runBlocking {
         // Given: Context available, valid directory exists, no queue entries reference it
         val testDir = File(context.getExternalFilesDir(null), "m4_test_remove").apply { mkdirs() }
@@ -246,84 +260,65 @@ class M4EmulatorAcceptanceTest {
 
     @Test
     fun moveJournal_createAndRetrieve() = runBlocking {
-        // Given: Context available
         val journal = MoveJournal(context)
+        val queueId = QueueId.random()
 
-        // When: Create move
-        val created = journal.createMove(42L, "/sdcard/Movies", "/storage/USB/Movies")
-
-        // Then: Should succeed
+        val created = journal.createMove(queueId, "/sdcard/Movies", "/storage/USB/Movies")
         assertTrue("Should create move", created)
 
-        // When: Retrieve move
-        val move = journal.getMove(42L)
-
-        // Then: Should have correct data
+        val move = journal.getMove(queueId)
         assertNotNull("Should retrieve move", move)
-        assertEquals(42L, move!!.torrentId)
+        assertEquals(queueId, move!!.queueId)
         assertEquals("/sdcard/Movies", move.sourcePath)
         assertEquals("/storage/USB/Movies", move.targetPath)
         assertEquals(MovePhase.JournalPersisted, move.phase)
 
-        // Cleanup
-        journal.removeMove(42L)
+        journal.removeMove(queueId)
     }
 
     @Test
     fun moveJournal_updatePhase() = runBlocking {
-        // Given: Context available, move exists
         val journal = MoveJournal(context)
-        journal.createMove(99L, "/src", "/tgt")
+        val queueId = QueueId.random()
+        journal.createMove(queueId, "/src", "/tgt")
 
-        // When: Update phase
-        val updated = journal.updatePhase(99L, MovePhase.Copying)
-
-        // Then: Should succeed
+        val updated = journal.updatePhase(queueId, MovePhase.Copying)
         assertTrue("Should update phase", updated)
 
-        // Verify
-        val move = journal.getMove(99L)
+        val move = journal.getMove(queueId)
         assertEquals(MovePhase.Copying, move!!.phase)
 
-        // Cleanup
-        journal.removeMove(99L)
+        journal.removeMove(queueId)
     }
 
     @Test
     fun moveJournal_getInterruptedMoves() = runBlocking {
-        // Given: Context available, interrupted moves exist
         val journal = MoveJournal(context)
-        journal.createMove(1L, "/src1", "/tgt1")
-        journal.updatePhase(1L, MovePhase.Interrupted)
-        journal.createMove(2L, "/src2", "/tgt2")
-        journal.updatePhase(2L, MovePhase.Interrupted)
+        val id1 = QueueId.random()
+        val id2 = QueueId.random()
+        journal.createMove(id1, "/src1", "/tgt1")
+        journal.updatePhase(id1, MovePhase.Interrupted)
+        journal.createMove(id2, "/src2", "/tgt2")
+        journal.updatePhase(id2, MovePhase.Interrupted)
 
-        // When: Get interrupted moves
         val interrupted = journal.getInterruptedMoves()
-
-        // Then: Should contain both
         assertEquals("Should have 2 interrupted moves", 2, interrupted.size)
 
-        // Cleanup
-        journal.removeMove(1L)
-        journal.removeMove(2L)
+        journal.removeMove(id1)
+        journal.removeMove(id2)
     }
 
     @Test
     fun moveJournal_getActiveMovesExcludesInterrupted() = runBlocking {
-        // Given: Context available, mix of phases
         val journal = MoveJournal(context)
-        journal.createMove(1L, "/src", "/tgt")
-        journal.updatePhase(1L, MovePhase.Interrupted)
+        val id = QueueId.random()
+        journal.createMove(id, "/src", "/tgt")
+        journal.updatePhase(id, MovePhase.Interrupted)
 
-        // When: Get active moves
         val active = journal.getActiveMoves()
-
-        // Then: Should not include interrupted
         assertEquals("Should have 0 active moves", 0, active.size)
 
-        // Cleanup
-        journal.removeMove(1L)
+        journal.removeMove(id)
     }
 
     // ======================================================================

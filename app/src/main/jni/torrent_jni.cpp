@@ -30,8 +30,8 @@
 struct SessionEntry {
     std::unique_ptr<lt::session> session;
     std::unordered_map<uint64_t, lt::torrent_handle> torrents;
+    std::unordered_map<uint64_t, std::string> torrent_save_paths;
     uint64_t next_torrent_id = 1;
-    std::string save_path;
 };
 
 static std::unordered_map<uint64_t, SessionEntry> g_sessions;
@@ -61,12 +61,9 @@ static std::string pop_last_error(lt::session& s) {
 // ---------------------------------------------------------------------------
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_andreiefimov_torrentwebui_TorrentSession_nativeInit(
-        JNIEnv* env, jobject, jstring jSavePath) {
+        JNIEnv*, jobject, jstring) {
     try {
         std::lock_guard<std::mutex> lock(g_mutex);
-        const char* cpath = env->GetStringUTFChars(jSavePath, nullptr);
-        std::string savePath(cpath);
-        env->ReleaseStringUTFChars(jSavePath, cpath);
 
         lt::session_params params;
         params.settings.set_int(lt::settings_pack::alert_mask,
@@ -82,9 +79,8 @@ Java_com_andreiefimov_torrentwebui_TorrentSession_nativeInit(
 
         uint64_t id = g_next_session_id++;
         g_sessions[id].session = std::make_unique<lt::session>(std::move(params));
-        g_sessions[id].save_path = savePath;
 
-        LOGI("Session %llu created, save_path=%s", id, savePath.c_str());
+        LOGI("Session %llu created", id);
         return static_cast<jlong>(id);
     } catch (std::exception const& e) {
         LOGE("nativeInit failed: %s", e.what());
@@ -114,31 +110,11 @@ Java_com_andreiefimov_torrentwebui_TorrentSession_nativeVersion(JNIEnv* env, job
 }
 
 // ---------------------------------------------------------------------------
-// JNI: Set session save path
-// ---------------------------------------------------------------------------
-extern "C" JNIEXPORT void JNICALL
-Java_com_andreiefimov_torrentwebui_TorrentSession_nativeSetSavePath(
-        JNIEnv* env, jobject, jlong jId, jstring jPath) {
-    try {
-        std::lock_guard<std::mutex> lock(g_mutex);
-        uint64_t id = static_cast<uint64_t>(jId);
-        auto sit = g_sessions.find(id);
-        if (sit == g_sessions.end()) return;
-
-        const char* cpath = env->GetStringUTFChars(jPath, nullptr);
-        sit->second.save_path = cpath;
-        env->ReleaseStringUTFChars(jPath, cpath);
-    } catch (std::exception const& e) {
-        LOGE("nativeSetSavePath failed: %s", e.what());
-    }
-}
-
-// ---------------------------------------------------------------------------
 // JNI: Add magnet
 // ---------------------------------------------------------------------------
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_andreiefimov_torrentwebui_TorrentSession_nativeAddMagnet(
-        JNIEnv* env, jobject, jlong jId, jstring jMagnet) {
+        JNIEnv* env, jobject, jlong jId, jstring jMagnet, jstring jDestinationPath) {
     try {
         std::lock_guard<std::mutex> lock(g_mutex);
         uint64_t id = static_cast<uint64_t>(jId);
@@ -149,14 +125,19 @@ Java_com_andreiefimov_torrentwebui_TorrentSession_nativeAddMagnet(
         std::string magnet(cmag);
         env->ReleaseStringUTFChars(jMagnet, cmag);
 
+        const char* cdestination = env->GetStringUTFChars(jDestinationPath, nullptr);
+        std::string destinationPath(cdestination);
+        env->ReleaseStringUTFChars(jDestinationPath, cdestination);
+
         lt::add_torrent_params p = lt::parse_magnet_uri(magnet);
-        p.save_path = sit->second.save_path;
+        p.save_path = destinationPath;
 
         lt::torrent_handle h = sit->second.session->add_torrent(p);
         uint64_t torrentId = sit->second.next_torrent_id++;
         sit->second.torrents[torrentId] = h;
+        sit->second.torrent_save_paths[torrentId] = std::move(destinationPath);
 
-        LOGI("Added magnet, torrent_id=%llu, save_path=%s", torrentId, sit->second.save_path.c_str());
+        LOGI("Added torrent %llu", torrentId);
         return static_cast<jlong>(torrentId);
     } catch (std::exception const& e) {
         LOGE("nativeAddMagnet failed: %s", e.what());
@@ -231,6 +212,7 @@ Java_com_andreiefimov_torrentwebui_TorrentSession_nativeRemoveTorrent(
         sit->second.session->remove_torrent(
             tit->second, static_cast<lt::remove_flags_t>(flags));
         sit->second.torrents.erase(tit);
+        sit->second.torrent_save_paths.erase(tid);
         return JNI_TRUE;
     } catch (std::exception const& e) {
         LOGE("nativeRemoveTorrent failed: %s", e.what());
@@ -320,17 +302,21 @@ Java_com_andreiefimov_torrentwebui_TorrentSession_nativeGetLastError(
 }
 
 // ---------------------------------------------------------------------------
-// JNI: Get the save path for a session
+// JNI: Get the save path for one torrent
 // ---------------------------------------------------------------------------
 extern "C" JNIEXPORT jstring JNICALL
-Java_com_andreiefimov_torrentwebui_TorrentSession_nativeGetSavePath(
-        JNIEnv* env, jobject, jlong jId) {
+Java_com_andreiefimov_torrentwebui_TorrentSession_nativeGetTorrentSavePath(
+        JNIEnv* env, jobject, jlong jId, jlong jTorrentId) {
     try {
         std::lock_guard<std::mutex> lock(g_mutex);
         uint64_t id = static_cast<uint64_t>(jId);
         auto sit = g_sessions.find(id);
         if (sit == g_sessions.end()) return env->NewStringUTF("");
-        return env->NewStringUTF(sit->second.save_path.c_str());
+
+        uint64_t torrentId = static_cast<uint64_t>(jTorrentId);
+        auto path = sit->second.torrent_save_paths.find(torrentId);
+        if (path == sit->second.torrent_save_paths.end()) return env->NewStringUTF("");
+        return env->NewStringUTF(path->second.c_str());
     } catch (std::exception const& e) {
         return env->NewStringUTF(e.what());
     }
@@ -562,6 +548,57 @@ Java_com_andreiefimov_torrentwebui_TorrentSession_nativeLoadTorrentResumeData(
     // Native resume data requires async alert processing; not available synchronously.
     // QueueStore handles durable persistence for M3.
     return nullptr;
+}
+
+// ---------------------------------------------------------------------------
+// JNI: Move torrent storage to a new destination (async)
+// libtorrent posts storage_moved_alert or storage_moved_failed_alert.
+// ---------------------------------------------------------------------------
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_andreiefimov_torrentwebui_TorrentSession_nativeMoveStorage(
+        JNIEnv* env, jobject, jlong jId, jlong jTorrentId, jstring jTargetPath) {
+    try {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        uint64_t id = static_cast<uint64_t>(jId);
+        auto sit = g_sessions.find(id);
+        if (sit == g_sessions.end()) return JNI_FALSE;
+
+        uint64_t tid = static_cast<uint64_t>(jTorrentId);
+        auto tit = sit->second.torrents.find(tid);
+        if (tit == sit->second.torrents.end()) return JNI_FALSE;
+
+        const char* cpath = env->GetStringUTFChars(jTargetPath, nullptr);
+        std::string targetPath(cpath);
+        env->ReleaseStringUTFChars(jTargetPath, cpath);
+
+        tit->second.move_storage(targetPath);
+        // Update tracked save path immediately; it will be the new canonical path
+        // once the move completes. On failure, the daemon handler resets it.
+        sit->second.torrent_save_paths[tid] = targetPath;
+        return JNI_TRUE;
+    } catch (std::exception const& e) {
+        LOGE("nativeMoveStorage failed: %s", e.what());
+        return JNI_FALSE;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// JNI: Reset tracked save path for a torrent (used on move failure).
+// ---------------------------------------------------------------------------
+extern "C" JNIEXPORT void JNICALL
+Java_com_andreiefimov_torrentwebui_TorrentSession_nativeResetTorrentSavePath(
+        JNIEnv* env, jobject, jlong jId, jlong jTorrentId) {
+    try {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        uint64_t id = static_cast<uint64_t>(jId);
+        auto sit = g_sessions.find(id);
+        if (sit == g_sessions.end()) return;
+
+        uint64_t tid = static_cast<uint64_t>(jTorrentId);
+        sit->second.torrent_save_paths.erase(tid);
+    } catch (std::exception const& e) {
+        LOGE("nativeResetTorrentSavePath failed: %s", e.what());
+    }
 }
 
 // ---------------------------------------------------------------------------

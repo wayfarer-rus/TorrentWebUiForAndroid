@@ -1,18 +1,150 @@
-<script>
+<script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
+
+	type TorrentSnapshot = {
+		id: number;
+		name: string;
+		state: string;
+		progress: number;
+		downloadRate: number;
+		uploadRate: number;
+		peers: number;
+		savePath: string;
+		destinationPath?: string | null;
+		queueId?: string | null;
+		moveState?: string | null;
+	};
+	type StorageVolume = { path: string; description?: string; isRemovable?: boolean };
+	type PathValidation = {
+		isValid: boolean;
+		canonicalPath?: string | null;
+		rejectionReason?: string | null;
+	};
+	type ProgressAlert = { type: string; name?: string; message?: string; state?: string };
 
 	// --- State (Svelte 5 runes) ---
 	let magnetUri = $state('');
 	let addError = $state('');
 	let wsConnected = $state(false);
 	let wsConnecting = $state(false);
-	let lastSnapshot = $state([]);
+	let lastSnapshot = $state<TorrentSnapshot[]>([]);
 	let loading = $state(true);
 
+	// Canonical destination selection (all paths come from authenticated backend responses).
+	let storagePermission = $state<string | null>(null);
+	let volumes = $state<StorageVolume[]>([]);
+	let catalog = $state<string[]>([]);
+	let latestSelected = $state<string | null>(null);
+	let selectedDestination = $state<string | null>(null);
+	let storageLoading = $state(true);
+	let storageError = $state('');
+	let showBrowser = $state(false);
+	let browsedPath = $state<string | null>(null);
+	let children = $state<string[]>([]);
+	let pastedPath = $state('');
+	let pathValidation = $state<PathValidation | null>(null);
+	let validatingPath = $state(false);
+	let storageReady = $derived(storagePermission === 'Ready');
+
 	// WebSocket reference (used only for cleanup)
-	let ws = $state(null);
+	let ws = $state<WebSocket | null>(null);
 
 	// --- API helpers ---
+
+	async function fetchJson<T = any>(url: string, options?: RequestInit): Promise<T> {
+		const response = await fetch(url, options);
+		if (!response.ok) {
+			const body = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+			throw new Error(body.error || `HTTP ${response.status}`);
+		}
+		return response.json();
+	}
+
+	async function loadStorageState(preferredPath: string | null = null) {
+		storageLoading = true;
+		storageError = '';
+		try {
+			const [permission, volumeList, destinationList, latest] = await Promise.all([
+				fetchJson('/api/storage/permission'),
+				fetchJson('/api/storage/volumes'),
+				fetchJson('/api/storage/catalog'),
+				fetchJson('/api/storage/latest-selected')
+			]);
+			storagePermission = permission.state;
+			volumes = Array.isArray(volumeList) ? volumeList : [];
+			catalog = Array.isArray(destinationList) ? destinationList : [];
+			latestSelected = latest?.path || null;
+
+			const candidate = preferredPath || latestSelected;
+			selectedDestination = candidate && catalog.includes(candidate) ? candidate : null;
+		} catch (e) {
+			storageError = e instanceof Error ? e.message : 'Unable to load download folders';
+			selectedDestination = null;
+		} finally {
+			storageLoading = false;
+		}
+	}
+
+	async function browseDirectory(path: string) {
+		storageError = '';
+		pathValidation = null;
+		try {
+			children = await fetchJson(`/api/storage/children/${encodeURIComponent(path)}`);
+			browsedPath = path;
+		} catch (e) {
+			storageError = e instanceof Error ? e.message : 'Unable to browse this folder';
+			children = [];
+		}
+	}
+
+	async function validatePath(path: string) {
+		if (!path || !path.startsWith('/')) {
+			pathValidation = { isValid: false, rejectionReason: 'Enter an absolute filesystem path.' };
+			return;
+		}
+		validatingPath = true;
+		storageError = '';
+		try {
+			pathValidation = await fetchJson('/api/storage/validate', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ path })
+			});
+		} catch (e) {
+			pathValidation = null;
+			storageError = e instanceof Error ? e.message : 'Unable to validate this folder';
+		} finally {
+			validatingPath = false;
+		}
+	}
+
+	function validateBrowsedPath() {
+		if (browsedPath) validatePath(browsedPath);
+	}
+
+	function approveValidatedPath() {
+		const canonicalPath = pathValidation?.canonicalPath;
+		if (canonicalPath) approveDestination(canonicalPath);
+	}
+
+	async function approveDestination(canonicalPath: string) {
+		storageError = '';
+		try {
+			const approved = await fetchJson(
+				`/api/storage/destinations/${encodeURIComponent(canonicalPath)}`,
+				{ method: 'POST' }
+			);
+			pathValidation = null;
+			pastedPath = '';
+			await loadStorageState(approved.path);
+		} catch (e) {
+			storageError = e instanceof Error ? e.message : 'Unable to approve this folder';
+		}
+	}
+
+	async function selectApprovedDestination(path: string) {
+		await approveDestination(path);
+	}
 
 	async function addMagnet() {
 		const uri = magnetUri.trim();
@@ -20,12 +152,16 @@
 			addError = 'Please enter a magnet URI';
 			return;
 		}
+		if (!selectedDestination) {
+			addError = 'Choose a download folder before adding this torrent.';
+			return;
+		}
 
 		try {
 			const res = await fetch('/api/torrents/magnet', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ magnet: uri }),
+				body: JSON.stringify({ magnet: uri, destinationPath: selectedDestination }),
 			});
 
 			if (!res.ok) {
@@ -58,7 +194,7 @@
 		}
 	}
 
-	async function pauseTorrent(id) {
+	async function pauseTorrent(id: number) {
 		try {
 			const res = await fetch(`/api/torrents/${id}/pause`, { method: 'PUT' });
 			if (!res.ok) {
@@ -72,7 +208,7 @@
 		}
 	}
 
-	async function resumeTorrent(id) {
+	async function resumeTorrent(id: number) {
 		try {
 			const res = await fetch(`/api/torrents/${id}/resume`, { method: 'PUT' });
 			if (!res.ok) {
@@ -86,7 +222,7 @@
 		}
 	}
 
-	async function removeTorrent(id, deleteFiles) {
+	async function removeTorrent(id: number, deleteFiles: boolean) {
 		if (!deleteFiles && !confirm('Remove this torrent without deleting files?')) return;
 		try {
 			const res = await fetch(`/api/torrents/${id}?deleteFiles=${deleteFiles}`, { method: 'DELETE' });
@@ -102,7 +238,7 @@
 	}
 
 	let showInfo = $state(false);
-	let selectedTorrent = $state(null);
+	let selectedTorrent = $state<TorrentSnapshot | null>(null);
 
 	// --- Settings / password change ---
 	let showSettings = $state(false);
@@ -138,7 +274,7 @@
 		}
 	}
 
-	function toggleInfo(torrent) {
+	function toggleInfo(torrent: TorrentSnapshot) {
 		console.log('toggleInfo called with:', torrent);
 		if (showInfo && selectedTorrent?.id === torrent.id) {
 			console.log('Closing info for torrent:', torrent.id);
@@ -164,14 +300,15 @@
 		wsConnecting = true;
 
 		const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
-		ws = new WebSocket(`${protocol}://${location.host}/ws/progress`);
+		const socket = new WebSocket(`${protocol}://${location.host}/ws/progress`);
+		ws = socket;
 
-		ws.onopen = () => {
+		socket.onopen = () => {
 			wsConnecting = false;
 			wsConnected = true;
 		};
 
-		ws.onclose = () => {
+		socket.onclose = () => {
 			wsConnected = false;
 			wsConnecting = false;
 
@@ -183,11 +320,11 @@
 			}, 1500);
 		};
 
-		ws.onerror = () => {
+		socket.onerror = () => {
 			wsConnecting = false;
 		};
 
-		ws.onmessage = (event) => {
+		socket.onmessage = (event: MessageEvent) => {
 			try {
 				const data = JSON.parse(event.data);
 
@@ -204,7 +341,7 @@
 		};
 	}
 
-	function handleAlert(alert) {
+	function handleAlert(alert: ProgressAlert) {
 		switch (alert.type) {
 			case 'torrent_finished':
 				console.log(`Torrent finished: ${alert.name}`);
@@ -224,7 +361,7 @@
 		}
 	}
 
-	function formatBytes(bytes) {
+	function formatBytes(bytes: number) {
 		if (bytes === 0) return '—';
 		const units = ['B', 'KB', 'MB', 'GB'];
 		let i = 0;
@@ -235,11 +372,11 @@
 		return `${bytes.toFixed(1)} ${units[i]}`;
 	}
 
-	function formatProgress(progress) {
+	function formatProgress(progress: number) {
 		return `${(progress * 100).toFixed(1)}%`;
 	}
 
-	function stateColor(state) {
+	function stateColor(state: string) {
 		switch (state) {
 			case 'downloading': return '#2196F3';
 			case 'seeding': case 'finished': return '#4CAF50';
@@ -249,7 +386,7 @@
 		}
 	}
 
-	function stateIcon(state) {
+	function stateIcon(state: string) {
 		switch (state) {
 			case 'downloading': return '⬇️';
 			case 'seeding': case 'finished': return '⬆️';
@@ -259,13 +396,14 @@
 		}
 	}
 
-	function stateDisplayName(state) {
+	function stateDisplayName(state: string) {
 		if (state === 'pause_requested') return 'Pausing';
 		return state;
 	}
 
 	onMount(() => {
 		connectWebSocket();
+		loadStorageState();
 	});
 
 	onDestroy(() => {
@@ -290,6 +428,100 @@
 		</div>
 	</header>
 
+	<section class="destination-picker">
+		<h2>Download folder</h2>
+		{#if storageLoading}
+			<p class="loading compact">Loading available folders…</p>
+		{:else if !storageReady}
+			<p class="storage-guidance">
+				Storage permission is required. Grant All Files Access in the Android app before choosing a download folder.
+			</p>
+		{:else}
+			{#if catalog.length > 0}
+				<fieldset class="catalog-list">
+					<legend>Approved folders</legend>
+					{#each catalog as path}
+						<label class="path-option">
+							<input
+								type="radio"
+								name="destination"
+								checked={selectedDestination === path}
+								on:change={() => selectApprovedDestination(path)}
+							/>
+							<code>{path}</code>
+						</label>
+					{/each}
+				</fieldset>
+			{:else}
+				<p class="empty compact">Choose and approve a folder before adding a torrent.</p>
+			{/if}
+
+			<button class="secondary-button" on:click={() => { showBrowser = !showBrowser; pathValidation = null; }}>
+				{showBrowser ? 'Hide folder browser' : 'Choose another folder'}
+			</button>
+
+			{#if showBrowser}
+				<div class="folder-browser">
+					<h3>Storage roots</h3>
+					<div class="path-buttons">
+						{#each volumes as volume}
+							<button class="path-button" on:click={() => browseDirectory(volume.path)}>
+								{#if volume.description}<span>{volume.description}</span>{/if}
+								<code>{volume.path}</code>
+							</button>
+						{/each}
+					</div>
+
+					{#if browsedPath}
+						<div class="browser-current">
+							<p>Current folder</p>
+							<code>{browsedPath}</code>
+							<button on:click={validateBrowsedPath} disabled={validatingPath}>
+								Check this folder
+							</button>
+						</div>
+						<h3>Child folders</h3>
+						{#if children.length === 0}
+							<p class="empty compact">No selectable child folders returned by the device.</p>
+						{:else}
+							<div class="path-buttons">
+								{#each children as childPath}
+									<button class="path-button" on:click={() => browseDirectory(childPath)}>
+										<code>{childPath}</code>
+									</button>
+								{/each}
+							</div>
+						{/if}
+					{/if}
+
+					<div class="paste-path">
+						<label for="destination-path">Or paste an absolute path</label>
+						<div class="input-row">
+							<input id="destination-path" type="text" bind:value={pastedPath} placeholder="/storage/…" />
+							<button on:click={() => validatePath(pastedPath.trim())} disabled={validatingPath}>Check folder</button>
+						</div>
+					</div>
+				</div>
+			{/if}
+
+			{#if pathValidation}
+				<div class:validation-success={pathValidation.isValid} class:validation-error={!pathValidation.isValid} class="validation-result">
+					{#if pathValidation.isValid && pathValidation.canonicalPath}
+						<p>Verified canonical path</p>
+						<code>{pathValidation.canonicalPath}</code>
+						<button on:click={approveValidatedPath}>Use this folder</button>
+					{:else}
+						<p>{pathValidation.rejectionReason || 'This folder cannot be used.'}</p>
+					{/if}
+				</div>
+			{/if}
+		{/if}
+		{#if selectedDestination}
+			<p class="selected-path">Downloads will be saved to <code>{selectedDestination}</code></p>
+		{/if}
+		{#if storageError}<p class="error">{storageError}</p>{/if}
+	</section>
+
 	<section class="add-torrent">
 		<h2>Add Torrent</h2>
 		<div class="input-row">
@@ -299,8 +531,11 @@
 				placeholder="Paste magnet URI or torrent link..."
 				on:keydown={(e) => e.key === 'Enter' && addMagnet()}
 			/>
-			<button on:click={addMagnet}>Add</button>
+			<button on:click={addMagnet} disabled={!storageReady || !selectedDestination}>Add</button>
 		</div>
+		{#if !selectedDestination}
+			<p class="folder-required">Choose a download folder to continue.</p>
+		{/if}
 		{#if addError}
 			<p class="error">{addError}</p>
 		{/if}
@@ -336,6 +571,18 @@
 
 					{#if torrent.savePath}
 						<p class="save-path">📁 {torrent.savePath}</p>
+					{/if}
+
+					{#if torrent.moveState === 'storage-conflict'}
+						<p class="move-warning">⚠️ Storage conflict — target directory has data. Retry or cancel the move.</p>
+					{/if}
+
+					{#if torrent.moveState === 'moving'}
+						<p class="move-status">🔄 Moving to new destination...</p>
+					{/if}
+
+					{#if torrent.moveState === 'move-interrupted'}
+						<p class="move-warning">⏸️ Move interrupted — retry or cancel to recover.</p>
 					{/if}
 
 					<div class="card-actions">
@@ -634,6 +881,114 @@
 		color: #FF9800;
 	}
 
+	/* Canonical destination selector */
+
+	.destination-picker {
+		background: var(--surface);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		padding: 1rem;
+		margin-bottom: 1.5rem;
+	}
+
+	.catalog-list {
+		border: 0;
+		margin-bottom: 0.75rem;
+	}
+
+	.catalog-list legend, .folder-browser h3, .paste-path label {
+		color: var(--muted);
+		font-size: 0.8rem;
+		font-weight: 600;
+		margin-bottom: 0.5rem;
+	}
+
+	.path-option {
+		display: flex;
+		align-items: flex-start;
+		gap: 0.6rem;
+		padding: 0.65rem;
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		margin-bottom: 0.5rem;
+		cursor: pointer;
+	}
+
+	.path-option code, .path-button code, .browser-current code,
+	.validation-result code, .selected-path code {
+		word-break: break-all;
+		color: var(--text);
+	}
+
+	.secondary-button, .path-button {
+		background: var(--border);
+		color: var(--text);
+	}
+
+	.folder-browser {
+		border-top: 1px solid var(--border);
+		margin-top: 1rem;
+		padding-top: 1rem;
+	}
+
+	.path-buttons {
+		display: grid;
+		gap: 0.5rem;
+		margin-bottom: 1rem;
+	}
+
+	.path-button {
+		display: flex;
+		flex-direction: column;
+		align-items: flex-start;
+		text-align: left;
+	}
+
+	.path-button span {
+		font-size: 0.8rem;
+		color: var(--muted);
+	}
+
+	.browser-current, .validation-result {
+		background: var(--input-bg);
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		padding: 0.75rem;
+		margin-bottom: 1rem;
+	}
+
+	.browser-current code, .validation-result code {
+		display: block;
+		margin: 0.35rem 0 0.75rem;
+	}
+
+	.browser-current button, .validation-success button, .paste-path button {
+		background: var(--accent);
+		color: white;
+	}
+
+	.paste-path {
+		margin-top: 1rem;
+	}
+
+	.paste-path label {
+		display: block;
+	}
+
+	.validation-success { border-color: #4CAF50; }
+	.validation-error, .storage-guidance { color: var(--accent); }
+	.selected-path, .folder-required {
+		font-size: 0.85rem;
+		color: var(--muted);
+		margin-top: 0.75rem;
+	}
+	.compact { padding: 0.75rem; }
+
+	button:disabled {
+		opacity: 0.45;
+		cursor: not-allowed;
+	}
+
 	/* Add torrent section */
 
 	.add-torrent {
@@ -778,6 +1133,18 @@
 		color: var(--muted);
 		margin-bottom: 0.75rem;
 		word-break: break-all;
+	}
+
+	.move-status {
+		font-size: 0.8rem;
+		color: #2196F3;
+		margin-bottom: 0.5rem;
+	}
+
+	.move-warning {
+		font-size: 0.8rem;
+		color: #f44336;
+		margin-bottom: 0.5rem;
 	}
 
 	.card-actions {

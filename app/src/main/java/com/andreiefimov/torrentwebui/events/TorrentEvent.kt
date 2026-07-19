@@ -43,6 +43,21 @@ sealed class TorrentEvent : AppEvent {
         val targetPath: String,
     ) : TorrentEvent()
 
+    /** A data move completed successfully. */
+    data class MoveCompleted(
+        val torrentId: Long,
+        val sourcePath: String,
+        val targetPath: String,
+    ) : TorrentEvent()
+
+    /** A data move failed (e.g. storage error, conflict). */
+    data class MoveFailed(
+        val torrentId: Long,
+        val sourcePath: String,
+        val targetPath: String,
+        val error: String,
+    ) : TorrentEvent()
+
     companion object {
         /** Human-readable name for a torrent state code. */
         fun stateLabel(state: String): String = when (state) {

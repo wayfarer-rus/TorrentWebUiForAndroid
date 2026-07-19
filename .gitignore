@@ -89,3 +89,9 @@ fastlane/screenshots
 fastlane/test_output
 dep/
 !dep/boost-sha256.txt
+
+# WebUI build artifacts
+/web/.output/
+/web/build/
+/web/node_modules/
+/web/.svelte-kit/

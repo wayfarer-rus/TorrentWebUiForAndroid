@@ -12,7 +12,19 @@ import com.andreiefimov.torrentwebui.events.TorrentEvent
  * Allows the server to be tested without native code.
  */
 interface TorrentSessionOps {
+    /** Legacy add operation retained for M3 callers; new torrent flows use the typed overload. */
     fun addMagnet(magnetUri: String): Long
+
+    /** Adds a torrent using its explicit canonical destination. */
+    fun addMagnet(magnetUri: String, destination: TorrentDestination): Long = addMagnet(magnetUri)
+
+    /**
+     * Asynchronously moves torrent data to a new destination.
+     * Returns true if the request was accepted by the native engine.
+     * Completion is reported via storage_moved_alert (async).
+     */
+    fun moveStorage(torrentId: Long, targetPath: String): Boolean
+
     fun pauseTorrent(torrentId: Long): Boolean
     fun resumeTorrent(torrentId: Long): Boolean
     fun removeTorrent(torrentId: Long, deleteFiles: Boolean): Boolean
@@ -37,6 +49,7 @@ object TorrentSession : DaemonControl {
     private var _lastError: String? = null
     private var _version: String = "not loaded"
     private var _storagePermissionState: StoragePermissionState = StoragePermissionState.Ready
+    private var legacySavePath: String? = null
 
     val nativeLoaded get() = _nativeLoaded
     val sessionStarted get() = _sessionStarted
@@ -98,10 +111,10 @@ object TorrentSession : DaemonControl {
             val saveDir = context.getExternalFilesDir("downloads")
                 ?: context.filesDir
             saveDir.mkdirs()
+            legacySavePath = saveDir.canonicalPath
 
-            sessionId = nativeInit(saveDir.absolutePath)
+            sessionId = nativeInit(legacySavePath!!)
             if (sessionId > 0) {
-                nativeSetSavePath(sessionId, saveDir.absolutePath)
                 _sessionStarted = true
 
                 // Notify subscribers that the session is ready.
@@ -119,18 +132,18 @@ object TorrentSession : DaemonControl {
         }
     }
 
-    override fun destroy() {
-        try {
-            if (sessionId > 0) {
-                nativeDestroy(sessionId)
-            }
-        } catch (e: Exception) {
-            _lastError = e.message
-        } finally {
+    override fun destroy(): Boolean {
+        return try {
+            if (sessionId > 0) nativeDestroy(sessionId)
             sessionId = 0
+            legacySavePath = null
             _sessionStarted = false
             // Preserve storage permission state across daemon restarts.
             EventBus.post(SessionEvent.Stopped)
+            true
+        } catch (e: Exception) {
+            _lastError = e.message ?: "Native session destruction failed"
+            false
         }
     }
 
@@ -142,20 +155,34 @@ object TorrentSession : DaemonControl {
      * and report [StoragePermissionState.RevokedRuntime] in the WebUI.
      */
     override fun refreshStoragePermissionState(context: Context) {
-        _storagePermissionState = StoragePermissionChecker.getCurrentState(context)
+        val currentState = StoragePermissionChecker.getCurrentState(context)
+        _storagePermissionState = currentState
     }
 
     // -------------------------------------------------------------------
     // Torrent operations
     // -------------------------------------------------------------------
 
+    /** Legacy add path for retained M3 callers. New product flows must pass a destination. */
     override fun addMagnet(magnetUri: String): Long {
+        val destination = legacySavePath ?: run {
+            _lastError = "Session not initialized"
+            return -1L
+        }
+        return addMagnet(magnetUri, TorrentDestination(destination))
+    }
+
+    override fun addMagnet(magnetUri: String, destination: TorrentDestination): Long {
         return try {
             if (sessionId <= 0) {
                 _lastError = "Session not initialized"
                 return -1L
             }
-            val torrentId = nativeAddMagnet(sessionId, magnetUri)
+            if (destination.path.isBlank()) {
+                _lastError = "Destination path is required"
+                return -1L
+            }
+            val torrentId = nativeAddMagnet(sessionId, magnetUri, destination.path)
             if (torrentId > 0) torrentId else {
                 _lastError = "Failed to add magnet"
                 -1L
@@ -196,6 +223,16 @@ object TorrentSession : DaemonControl {
         }
     }
 
+    override fun moveStorage(torrentId: Long, targetPath: String): Boolean {
+        return try {
+            if (sessionId <= 0) return false
+            nativeMoveStorage(sessionId, torrentId, targetPath)
+        } catch (e: Exception) {
+            _lastError = e.message
+            false
+        }
+    }
+
     // -------------------------------------------------------------------
     // Status queries
     // -------------------------------------------------------------------
@@ -224,7 +261,7 @@ object TorrentSession : DaemonControl {
                 downloadRate = raw[2],
                 uploadRate = raw[3],
                 peers = raw[4].toInt(),
-                savePath = nativeGetSavePath(sessionId),
+                savePath = nativeGetTorrentSavePath(sessionId, torrentId),
                 error = null
             )
         } catch (e: Exception) {
@@ -372,10 +409,14 @@ object TorrentSession : DaemonControl {
     // JNI entry points (extern)
     // -------------------------------------------------------------------
 
-    private external fun nativeInit(savePath: String): Long
+    private external fun nativeInit(legacySavePath: String): Long
     private external fun nativeDestroy(sessionId: Long)
     private external fun nativeVersion(): String
-    private external fun nativeAddMagnet(sessionId: Long, magnetUri: String): Long
+    private external fun nativeAddMagnet(
+        sessionId: Long,
+        magnetUri: String,
+        destinationPath: String
+    ): Long
     private external fun nativePauseTorrent(sessionId: Long, torrentId: Long): Boolean
     private external fun nativeResumeTorrent(sessionId: Long, torrentId: Long): Boolean
     private external fun nativeRemoveTorrent(sessionId: Long, torrentId: Long, deleteFiles: Boolean): Boolean
@@ -383,10 +424,15 @@ object TorrentSession : DaemonControl {
     private external fun nativeGetTorrentName(sessionId: Long, torrentId: Long): String
     private external fun nativeGetLastError(sessionId: Long): String?
     private external fun nativeGetAllTorrentIds(sessionId: Long): LongArray
-    private external fun nativeSetSavePath(sessionId: Long, path: String)
-
-    private external fun nativeGetSavePath(sessionId: Long): String
+    private external fun nativeGetTorrentSavePath(sessionId: Long, torrentId: Long): String
     private external fun nativeSaveTorrentResumeData(sessionId: Long, torrentId: Long): Boolean
     private external fun nativeLoadTorrentResumeData(sessionId: Long, torrentId: Long): ByteArray?
     private external fun nativeRemoveTorrentResumeData(sessionId: Long, torrentId: Long)
+    private external fun nativeMoveStorage(sessionId: Long, torrentId: Long, targetPath: String): Boolean
+    /** Resets the tracked save path for a torrent (used after move failure). */
+    internal fun resetTorrentSavePath(runtimeId: Long) {
+        if (sessionId > 0) nativeResetTorrentSavePath(sessionId, runtimeId)
+    }
+
+    private external fun nativeResetTorrentSavePath(sessionId: Long, torrentId: Long)
 }

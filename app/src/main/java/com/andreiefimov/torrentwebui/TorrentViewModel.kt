@@ -1,7 +1,10 @@
 package com.andreiefimov.torrentwebui
 
 import android.app.Application
+import android.content.pm.PackageManager
+import android.os.Build
 import android.util.Log
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.andreiefimov.torrentwebui.events.AlertDispatcher
@@ -16,6 +19,22 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+
+internal data class DaemonUiHealth(
+    val diagnostics: NativeDiagnostics,
+    val sessionStarted: Boolean
+)
+
+/** Maps lifecycle health without pretending the native session has started. */
+internal fun mapDaemonUiHealth(
+    diagnostics: NativeDiagnostics,
+    health: TorrentDaemon.DaemonHealthStatus
+): DaemonUiHealth = DaemonUiHealth(
+    diagnostics = diagnostics.copy(
+        lastError = diagnostics.lastError ?: health.lastRecoverableError
+    ),
+    sessionStarted = diagnostics.sessionStarted
+)
 
 /**
  * ViewModel for Android fallback state, preserved across configuration changes.
@@ -63,17 +82,21 @@ class TorrentViewModel(application: Application) : AndroidViewModel(application)
     }
 
     private fun refreshDaemonHealth() {
-        val health = TorrentDaemon.getHealthStatus(getApplication())
-        val diagnostics = daemonControl.getDiagnostics()
-        val sessionStarted = health.lifecycleState in setOf(
-            TorrentDaemon.DaemonState.Starting.name,
-            TorrentDaemon.DaemonState.Running.name,
-            TorrentDaemon.DaemonState.RecoveryBlocked.name
-        )
+        // The daemon may not initialize while All Files Access is denied, so refresh the
+        // Android-derived state independently of session startup.
+        daemonControl.refreshStoragePermissionState(getApplication())
+        val app = getApplication<Application>()
+        val notificationPermissionGranted = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+            ContextCompat.checkSelfPermission(app, android.Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED
+        val health = TorrentDaemon.getHealthStatus(app)
+        val mappedHealth = mapDaemonUiHealth(daemonControl.getDiagnostics(), health)
         _uiState.value = _uiState.value.copy(
-            diagnostics = diagnostics,
-            sessionStarted = sessionStarted,
-            storagePermissionState = daemonControl.storagePermissionState
+            diagnostics = mappedHealth.diagnostics,
+            sessionStarted = mappedHealth.sessionStarted,
+            daemonLifecycleState = health.lifecycleState,
+            storagePermissionState = daemonControl.storagePermissionState,
+            notificationPermissionGranted = notificationPermissionGranted
         )
     }
 
@@ -138,15 +161,23 @@ class TorrentViewModel(application: Application) : AndroidViewModel(application)
                             refreshTorrents()
                         }
                         is TorrentEvent.Error -> {
-                            Log.e("TorrentViewModel", "Torrent error #$${event.torrentId}: ${event.message}")
+                            Log.e("TorrentViewModel", "Torrent operation failed for runtime id ${event.torrentId}")
                             refreshTorrents()
                         }
                         is TorrentEvent.DestinationUnavailable -> {
-                            Log.w("TorrentViewModel", "Destination unavailable for torrent #${event.torrentId}: ${event.path}")
+                            Log.w("TorrentViewModel", "Torrent destination is unavailable")
+                            refreshTorrents()
+                        }
+                        is TorrentEvent.MoveCompleted -> {
+                            Log.i("TorrentViewModel", "Move completed")
+                            refreshTorrents()
+                        }
+                        is TorrentEvent.MoveFailed -> {
+                            Log.w("TorrentViewModel", "Move failed: ${event.error}")
                             refreshTorrents()
                         }
                         is TorrentEvent.MoveInterrupted -> {
-                            Log.w("TorrentViewModel", "Move interrupted for torrent #${event.torrentId}: ${event.sourcePath} → ${event.targetPath}")
+                            Log.w("TorrentViewModel", "Torrent move was interrupted")
                             refreshTorrents()
                         }
                     }
@@ -174,14 +205,13 @@ class TorrentViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun addMagnet(uri: String) {
-        Log.d("TorrentViewModel", "Adding magnet: ${uri.take(60)}...")
         viewModelScope.launch {
             val id = daemonControl.addMagnet(uri)
             if (id > 0) {
                 Log.d("TorrentViewModel", "Magnet added, id=$id")
                 _uiState.value = _uiState.value.copy(addMagnetError = null)
             } else {
-                Log.e("TorrentViewModel", "Failed to add magnet: ${daemonControl.lastError}")
+                Log.e("TorrentViewModel", "Failed to add torrent")
                 _uiState.value = _uiState.value.copy(
                     addMagnetError = daemonControl.lastError
                 )
@@ -206,7 +236,8 @@ class TorrentViewModel(application: Application) : AndroidViewModel(application)
         pollingJob?.cancel()
         eventSubscription?.cancel()
         AlertDispatcher.stop()
-        daemonControl.destroy()
+        // TorrentDaemon owns the production session lifecycle; clearing the Android UI
+        // must not destroy a foreground daemon that continues in the background.
     }
 }
 
@@ -223,6 +254,8 @@ data class TorrentUiState(
         lastError = null
     ),
     val sessionStarted: Boolean = false,
+    val daemonLifecycleState: String = TorrentDaemon.DaemonState.Stopped.name,
+    val notificationPermissionGranted: Boolean = false,
     val addMagnetError: String? = null,
     val recentAlerts: List<AlertEvent> = emptyList(),
     val storagePermissionState: StoragePermissionState = StoragePermissionState.Ready

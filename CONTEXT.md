@@ -169,11 +169,13 @@ _Avoid_: WebUI setup wizard
 
 ### Torrent Data Move
 - An explicit operation that relocates the downloaded and partial data of one torrent from its current Approved Destination to another.
-- It pauses only that torrent while it copies and verifies target data, changes the destination only on success, and removes the source only afterward. Failure or cancellation retains the source and leaves the torrent paused with a recoverable error; a move is never implied by changing the Latest Selected Destination or another torrent's destination. Existing target files are never overwritten and may be reused only after normal piece verification.
+- Initiation acknowledges `moving` only after the durable move record exists and the native engine accepts the request; completion, failure, retry, and cancellation are asynchronous state transitions.
+- It pauses only that torrent while it copies and verifies target data, changes the destination only on success, and removes the source only afterward. Failure or cancellation retains the source and leaves the torrent paused with a recoverable error; a move is never implied by changing the Latest Selected Destination or another torrent's destination. Existing target files are never overwritten. A non-empty target enters `storage_conflict` and remains paused; automatic reuse is deferred until a native piece-verification flow exists.
 
 ### Move Interrupted
 - The recoverable paused state after a Torrent Data Move is interrupted by process termination, reboot, storage loss, or All Files Access revocation.
-- The app preserves both source and target data and requires an explicit retry or cancel; it never deletes either side automatically.
+- The app preserves both source and target data and requires an explicit retry or cancel; it never deletes either side automatically. Cancel is available only from this state: it clears the recovery record, leaves both locations intact, and keeps the torrent paused.
+- A legacy move record gains a QueueId only when exactly one durable Queue Entry has the recorded source path. An ambiguous record remains interrupted and unassociated; the app never guesses a torrent association.
 
 ### Verified Device Path
 - The actual absolute filesystem path for an Approved Destination, confirmed usable by the app and intended to be copied into device SSH sessions and operational tooling.

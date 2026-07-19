@@ -19,11 +19,19 @@ class DaemonControlTest {
         var resumeCalled = false
         var removeCalled = false
         var lastMagnet: String? = null
+        var lastDestination: TorrentDestination? = null
         var lastId: Long? = null
 
         override fun addMagnet(magnetUri: String): Long {
             addMagnetCalled = true
             lastMagnet = magnetUri
+            return 1L
+        }
+
+        override fun addMagnet(magnetUri: String, destination: TorrentDestination): Long {
+            addMagnetCalled = true
+            lastMagnet = magnetUri
+            lastDestination = destination
             return 1L
         }
 
@@ -41,6 +49,11 @@ class DaemonControlTest {
 
         override fun removeTorrent(torrentId: Long, deleteFiles: Boolean): Boolean {
             removeCalled = true
+            lastId = torrentId
+            return true
+        }
+
+        override fun moveStorage(torrentId: Long, targetPath: String): Boolean {
             lastId = torrentId
             return true
         }
@@ -80,6 +93,18 @@ class DaemonControlTest {
         assertTrue(mock.addMagnetCalled)
         assertEquals("magnet:?xt=urn:btih:test", mock.lastMagnet)
         assertEquals(1L, id)
+    }
+
+    @Test
+    fun factoryCreateForTest_delegatesTypedDestinationWhenAddingMagnet() {
+        val mock = MockSessionOps()
+        val control = DaemonControlFactory.createForTest(mock)
+        val destination = TorrentDestination("/storage/emulated/0/Download")
+
+        val id = control.addMagnet("magnet:?xt=urn:btih:test", destination)
+
+        assertEquals(1L, id)
+        assertEquals(destination, mock.lastDestination)
     }
 
     @Test
@@ -191,12 +216,7 @@ class DaemonControlTest {
         val mock = MockSessionOps()
         val control = DaemonControlFactory.createForTest(mock)
 
-        // Should not throw.
-        try {
-            control.destroy()
-        } catch (e: Exception) {
-            fail("destroy() should not throw: ${e.message}")
-        }
+        assertTrue("test control reports successful destruction", control.destroy())
     }
 
     // ---- Diagnostics delegation ----

@@ -28,15 +28,35 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 
+internal enum class StartupGateAction {
+    RequestNotificationPermission,
+    RequestStoragePermission,
+    StartDaemon
+}
+
+internal fun nextStartupGateAction(
+    notificationGranted: Boolean,
+    storageGranted: Boolean
+): StartupGateAction = when {
+    !notificationGranted -> StartupGateAction.RequestNotificationPermission
+    !storageGranted -> StartupGateAction.RequestStoragePermission
+    else -> StartupGateAction.StartDaemon
+}
+
 class MainActivity : ComponentActivity() {
     private val viewModel: TorrentViewModel by viewModels()
+    private var daemonStartRequested = false
+    private var notificationRequestLaunched = false
+    private var storageSettingsLaunched = false
+    private var storageSettingsPauseObserved = false
 
-    /** Permission launcher for POST_NOTIFICATIONS (Android 13+) */
+    /** Permission launcher for POST_NOTIFICATIONS (Android 13+). */
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
+        notificationRequestLaunched = false
         if (granted) {
-            TorrentDaemon.start(this.applicationContext)
+            advanceStartupGate()
         } else {
             Toast.makeText(
                 this,
@@ -48,34 +68,34 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val authManager = DefaultAuthManager(this.applicationContext)
-        // Wire the daemon control seam: production uses TorrentSession, tests can inject mocks.
+        val authManager = DefaultAuthManager(applicationContext)
         viewModel.daemonControl = DaemonControlFactory.create()
-
-        // Request notification permission (Android 13+) before starting daemon
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            val permissionGranted = ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.POST_NOTIFICATIONS
-            ) == PackageManager.PERMISSION_GRANTED
-
-            if (permissionGranted) {
-                TorrentDaemon.start(this.applicationContext)
-            } else {
-                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-            }
-        } else {
-            TorrentDaemon.start(this.applicationContext)
-        }
 
         setContent {
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
-                    // M3 Android fallback: only daemon health + Start/Stop downloads.
-                    // The WebUI is the sole primary control surface for torrent operations.
                     AndroidFallbackScreen(viewModel, authManager)
                 }
             }
+        }
+
+        advanceStartupGate()
+    }
+
+    override fun onPause() {
+        if (storageSettingsLaunched) {
+            storageSettingsPauseObserved = true
+        }
+        super.onPause()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (storageSettingsLaunched && storageSettingsPauseObserved) {
+            storageSettingsLaunched = false
+            storageSettingsPauseObserved = false
+            // Re-evaluate both gates, but do not immediately reopen settings when the user declined.
+            advanceStartupGate(allowStoragePrompt = false)
         }
     }
 
@@ -86,16 +106,42 @@ class MainActivity : ComponentActivity() {
         // or system termination does that.
     }
 
-    /**
-     * Checks storage permission and launches the system settings intent if denied.
-     * Called when the user taps "Grant storage permission" in the fallback UI.
-     */
-    fun requestStoragePermission() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            if (!android.os.Environment.isExternalStorageManager()) {
-                val intent = StoragePermissionChecker.launchPermissionSettings(this)
-                startActivity(intent)
+    /** Retries the centralized startup gate from the storage fallback UI. */
+    fun requestStoragePermission() = advanceStartupGate()
+
+    /** Retries the centralized startup gate from the notification fallback UI. */
+    fun requestNotificationPermission() = advanceStartupGate()
+
+    private fun advanceStartupGate(allowStoragePrompt: Boolean = true) {
+        when (nextStartupGateAction(
+            notificationGranted = hasNotificationPermission(),
+            storageGranted = StoragePermissionChecker.isGranted(this)
+        )) {
+            StartupGateAction.RequestNotificationPermission -> {
+                if (!notificationRequestLaunched) {
+                    notificationRequestLaunched = true
+                    notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                }
             }
+            StartupGateAction.RequestStoragePermission -> {
+                if (allowStoragePrompt && !storageSettingsLaunched) {
+                    storageSettingsLaunched = true
+                    startActivity(StoragePermissionChecker.launchPermissionSettings(this))
+                }
+            }
+            StartupGateAction.StartDaemon -> startDaemonOnce()
+        }
+    }
+
+    private fun hasNotificationPermission(): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED
+
+    private fun startDaemonOnce() {
+        if (!daemonStartRequested) {
+            daemonStartRequested = true
+            TorrentDaemon.start(applicationContext)
         }
     }
 }
@@ -148,8 +194,12 @@ fun AndroidFallbackScreen(viewModel: TorrentViewModel, authManager: AuthManager)
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Session status alert
-            if (!state.sessionStarted) {
+            // Session errors are distinct from an intentional stopped daemon.
+            if (!state.sessionStarted && (
+                state.daemonLifecycleState != TorrentDaemon.DaemonState.Stopped.name ||
+                    state.diagnostics.lastError != null
+                )
+            ) {
                 Alert(
                     type = AlertType.Error,
                     message = "Session failed to start. ${state.diagnostics.lastError ?: "Unknown error"}"
@@ -195,7 +245,33 @@ fun AndroidFallbackScreen(viewModel: TorrentViewModel, authManager: AuthManager)
                 }
             }
 
-            Spacer(modifier = Modifier.height(24.dp))
+            Spacer(modifier = Modifier.height(16.dp))
+
+            val notificationPermissionGranted = state.notificationPermissionGranted
+            if (!notificationPermissionGranted) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer
+                    )
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text("Notification Permission", style = MaterialTheme.typography.titleSmall)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text("Allow notifications before starting the download daemon.")
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Button(
+                            onClick = { (context as? MainActivity)?.requestNotificationPermission() },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Grant Notification Permission")
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(16.dp))
+            }
+            val canStartDownloads = storageState == StoragePermissionState.Ready &&
+                StoragePermissionChecker.isGranted(context) && notificationPermissionGranted
 
             // Start/Stop downloads buttons
             Row(
@@ -206,7 +282,7 @@ fun AndroidFallbackScreen(viewModel: TorrentViewModel, authManager: AuthManager)
                 FilledTonalButton(
                     onClick = { TorrentDaemon.resume(context) },
                     modifier = Modifier.weight(1f),
-                    enabled = !state.sessionStarted
+                    enabled = !state.sessionStarted && canStartDownloads
                 ) {
                     Text("Start downloads")
                 }

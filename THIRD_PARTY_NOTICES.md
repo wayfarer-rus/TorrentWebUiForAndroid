@@ -14,6 +14,7 @@ Track every third-party dependency used in this project.
 | CMake | 3.22.1 | https://cmake.org | BSD-3-Clause | Native build system | Toolchain | Builds native libraries |
 | JUnit | 4.13.2 | https://junit.org | EPL 2.0 | Unit testing | Test-only | Local unit tests |
 | AndroidX Test | 1.3.0 / 3.7.0 | https://developer.android.com/testing | Apache 2.0 | Instrumented testing | Test-only | Device instrumentation tests |
+| OkHttp | 4.12.0 | https://github.com/square/okhttp | Apache 2.0 | HTTP client for Android instrumentation tests | Test-only | Used in M4 emulator acceptance suite (androidTest) |
 
 ## Dependency Bootstrap
 

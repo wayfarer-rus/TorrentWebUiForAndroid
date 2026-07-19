@@ -41,6 +41,7 @@ class StoragePermissionTest {
             override fun pauseTorrent(torrentId: Long): Boolean = true
             override fun resumeTorrent(torrentId: Long): Boolean = true
             override fun removeTorrent(torrentId: Long, deleteFiles: Boolean): Boolean = true
+            override fun moveStorage(torrentId: Long, targetPath: String): Boolean = true
             override fun getAllTorrentIds(): List<Long> = emptyList()
             override fun getTorrentStatus(torrentId: Long): TorrentStatus? = null
             override fun popAlerts(): String = "[]"
@@ -60,6 +61,7 @@ class StoragePermissionTest {
             override fun pauseTorrent(torrentId: Long): Boolean = true
             override fun resumeTorrent(torrentId: Long): Boolean = true
             override fun removeTorrent(torrentId: Long, deleteFiles: Boolean): Boolean = true
+            override fun moveStorage(torrentId: Long, targetPath: String): Boolean = true
             override fun getAllTorrentIds(): List<Long> = emptyList()
             override fun getTorrentStatus(torrentId: Long): TorrentStatus? = null
             override fun popAlerts(): String = "[]"
@@ -81,6 +83,7 @@ class StoragePermissionTest {
             override fun pauseTorrent(torrentId: Long): Boolean = true
             override fun resumeTorrent(torrentId: Long): Boolean = true
             override fun removeTorrent(torrentId: Long, deleteFiles: Boolean): Boolean = true
+            override fun moveStorage(torrentId: Long, targetPath: String): Boolean = true
             override fun getAllTorrentIds(): List<Long> = emptyList()
             override fun getTorrentStatus(torrentId: Long): TorrentStatus? = null
             override fun popAlerts(): String = "[]"
@@ -104,6 +107,7 @@ class StoragePermissionTest {
             override fun pauseTorrent(torrentId: Long): Boolean = true
             override fun resumeTorrent(torrentId: Long): Boolean = true
             override fun removeTorrent(torrentId: Long, deleteFiles: Boolean): Boolean = true
+            override fun moveStorage(torrentId: Long, targetPath: String): Boolean = true
             override fun getAllTorrentIds(): List<Long> = emptyList()
             override fun getTorrentStatus(torrentId: Long): TorrentStatus? = null
             override fun popAlerts(): String = "[]"

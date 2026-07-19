@@ -34,6 +34,7 @@ class M3EmulatorAcceptanceTest {
     @Before
     fun setUp() {
         context = ApplicationProvider.getApplicationContext()
+        StartupPermissionTestHelper.ensureGranted(context)
         // Clean up any previous test state
         RecoverySuppressionStore.clearForceStopped(context)
         TorrentDaemon.stop(context)
@@ -45,6 +46,7 @@ class M3EmulatorAcceptanceTest {
     fun tearDown() {
         // Prove cleanup: daemon/server stopped, fixture shut down, recovery records removed
         TorrentDaemon.stop(context)
+        TorrentDaemon.resetDaemonControlFactory()
         AlertDispatcher.stop()
         TorrentSession.destroy()
 
@@ -142,8 +144,9 @@ class M3EmulatorAcceptanceTest {
     fun forceStop_preventsAutoRecovery() {
         // Given: A durable queue record eligible for automatic recovery
         val store = FileQueueStore(context)
+        val queued = QueueEntry(TEST_MAGNET)
         runBlocking {
-            store.saveQueueIntent(listOf(QueueEntry(TEST_MAGNET)))
+            store.saveQueueIntent(listOf(queued))
         }
         TorrentDaemon.start(context)
         Thread.sleep(2000)
@@ -157,7 +160,7 @@ class M3EmulatorAcceptanceTest {
         // Then: Automatic recovery remains suppressed, but the queue stays available for a user start.
         assertTrue("Force stop must suppress automatic recovery", RecoverySuppressionStore.isForceStopped(context))
         assertEquals("Stopped", TorrentDaemon.getHealthStatus(context).lifecycleState)
-        assertEquals(listOf(QueueEntry(TEST_MAGNET)), runBlocking { store.loadQueueIntent() })
+        assertEquals(listOf(queued), runBlocking { store.loadQueueIntent() })
 
     }
 
@@ -187,20 +190,54 @@ class M3EmulatorAcceptanceTest {
 
     @Test
     fun nativeStartupFailure_exposesRecoverableError() {
-        // Given: Native session fails to initialize (simulated by passing invalid save path)
-        // Note: This is a simplified test; in production you'd simulate a native failure
-
-        // When: Try to start daemon with invalid configuration
-        try {
-            TorrentSession.init(context) // This should succeed in normal conditions
-        } catch (e: Exception) {
-            // Expected in some test scenarios
+        val failingControl = object : DaemonControl by TorrentSession {
+            override val lastError: String = "Test torrent engine initialization failure"
+            override fun init(context: Context): Boolean = false
+            override fun getDiagnostics() = NativeDiagnostics(
+                abi = "test",
+                libtorrentVersion = "unavailable",
+                nativeLoaded = true,
+                sessionStarted = false,
+                lastError = lastError
+            )
         }
+        TorrentDaemon.daemonControlFactory = { failingControl }
 
-        // Then: Should expose recoverable error, not crash
-        val diagnostics = TorrentSession.getDiagnostics()
-        // Verify diagnostics are available even if session failed
-        assertNotNull("Diagnostics should be available", diagnostics)
+        TorrentDaemon.start(context)
+        Thread.sleep(1000)
+
+        val health = TorrentDaemon.getHealthStatus(context)
+        assertEquals(TorrentDaemon.DaemonState.Stopped.name, health.lifecycleState)
+        assertEquals("Test torrent engine initialization failure", health.lastRecoverableError)
+    }
+
+    @Test
+    fun nativeDestroyFailure_keepsDaemonRunningAndForceStopIntentDurable() {
+        var destroyAttempts = 0
+        val failingOnce = object : DaemonControl by TorrentSession {
+            override val lastError: String
+                get() = "Test native destroy failure"
+
+            override fun destroy(): Boolean {
+                destroyAttempts += 1
+                return if (destroyAttempts == 1) false else TorrentSession.destroy()
+            }
+        }
+        TorrentDaemon.daemonControlFactory = { failingOnce }
+        val store = FileQueueStore(context)
+        val queued = QueueEntry(TEST_MAGNET)
+        runBlocking { store.saveQueueIntent(listOf(queued)) }
+        TorrentDaemon.start(context)
+        Thread.sleep(1_000)
+
+        TorrentDaemon.requestForceStopForTest(context)
+        Thread.sleep(1_000)
+
+        val health = TorrentDaemon.getHealthStatus(context)
+        assertEquals(TorrentDaemon.DaemonState.Running.name, health.lifecycleState)
+        assertEquals("Test native destroy failure", health.lastRecoverableError)
+        assertTrue(RecoverySuppressionStore.isForceStopped(context))
+        assertEquals(listOf(queued), runBlocking { store.loadQueueIntent() })
     }
 
     @Test

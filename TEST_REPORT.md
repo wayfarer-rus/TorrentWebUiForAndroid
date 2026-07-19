@@ -352,3 +352,33 @@ This remains the required acceptance gate for the WebUI's LAN-accessibility clai
 - Unit tests pass (32/32 in `DaemonControlTest`, existing tests unchanged)
 - Emulator acceptance tests compile but require AVD execution for full validation
 - No physical-device LAN acceptance has been performed yet
+
+---
+
+## Milestone 4: Permission-Onboarding Emulator Validation
+
+**Status:** PASS — emulator-only. This is not physical-device validation.
+
+| Field | Value |
+|---|---|
+| Device | `emulator_skill` AVD, arm64-v8a |
+| Android version | API 36 / Android 16 emulator |
+| Test date | 2026-07-19 |
+| App build | Debug APK rebuilt from current working tree |
+
+### Permission and daemon startup flow
+
+| Step | Action | Actual result | Status |
+|---|---|---|---|
+| 1 | Run `StartupPermissionIntegrationTest` before the manifest fix | Fails: `MANAGE_EXTERNAL_STORAGE` absent from requested permissions | Expected red test |
+| 2 | Add manifest declaration and rerun the same instrumentation test | Passes on the AVD | PASS |
+| 3 | Clean-install and launch the app | Android `POST_NOTIFICATIONS` prompt displayed; fallback UI remained responsive | PASS |
+| 4 | Allow notifications, then inspect All Files Access settings | Special-access switch was enabled (not greyed out) | PASS |
+| 5 | Toggle All Files Access and inspect Android UI hierarchy | Switch reported `checked="true"` | PASS |
+| 6 | Return to the app | Diagnostics: native loaded `yes`, session started `yes`, libtorrent `2.0.10.0`, storage `Ready` | PASS |
+| 7 | Verify server log | `TorrentServer: Ktor server started successfully` and `TorrentDaemon: Daemon started successfully` | PASS |
+| 8 | Forward `tcp:8081` to emulator `tcp:8080` and open `http://localhost:8081` | Authenticated WebUI endpoint reachable; unauthenticated root correctly returned HTTP 401 | PASS |
+
+### Scope and evidence
+
+The test used real Android system dialogs and the emulator UI hierarchy (`uiautomator dump`) to grant permissions. No `pm grant`, `appops`, bypass, or temporary permission override was used. The browser endpoint was reached over ADB port forwarding; authentication remains expected by product policy.

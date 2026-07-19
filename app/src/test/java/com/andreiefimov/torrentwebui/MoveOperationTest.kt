@@ -9,7 +9,7 @@ import org.junit.Test
  *
  * Verifies:
  * - MovePhase enum values and semantics.
- * - MoveJournalEntry data class properties.
+ * - PersistedMoveEntry data class properties.
  * - MoveResult status values.
  * - Move journal persistence format (pipe-delimited).
  */
@@ -41,12 +41,12 @@ class MoveOperationTest {
         assertEquals("Interrupted", MovePhase.Interrupted.name)
     }
 
-    // ---- MoveJournalEntry data class ----
+    // ---- PersistedMoveEntry data class ----
 
     @Test
-    fun `MoveJournalEntry_defaultUpdatedAt_isCurrentTime`() {
-        val entry = MoveJournalEntry(
-            torrentId = 42L,
+    fun `PersistedMoveEntry_defaultUpdatedAt_isCurrentTime`() {
+        val entry = PersistedMoveEntry(
+            queueId = QueueId.random(),
             sourcePath = "/sdcard/Movies",
             targetPath = "/storage/USB/Movies",
             phase = MovePhase.JournalPersisted,
@@ -57,9 +57,10 @@ class MoveOperationTest {
     }
 
     @Test
-    fun `MoveJournalEntry_allFieldsPreservedOnCopy`() {
-        val original = MoveJournalEntry(
-            torrentId = 42L,
+    fun `PersistedMoveEntry_allFieldsPreservedOnCopy`() {
+        val queueId = QueueId.random()
+        val original = PersistedMoveEntry(
+            queueId = queueId,
             sourcePath = "/sdcard/Movies",
             targetPath = "/storage/USB/Movies",
             phase = MovePhase.Copying,
@@ -67,7 +68,7 @@ class MoveOperationTest {
             updatedAt = 2000L
         )
         val copied = original.copy(phase = MovePhase.Verifying)
-        assertEquals(42L, copied.torrentId)
+        assertEquals(queueId, copied.queueId)
         assertEquals("/sdcard/Movies", copied.sourcePath)
         assertEquals("/storage/USB/Movies", copied.targetPath)
         assertEquals(MovePhase.Verifying, copied.phase)

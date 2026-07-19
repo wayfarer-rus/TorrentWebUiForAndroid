@@ -8,155 +8,133 @@ import java.io.File
 /**
  * Executes safe torrent data moves between approved destinations.
  *
- * Move protocol (per M4 spec):
- * 1. Reject when storage permission is unavailable or another move is active for that torrent.
- * 2. Persist a move journal before changing data.
- * 3. Pause only the target torrent and report `moving`.
- * 4. Copy/move through File operations (native JNI copy not yet integrated), then verify target data.
- * 5. Atomically persist the new queue destination only after verification succeeds.
- * 6. Remove the source only after that durable destination update succeeds.
- * 7. Resume only on explicit user action where the torrent was previously paused or recovery requires it.
+ * Uses the typed native move_storage operation. Move initiation acknowledges
+ * `moving` immediately after the durable move record exists and the native engine
+ * accepts the request. Completion, failure, retry, and cancellation are asynchronous.
  *
- * Failure or cancellation preserves source and target data, retains the journal,
- * and leaves the torrent paused with a recoverable status.
+ * Cancel is available only from `move_interrupted`: it clears the recovery record,
+ * leaves both filesystem locations intact, and keeps the torrent paused.
  */
 class MoveService(
     private val context: Context,
     private val queueStore: QueueStore,
-    private val journal: MoveJournal
+    private val journal: MoveJournal,
+    private val control: TorrentSessionOps,
+    private val bindings: QueueRuntimeBindings
 ) {
 
     /**
-     * Initiates a move of [torrentId] from its current destination to [newDestination].
-     * @return MoveResult with status and optional error.
+     * Initiates a move of one torrent to [newDestination].
+     *
+     * Returns `ok` / `moving` only after the durable move record exists and the native
+     * engine accepts the request. The HTTP caller acknowledges `moving` immediately;
+     * completion is async.
      */
-    suspend fun startMove(torrentId: Long, newDestination: String): MoveResult = withContext(Dispatchers.IO) {
+    suspend fun startMove(runtimeId: Long, newDestination: String): MoveResult = withContext(Dispatchers.IO) {
         // 1. Validate storage permission.
         if (!StoragePermissionChecker.isGranted(context)) {
             return@withContext MoveResult(status = "error", recoverableError = "Storage permission required")
         }
 
-        // 2. Check no other move is active for this torrent.
-        val existingMove = journal.getMove(torrentId)
+        // 2. Resolve queue identity.
+        val queueId = bindings.queueIdFor(runtimeId) ?: run {
+            return@withContext MoveResult(status = "error", recoverableError = "Torrent not found")
+        }
+
+        // 3. Check no other move is active for this torrent.
+        val existingMove = journal.getMove(queueId)
         if (existingMove != null && existingMove.phase != MovePhase.Interrupted) {
             return@withContext MoveResult(status = "error", recoverableError = "Move already in progress for this torrent")
         }
 
-        // 3. Get current queue entry to find source path.
+        // 4. Get current queue entry to find source path.
         val queue = queueStore.loadQueueIntent()
-        val entry = queue.find { it.magnetUri.contains("torrent_$torrentId") } ?: run {
-            return@withContext MoveResult(status = "error", recoverableError = "Torrent not found in queue")
+        val entry = queue.find { it.queueId == queueId } ?: run {
+            return@withContext MoveResult(status = "error", recoverableError = "Torrent not found in durable queue")
         }
 
         val sourcePath = entry.destinationPath ?: run {
             return@withContext MoveResult(status = "error", recoverableError = "Torrent has no destination path")
         }
 
-        // 4. Validate new destination.
+        // 5. Validate new destination.
         val validation = DirectoryValidationService.validate(context, newDestination)
         if (!validation.isValid) {
             return@withContext MoveResult(status = "error", recoverableError = validation.rejectionReason ?: "Invalid destination")
         }
 
-        // 5. Persist move journal.
-        val journalCreated = if (existingMove != null && existingMove.phase == MovePhase.Interrupted) {
-            journal.updatePhase(torrentId, MovePhase.JournalPersisted)
-        } else {
-            journal.createMove(torrentId, sourcePath, validation.canonicalPath!!)
+        val targetPath = validation.canonicalPath!!
+
+        // 6. Check for existing target data — if non-empty, enter storage_conflict.
+        val targetDir = File(targetPath)
+        if (targetDir.exists() && targetDir.isDirectory && targetDir.listFiles()?.isNotEmpty() == true) {
+            // Target contains data — pause and report conflict without overwriting.
+            if (existingMove == null) {
+                journal.createMove(queueId, sourcePath, targetPath)
+            }
+            journal.updatePhase(queueId, MovePhase.Interrupted)
+            return@withContext MoveResult(
+                status = "interrupted",
+                recoverableError = "Target already contains data; move paused with storage conflict"
+            )
         }
-        if (!journalCreated) {
+
+        // 7. Persist move journal (or resume interrupted).
+        val journalOk = if (existingMove != null && existingMove.phase == MovePhase.Interrupted) {
+            journal.updatePhase(queueId, MovePhase.JournalPersisted)
+        } else {
+            journal.createMove(queueId, sourcePath, targetPath)
+        }
+        if (!journalOk) {
             return@withContext MoveResult(status = "error", recoverableError = "Failed to persist move journal")
         }
 
-        // 6. Update phase to Copying.
-        journal.updatePhase(torrentId, MovePhase.Copying)
+        // 8. Pause the torrent.
+        control.pauseTorrent(runtimeId)
 
-        try {
-            // 7. Copy data from source to target.
-            copyDirectory(File(sourcePath), File(validation.canonicalPath!!))
-
-            // 8. Update phase to Verifying.
-            journal.updatePhase(torrentId, MovePhase.Verifying)
-
-            // 9. Verify target data exists (simplified: check directory is non-empty or matches source).
-            val targetDir = File(validation.canonicalPath!!)
-            if (!targetDir.isDirectory || !targetDir.canRead()) {
-                throw RuntimeException("Target directory not accessible after copy")
-            }
-
-            // 10. Update phase to QueueUpdated — atomically update queue destination.
-            journal.updatePhase(torrentId, MovePhase.QueueUpdated)
-            val updatedQueue = queue.map { qEntry ->
-                if (qEntry.magnetUri.contains("torrent_$torrentId")) {
-                    qEntry.copy(destinationPath = validation.canonicalPath)
-                } else qEntry
-            }
-            queueStore.saveQueueIntent(updatedQueue)
-
-            // 11. Update phase to SourceRemoved — remove source data.
-            journal.updatePhase(torrentId, MovePhase.SourceRemoved)
-            deleteDirectoryRecursively(File(sourcePath))
-
-            // 12. Mark move as completed.
-            journal.updatePhase(torrentId, MovePhase.Completed)
-            journal.removeMove(torrentId)
-
-            MoveResult(status = "ok")
-        } catch (e: Exception) {
-            // Failure: mark as interrupted, preserve source and target.
-            journal.updatePhase(torrentId, MovePhase.Interrupted)
-            MoveResult(status = "interrupted", recoverableError = e.message ?: "Move failed")
+        // 9. Request native async move.
+        val nativeOk = control.moveStorage(runtimeId, targetPath)
+        if (!nativeOk) {
+            // Native rejected — mark as interrupted.
+            journal.updatePhase(queueId, MovePhase.Interrupted)
+            return@withContext MoveResult(
+                status = "interrupted",
+                recoverableError = control.lastError ?: "Native move rejected"
+            )
         }
+
+        // Accepted by native engine. Mark as copying; daemon alert handler will transition further.
+        journal.updatePhase(queueId, MovePhase.Copying)
+
+        MoveResult(status = "ok")
     }
 
-    /** Cancels an active move, preserving source and target data. */
-    suspend fun cancelMove(torrentId: Long): Boolean = withContext(Dispatchers.IO) {
-        val move = journal.getMove(torrentId) ?: return@withContext false
-        if (move.phase == MovePhase.Completed || move.phase == MovePhase.Interrupted) return@withContext false
+    /**
+     * Cancels a move. Available only from `move_interrupted`.
+     * Clears the recovery record, leaves both locations intact, keeps the torrent paused.
+     */
+    suspend fun cancelMove(runtimeId: Long): Boolean = withContext(Dispatchers.IO) {
+        val queueId = bindings.queueIdFor(runtimeId) ?: return@withContext false
+        val move = journal.getMove(queueId) ?: return@withContext false
+        if (move.phase != MovePhase.Interrupted) return@withContext false
 
-        journal.updatePhase(torrentId, MovePhase.Interrupted)
+        journal.removeMove(queueId)
         true
     }
 
     /** Retries an interrupted move. */
-    suspend fun retryMove(torrentId: Long, newDestination: String): MoveResult = withContext(Dispatchers.IO) {
-        val move = journal.getMove(torrentId)
+    suspend fun retryMove(runtimeId: Long, newDestination: String): MoveResult = withContext(Dispatchers.IO) {
+        val queueId = bindings.queueIdFor(runtimeId) ?: return@withContext MoveResult(
+            status = "error", recoverableError = "Torrent not found"
+        )
+        val move = journal.getMove(queueId)
         if (move == null || move.phase != MovePhase.Interrupted) {
-            return@withContext MoveResult(status = "error", recoverableError = "No interrupted move found for this torrent")
+            return@withContext MoveResult(
+                status = "error", recoverableError = "No interrupted move found for this torrent"
+            )
         }
 
-        // Start a new move from the current target (which became the effective source).
-        startMove(torrentId, newDestination)
-    }
-
-    // ---- File operations ----
-
-    private fun copyDirectory(source: File, target: File) {
-        if (!source.exists()) return
-
-        target.mkdirs()
-
-        source.listFiles()?.forEach { file ->
-            val newFile = File(target, file.name)
-            if (file.isDirectory) {
-                copyDirectory(file, newFile)
-            } else {
-                file.copyTo(newFile, overwrite = false)
-            }
-        }
-    }
-
-    private fun deleteDirectoryRecursively(dir: File) {
-        if (!dir.exists()) return
-        dir.listFiles()?.forEach { it.delete() }
-        dir.delete()
+        // Start a new move to the specified destination.
+        startMove(runtimeId, newDestination)
     }
 }
-
-/**
- * Result of a move operation.
- */
-data class MoveResult(
-    val status: String, // "ok", "interrupted", "error"
-    val recoverableError: String? = null
-)

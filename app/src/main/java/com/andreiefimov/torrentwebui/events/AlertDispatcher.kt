@@ -96,6 +96,27 @@ object AlertDispatcher {
                                 EventBus.postTorrentEvent(TorrentEvent.Removed(torrentId))
                             }
                         }
+                        "storage_moved_alert" -> {
+                            // Native move completed successfully.
+                            if (torrentId > 0) {
+                                EventBus.postTorrentEvent(TorrentEvent.MoveCompleted(
+                                    torrentId = torrentId,
+                                    sourcePath = "",
+                                    targetPath = alert.message
+                                ))
+                            }
+                        }
+                        "storage_moved_failed_alert" -> {
+                            // Native move failed.
+                            if (torrentId > 0) {
+                                EventBus.postTorrentEvent(TorrentEvent.MoveFailed(
+                                    torrentId = torrentId,
+                                    sourcePath = "",
+                                    targetPath = "",
+                                    error = alert.message
+                                ))
+                            }
+                        }
                         "tracker_warning_alert",
                         "listen_failed_alert" -> {
                             EventBus.postSessionEvent(SessionEvent.Warning(alert.message))

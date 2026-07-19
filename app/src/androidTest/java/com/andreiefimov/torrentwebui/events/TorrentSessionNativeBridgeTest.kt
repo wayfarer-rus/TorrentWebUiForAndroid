@@ -122,6 +122,26 @@ class TorrentSessionNativeBridgeTest {
     // ======================================================================
 
     @Test
+    fun addMagnet_usesTheExplicitDestinationPath() = runBlocking {
+        val initOk = TorrentSession.init(context)
+        if (!initOk) return@runBlocking
+        val destination = java.io.File(context.getExternalFilesDir(null), "m4_native_destination").apply {
+            mkdirs()
+        }.canonicalPath
+
+        val torrentId = TorrentSession.addMagnet(TEST_MAGNET, com.andreiefimov.torrentwebui.TorrentDestination(destination))
+        assertTrue("addMagnet should return positive ID", torrentId > 0)
+
+        val status = TorrentSession.getTorrentStatus(torrentId)
+        assertNotNull("getTorrentStatus should return the added torrent", status)
+        assertEquals(destination, status!!.savePath)
+
+        TorrentSession.removeTorrent(torrentId, deleteFiles = false)
+        java.io.File(destination).delete()
+        TorrentSession.destroy()
+    }
+
+    @Test
     fun getTorrentStatus_providesValidData() = runBlocking {
         val initOk = TorrentSession.init(context)
         if (!initOk) return@runBlocking

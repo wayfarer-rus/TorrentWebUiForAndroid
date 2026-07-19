@@ -14,6 +14,10 @@ import android.content.Context
  *
  * Currently, the production implementation is backed by [TorrentSession] (the JNI bridge).
  */
+/** A canonical filesystem path selected for one torrent operation. */
+@JvmInline
+value class TorrentDestination(val path: String)
+
 interface DaemonControl : TorrentSessionOps {
 
     /**
@@ -43,8 +47,9 @@ interface DaemonControl : TorrentSessionOps {
 
     /**
      * Destroy the native torrent session and release resources. Called on shutdown.
+     * @return true only when native ownership was released.
      */
-    fun destroy()
+    fun destroy(): Boolean
 
     /**
      * Returns diagnostics data from the native layer (ABI, version, load status, etc.).
@@ -88,7 +93,7 @@ object DaemonControlFactory {
      */
     fun createForTest(sessionOps: TorrentSessionOps, storagePermissionState: StoragePermissionState = StoragePermissionState.Ready): DaemonControl = object : DaemonControl {
         override fun init(context: Context): Boolean = true
-        override fun destroy() {}
+        override fun destroy(): Boolean = true
         override fun getDiagnostics(): NativeDiagnostics = NativeDiagnostics(
             abi = "test",
             libtorrentVersion = "test",
@@ -100,10 +105,14 @@ object DaemonControlFactory {
         override fun refreshStoragePermissionState(context: Context) {}
         // Delegate all ops to the provided sessionOps.
         override fun addMagnet(magnetUri: String): Long = sessionOps.addMagnet(magnetUri)
+        override fun addMagnet(magnetUri: String, destination: TorrentDestination): Long =
+            sessionOps.addMagnet(magnetUri, destination)
         override fun pauseTorrent(torrentId: Long): Boolean = sessionOps.pauseTorrent(torrentId)
         override fun resumeTorrent(torrentId: Long): Boolean = sessionOps.resumeTorrent(torrentId)
         override fun removeTorrent(torrentId: Long, deleteFiles: Boolean): Boolean =
             sessionOps.removeTorrent(torrentId, deleteFiles)
+        override fun moveStorage(torrentId: Long, targetPath: String): Boolean =
+            sessionOps.moveStorage(torrentId, targetPath)
         override fun getAllTorrentIds(): List<Long> = sessionOps.getAllTorrentIds()
         override fun getTorrentStatus(torrentId: Long): TorrentStatus? = sessionOps.getTorrentStatus(torrentId)
         override fun popAlerts(): String = sessionOps.popAlerts()

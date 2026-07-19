@@ -1,12 +1,15 @@
 package com.andreiefimov.torrentwebui
 
 import android.content.Context
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
 import java.io.File
+import java.io.FileOutputStream
+import java.util.UUID
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -25,6 +28,16 @@ interface QueueStore {
 
     /** Loads the saved queue intent, or returns an empty list if none exists. */
     suspend fun loadQueueIntent(): List<QueueEntry>
+
+    /**
+     * Atomically loads, transforms, and checkpoints queue intent.
+     *
+     * The transform is serialized with every other queue-intent read/write so an identity
+     * checkpoint performed during safe stop cannot overwrite a concurrent acknowledged mutation.
+     */
+    suspend fun mutateQueueIntent(
+        transform: suspend (List<QueueEntry>) -> List<QueueEntry>
+    ): List<QueueEntry>
 
     /** Saves native resume data for a specific torrent. */
     suspend fun saveResumeData(torrentId: Long, resumeData: ByteArray)
@@ -66,10 +79,26 @@ interface QueueStore {
  *   When null, the torrent uses the global legacy save directory. New torrents must
  *   always specify a destination; existing imports may have null until migrated.
  */
+@Serializable
+@JvmInline
+value class QueueId(val value: String) {
+    companion object {
+        fun random(): QueueId = QueueId(UUID.randomUUID().toString())
+    }
+}
+
+@Serializable
 data class QueueEntry(
     val magnetUri: String,
     val isPaused: Boolean = false,
-    val destinationPath: String? = null
+    val destinationPath: String? = null,
+    val queueId: QueueId = QueueId.random()
+)
+
+@Serializable
+private data class PersistedQueue(
+    val version: Int,
+    val entries: List<QueueEntry>
 )
 
 /**
@@ -80,14 +109,20 @@ class InMemoryQueueStore(
 ) : QueueStore {
 
     private val queueIntent = AtomicReference<List<QueueEntry>>(emptyList())
+    private val queueMutex = Mutex()
     private val resumeData = mutableMapOf<Long, ByteArray>()
 
     override suspend fun saveQueueIntent(queue: List<QueueEntry>) {
-        queueIntent.set(queue)
+        queueMutex.withLock { queueIntent.set(queue.toList()) }
     }
 
-    override suspend fun loadQueueIntent(): List<QueueEntry> {
-        return queueIntent.get()
+    override suspend fun loadQueueIntent(): List<QueueEntry> =
+        queueMutex.withLock { queueIntent.get() }
+
+    override suspend fun mutateQueueIntent(
+        transform: suspend (List<QueueEntry>) -> List<QueueEntry>
+    ): List<QueueEntry> = queueMutex.withLock {
+        transform(queueIntent.get()).toList().also(queueIntent::set)
     }
 
     override suspend fun saveResumeData(torrentId: Long, resumeData: ByteArray) {
@@ -103,7 +138,7 @@ class InMemoryQueueStore(
     }
 
     override suspend fun clearAll() {
-        queueIntent.set(emptyList())
+        queueMutex.withLock { queueIntent.set(emptyList()) }
         resumeData.clear()
     }
 
@@ -112,17 +147,16 @@ class InMemoryQueueStore(
 
     override suspend fun migrateLegacyEntries(): Boolean {
         val path = globalLegacySavePath ?: return false
-        val current = queueIntent.get()
-        val hasNulls = current.any { it.destinationPath == null }
-        if (hasNulls) {
-            val migrated = current.map { entry ->
-                if (entry.destinationPath == null) {
-                    entry.copy(destinationPath = path)
-                } else entry
+        return queueMutex.withLock {
+            val current = queueIntent.get()
+            val hasNulls = current.any { it.destinationPath == null }
+            if (hasNulls) {
+                queueIntent.set(current.map { entry ->
+                    if (entry.destinationPath == null) entry.copy(destinationPath = path) else entry
+                })
             }
-            queueIntent.set(migrated)
+            hasNulls
         }
-        return hasNulls
     }
 }
 
@@ -133,41 +167,31 @@ class InMemoryQueueStore(
  */
 class FileQueueStore(
     private val context: Context,
-    override val globalLegacySavePath: String? = null
+    override val globalLegacySavePath: String? = null,
+    private val idFactory: () -> QueueId = { QueueId.random() }
 ) : QueueStore {
 
     private val queueFile = File(context.filesDir, "queue_intent.json")
     private val resumeDir = File(context.filesDir, "resume_data")
+    private val queueMutex = Mutex()
 
     init {
         resumeDir.mkdirs()
     }
 
     override suspend fun saveQueueIntent(queue: List<QueueEntry>) = withContext(Dispatchers.IO) {
-        val json = queue.joinToString("\n") { entry ->
-            "${entry.magnetUri}|${entry.isPaused}|${entry.destinationPath ?: ""}"
-        }
-        writeAtomic(queueFile, json.toByteArray())
+        queueMutex.withLock { writeQueue(queue) }
     }
 
     override suspend fun loadQueueIntent(): List<QueueEntry> = withContext(Dispatchers.IO) {
-        if (!queueFile.exists()) return@withContext emptyList()
-        val content = queueFile.readText()
-        content.lines().mapNotNull { line ->
-            val parts = line.split("|")
-            when (parts.size) {
-                2 -> QueueEntry(
-                    magnetUri = parts[0],
-                    isPaused = parts[1].toBoolean(),
-                    destinationPath = null // legacy entry — no per-torrent path
-                )
-                3 -> QueueEntry(
-                    magnetUri = parts[0],
-                    isPaused = parts[1].toBoolean(),
-                    destinationPath = parts[2].takeIf { it.isNotEmpty() }
-                )
-                else -> null // malformed line, skip
-            }
+        queueMutex.withLock { loadFromFile() }
+    }
+
+    override suspend fun mutateQueueIntent(
+        transform: suspend (List<QueueEntry>) -> List<QueueEntry>
+    ): List<QueueEntry> = withContext(Dispatchers.IO) {
+        queueMutex.withLock {
+            transform(loadFromFile()).toList().also(::writeQueue)
         }
     }
 
@@ -188,55 +212,80 @@ class FileQueueStore(
 
     override suspend fun clearAll() {
         withContext(Dispatchers.IO) {
-            if (queueFile.exists()) queueFile.delete()
-            resumeDir.listFiles()?.forEach { it.delete() }
+            queueMutex.withLock {
+                if (queueFile.exists()) queueFile.delete()
+                resumeDir.listFiles()?.forEach { it.delete() }
+            }
         }
     }
 
     override suspend fun migrateLegacyEntries(): Boolean {
         val path = globalLegacySavePath ?: return false
         return withContext(Dispatchers.IO) {
-            val current = if (!queueFile.exists()) emptyList() else loadFromFile()
-            val hasNulls = current.any { it.destinationPath == null }
-            if (hasNulls) {
-                val migrated = current.map { entry ->
-                    if (entry.destinationPath == null) {
-                        entry.copy(destinationPath = path)
-                    } else entry
+            queueMutex.withLock {
+                val current = loadFromFile()
+                val hasNulls = current.any { it.destinationPath == null }
+                if (hasNulls) {
+                    writeQueue(current.map { entry ->
+                        if (entry.destinationPath == null) entry.copy(destinationPath = path) else entry
+                    })
                 }
-                val json = migrated.joinToString("\n") { entry ->
-                    "${entry.magnetUri}|${entry.isPaused}|${entry.destinationPath ?: ""}"
-                }
-                writeAtomic(queueFile, json.toByteArray())
+                hasNulls
             }
-            hasNulls
         }
     }
 
     private fun loadFromFile(): List<QueueEntry> {
         if (!queueFile.exists()) return emptyList()
         val content = queueFile.readText()
-        return content.lines().mapNotNull { line ->
-            val parts = line.split("|")
-            when (parts.size) {
-                2 -> QueueEntry(
-                    magnetUri = parts[0],
-                    isPaused = parts[1].toBoolean(),
-                    destinationPath = null
-                )
-                3 -> QueueEntry(
-                    magnetUri = parts[0],
-                    isPaused = parts[1].toBoolean(),
-                    destinationPath = parts[2].takeIf { it.isNotEmpty() }
-                )
-                else -> null
+        if (content.isBlank()) return emptyList()
+        if (content.trimStart().startsWith("{")) {
+            val persisted = Json.decodeFromString(PersistedQueue.serializer(), content)
+            require(persisted.version == QUEUE_FORMAT_VERSION) {
+                "Unsupported queue format version ${persisted.version}"
             }
+            return persisted.entries
         }
+
+        // V1 was an unversioned pipe-delimited row format. Assign IDs once while holding the
+        // queue lock, then immediately replace it with V2 so IDs remain stable across restarts.
+        val migrated = content.lineSequence().filter { it.isNotBlank() }.map { line ->
+            val parts = line.split("|", limit = 3)
+            require(parts.size in 2..3) { "Malformed legacy queue entry" }
+            QueueEntry(
+                magnetUri = parts[0],
+                isPaused = requireNotNull(parts[1].toBooleanStrictOrNull()) {
+                    "Malformed legacy queue pause intent"
+                },
+                destinationPath = parts.getOrNull(2)?.takeIf { it.isNotEmpty() },
+                queueId = idFactory()
+            )
+        }.toList()
+        writeQueue(migrated)
+        return migrated
+    }
+
+    private fun writeQueue(queue: List<QueueEntry>) {
+        val content = Json.encodeToString(
+            PersistedQueue.serializer(),
+            PersistedQueue(version = QUEUE_FORMAT_VERSION, entries = queue)
+        )
+        writeAtomic(queueFile, content.toByteArray())
+    }
+
+    private companion object {
+        const val QUEUE_FORMAT_VERSION = 2
     }
 
     private fun writeAtomic(file: File, data: ByteArray) {
         val tempFile = File(file.parentFile, "${file.name}.tmp")
-        tempFile.writeBytes(data)
-        tempFile.renameTo(file)
+        FileOutputStream(tempFile).use { output ->
+            output.write(data)
+            output.fd.sync()
+        }
+        if (!tempFile.renameTo(file)) {
+            tempFile.delete()
+            throw java.io.IOException("Unable to replace durable queue state")
+        }
     }
 }
