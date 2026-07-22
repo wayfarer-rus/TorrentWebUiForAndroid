@@ -2,9 +2,9 @@
 
 ## Current Delivery Status
 
-- **Next milestone:** **Milestone 3 — Persistent Daemon**.
-- **Last delivered milestone:** Milestone 2 — Browser Control Proof. Its implementation exit criteria are complete.
-- **Outstanding validation:** Physical-device LAN acceptance for Milestone 2 remains a separate follow-up. Earlier Stage 1 manual acceptance gaps remain documented in [TEST_REPORT.md](TEST_REPORT.md) and [STAGE1_STATUS.md](STAGE1_STATUS.md); do not treat them as verified solely because later milestones proceeded.
+- **Current milestone:** **Milestone 4 — Path-Based Storage Model**. Required API 36 emulator acceptance is implemented and recorded in [TEST_REPORT.md](TEST_REPORT.md).
+- **Last delivered milestone:** Milestone 3 — Persistent Daemon.
+- **Outstanding validation:** Milestone 4 physical-device/Termux deployment validation is optional and has not been performed. Earlier Stage 1 manual gaps remain documented in [TEST_REPORT.md](TEST_REPORT.md) and [STAGE1_STATUS.md](STAGE1_STATUS.md); later emulator milestones do not retroactively prove them.
 
 ## Milestone 1: Native Engine Proof
 
@@ -67,9 +67,9 @@
 - Reboot recovery (later).
 
 **Exit criteria:**
-- [ ] Torrent continues when app is backgrounded.
-- [ ] Queue survives process kill and relaunch.
-- [ ] Notification shows active torrent state.
+- [x] Torrent continues when app is backgrounded under the foreground daemon.
+- [x] Durable queue intent is recovered after ordinary process termination/relaunch.
+- [x] Notification exposes aggregate daemon state and safe stop.
 
 ---
 
@@ -89,13 +89,13 @@
 **Out of scope:** Generic SAF destinations, labels/aliases/opaque IDs, port and torrent-parameter settings, bulk moves, and automatic deletion after interrupted moves.
 
 **Exit criteria:**
-- [ ] Android startup handles All Files Access grant/denial and runtime revocation safely.
-- [ ] WebUI exposes only canonical, backend-validated paths and never synthetic/URI destinations.
-- [ ] New torrents use an explicit per-torrent destination; existing target data is never overwritten.
-- [ ] A one-torrent move is recoverable after failure, cancellation, or process termination.
-- [ ] Legacy downloads remain usable or movable without data loss.
-- [ ] Required emulator E2E validates real APK/JNI, permissions, paths, WebUI/API, moves, recovery, and cleanup.
-- [ ] Optional physical-device Termux/SSH results, if run, are recorded in TEST_REPORT.md.
+- [x] Android startup handles All Files Access grant/denial and runtime revocation safely.
+- [x] WebUI exposes only canonical, backend-validated paths and never synthetic/URI destinations.
+- [x] New torrents use an explicit per-torrent destination; existing target data is reused only after libtorrent verification and is never blindly overwritten.
+- [x] A one-torrent move is recoverable after failure, cancellation, or process termination.
+- [x] Legacy destinations remain represented by their real path and can be retained or moved safely.
+- [x] Required emulator E2E validates real APK/JNI, permissions, paths, WebUI/API, moves, recovery, and cleanup.
+- [ ] Optional physical-device Termux/SSH deployment check (not required for automated M4 acceptance).
 
 ---
 

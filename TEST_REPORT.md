@@ -210,14 +210,14 @@
 | Actual result | Old password returns 401, new password returns 200 |
 | Status | **PASS** |
 
-### Test 22: WebSocket Bypasses Auth
+### Test 22: WebSocket Requires Auth
 
 | Field | Value |
 |-------|-------|
 | Action | Connect to `/ws/progress` without credentials |
-| Expected result | Connection succeeds (page-level auth is the gate) |
-| Actual result | WebSocket connects, receives initial snapshot |
-| Status | **PASS** |
+| Expected result | WebSocket handshake is rejected |
+| Actual result | Unauthenticated handshake was rejected; an authenticated browser socket opened and received parseable snapshot frames |
+| Status | **PASS** (rerun on `emulator_skill` during M4 repair round 3) |
 
 ### Test 23: Health Endpoint Bypasses Auth
 
@@ -382,3 +382,20 @@ This remains the required acceptance gate for the WebUI's LAN-accessibility clai
 ### Scope and evidence
 
 The test used real Android system dialogs and the emulator UI hierarchy (`uiautomator dump`) to grant permissions. No `pm grant`, `appops`, bypass, or temporary permission override was used. The browser endpoint was reached over ADB port forwarding; authentication remains expected by product policy.
+
+### Required M4 storage E2E
+
+**Status:** PASS — emulator-only; this is not physical-device validation.
+
+| Field | Observed result |
+|---|---|
+| Device | `emulator_skill` AVD, arm64-v8a, Android 16/API 36 |
+| Test date | 2026-07-21 |
+| Build/install | `./gradlew :app:installDebug --console=plain` — PASS for the configured `arm64-v8a` ABI; debug APK installed on the AVD |
+| Direct-service regression command | `./gradlew :app:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=com.andreiefimov.torrentwebui.M4EmulatorAcceptanceTest --console=plain` |
+| Direct-service result | PASS — 44 tests on `emulator_skill`, including atomic catalog/latest-selected persistence with legacy split-state migration, same-destination rejection before journal/pause/filesystem mutation, selected-torrent pause ordering, atomic concurrent/cross-target move rejection, deterministic duplicate/out-of-order V1 migration authority selection, corrupt/unsupported cold-start journal preflight with byte preservation, native-initial paused recovery for unavailable storage, retry collision-metadata refresh, partial-content verification independent of completion percentage, completed-journal catalog protection, pre-native journal-write failure, native rejection/source restoration, alert-confirmed rollback and rollback-failure lock retention, post-commit cancel queue rollback, durable unavailable-storage pause/resume revalidation, and retained terminal cancellation audit semantics |
+| Live command | From `web/`: `WEBUI_PASSWORD=<redacted> npm run e2e:m4:live` |
+| Live result | PASS — real APK/JNI/libtorrent/Ktor/WebUI assets; authenticated headless Chromium through ADB forwarding; official Arch Linux magnet retained; repository-owned tracker/peer and pre-provisioned filesystem fixtures supplied deterministic metadata, collision-safe add, and move inputs |
+| Storage and recovery evidence | ADB-observed canonical paths matched API paths; unauthenticated WebSocket rejection and authenticated parseable frames passed; new adds reused valid verified data, ignored an unrelated sibling without removing it, and left incompatible matching bytes unchanged and paused as `storage_conflict`; libtorrent piece verification accepted valid matching move-target data, preserved an unrelated sibling, and only then committed the completed move/source removal; corrupted matching move-target data became `storage-conflict`; separate fixture-gated removable-volume unmounts produced real native move failures while the socket was connected; REST/WebSocket retained the durable source canonical path and `move-interrupted`; explicit retry completed one move; explicit cancel preserved the other torrent's paused source state, retained a terminal `cancelled` audit record, and released its active target/catalog lock; unavailable storage durably paused only the affected torrent, rejected resume with HTTP 409 while unmounted, remained paused after remount, and resumed only through the WebUI control |
+| Permission evidence | Startup denial/restore and one runtime revocation were driven only through visible Android notification/All Files Access UI hierarchy. The AVD terminated the native daemon on runtime revocation; the app restarted an authenticated permission-blocked WebUI, reported `RevokedRuntime`, disabled add controls, and rejected add/move with HTTP 503 before visible restoration and explicit download restart. Recovery kept every storage-safety-paused torrent paused, explicit resume restored the previously active fixture, and a torrent explicitly paused before revocation remained paused. |
+| Cleanup evidence | PASS — the completed live run removed its added torrents/queue records, retained/active move journals, catalog entries, owned payloads, tracker/peer servers, fixture directories, virtual removable storage, browser, daemon/Ktor listener, and ADB forwarding. A final independent audit also removed one stale M4-owned directory plus empty durable files left by an earlier agent-timeout run, then verified no M4 fixture, private queue/journal/catalog/resume data, credential file, daemon/server process, virtual disk, or forward remained. No test credential was created or persisted. |

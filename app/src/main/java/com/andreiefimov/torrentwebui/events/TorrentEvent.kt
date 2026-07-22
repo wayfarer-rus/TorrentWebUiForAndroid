@@ -58,6 +58,12 @@ sealed class TorrentEvent : AppEvent {
         val error: String,
     ) : TorrentEvent()
 
+    /** Native piece verification completed after moving storage. */
+    data class VerificationCompleted(val torrentId: Long) : TorrentEvent()
+
+    /** Native piece verification found missing or incompatible target data. */
+    data class VerificationFailed(val torrentId: Long) : TorrentEvent()
+
     companion object {
         /** Human-readable name for a torrent state code. */
         fun stateLabel(state: String): String = when (state) {

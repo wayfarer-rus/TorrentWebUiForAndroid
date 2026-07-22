@@ -16,6 +16,8 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import android.os.Build
@@ -64,6 +66,9 @@ class TorrentDaemon : Service() {
         /** Action for a user request to resume after an explicit force stop. */
         const val ACTION_USER_START = "com.andreiefimov.torrentwebui.USER_START"
 
+        /** Keeps only the authenticated WebUI alive after runtime storage revocation. */
+        const val ACTION_PERMISSION_BLOCKED = "com.andreiefimov.torrentwebui.PERMISSION_BLOCKED"
+
         /** Intent extra: whether this is a force stop (vs ordinary stop). */
         const val EXTRA_FORCE_STOP = "force_stop"
 
@@ -80,6 +85,20 @@ class TorrentDaemon : Service() {
                 action = ACTION_START
             }
             launchService(context, intent)
+        }
+
+        /** Starts authenticated permission guidance without starting the native session. */
+        fun startPermissionBlocked(context: Context) {
+            val notificationGranted = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+                androidx.core.content.ContextCompat.checkSelfPermission(
+                    context,
+                    android.Manifest.permission.POST_NOTIFICATIONS
+                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+            if (!notificationGranted || StoragePermissionChecker.isGranted(context) ||
+                !StoragePermissionHistory.hasBeenReady(context)) return
+            launchService(context, Intent(context, TorrentDaemon::class.java).apply {
+                action = ACTION_PERMISSION_BLOCKED
+            })
         }
 
         /** Stops the daemon service with an explicit user action. */
@@ -213,6 +232,11 @@ class TorrentDaemon : Service() {
     /** Jobs owned by the service lifecycle. */
     private var checkpointJob: Job? = null
     private var recoveryJob: Job? = null
+    private val moveEventJobs = OwnedJobSlot()
+    private var permissionTransitionJob: Job? = null
+    private val permissionTransitionGuard = PermissionTransitionGuard()
+    @Volatile private var permissionBlockedMode = false
+    @Volatile private var permissionTransitionFailed = false
 
     override fun onCreate() {
         super.onCreate()
@@ -225,6 +249,7 @@ class TorrentDaemon : Service() {
         when (intent.action) {
             ACTION_START -> startDaemonIfInactive(userInitiated = false)
             ACTION_USER_START -> startDaemonIfInactive(userInitiated = true)
+            ACTION_PERMISSION_BLOCKED -> startPermissionBlockedMode()
             ACTION_STOP -> stopDaemon(intent.getBooleanExtra(EXTRA_FORCE_STOP, false))
         }
         return serviceRestartMode(hasIntent = true)
@@ -232,8 +257,32 @@ class TorrentDaemon : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    /** Coalesces repeated starts and queues one explicit start while safe stop is in progress. */
+    /** Coalesces repeated starts and serializes restoration with permission-blocked teardown. */
     private fun startDaemonIfInactive(userInitiated: Boolean) {
+        if (StoragePermissionChecker.isGranted(applicationContext)) {
+            val transition = synchronized(lifecycleLock) { permissionTransitionJob }
+            if (transition != null) {
+                permissionTransitionGuard.supersede()
+                daemonScope.launch {
+                    transition.join()
+                    synchronized(lifecycleLock) {
+                        if (permissionTransitionJob === transition) permissionTransitionJob = null
+                    }
+                    if (permissionTransitionFailed) {
+                        recordRecoverableError("Storage safety transition did not complete; retry after restarting the app.")
+                        return@launch
+                    }
+                    leavePermissionBlockedMode()
+                    startDaemonIfInactive(userInitiated)
+                }
+                return
+            }
+            if (permissionTransitionFailed) {
+                recordRecoverableError("Storage safety transition did not complete; retry after restarting the app.")
+                return
+            }
+            if (permissionBlockedMode) leavePermissionBlockedMode()
+        }
         val decision = synchronized(lifecycleLock) {
             startCoalescer.onStart(currentState.get(), userInitiated)
         }
@@ -241,6 +290,89 @@ class TorrentDaemon : Service() {
             StartCommandDecision.StartNow -> startDaemon(userInitiated)
             StartCommandDecision.Queued -> android.util.Log.i(TAG, "Queued daemon start until safe stop completes")
             StartCommandDecision.Ignored -> android.util.Log.i(TAG, "Ignoring duplicate daemon start command")
+        }
+    }
+
+    private fun leavePermissionBlockedMode() {
+        TorrentServer.stop()
+        val blockedControl = daemonControl
+        if (blockedControl === PermissionBlockedDaemonControl) blockedControl.destroy()
+        permissionBlockedMode = false
+        permissionTransitionFailed = false
+        daemonControl = null
+        currentState.set(DaemonState.Stopped)
+        currentDaemonState = DaemonState.Stopped
+    }
+
+    private fun startPermissionBlockedMode() {
+        if (StoragePermissionChecker.isGranted(applicationContext) ||
+            !StoragePermissionHistory.hasBeenReady(applicationContext)) return
+        val generation = synchronized(lifecycleLock) {
+            if (permissionBlockedMode || permissionTransitionJob != null) return
+            permissionBlockedMode = true
+            permissionTransitionFailed = false
+            permissionTransitionGuard.begin()
+        }
+        try {
+            createNotificationChannel()
+            startForeground(NOTIFICATION_ID, buildNotification())
+        } catch (e: Exception) {
+            android.util.Log.e(TAG, "Failed to start permission-blocked WebUI service", e)
+            synchronized(lifecycleLock) { permissionBlockedMode = false }
+            stopSelf()
+            return
+        }
+        currentState.set(DaemonState.RecoveryBlocked)
+        currentDaemonState = DaemonState.RecoveryBlocked
+        recordRecoverableError("Storage permission required. Restore All Files Access and explicitly restart downloads.")
+        val transition = daemonScope.launch {
+            val existingControl = daemonControl
+            val store = queueStore ?: FileQueueStore(
+                applicationContext,
+                globalLegacySavePath = getLegacySaveDirectory(applicationContext)?.absolutePath
+            )
+            try {
+                // Durability is the first side effect: a crash after this point cannot auto-resume.
+                store.mutateQueueIntent { queue -> queue.map { it.copy(storagePauseRequired = true) } }
+            } catch (_: Exception) {
+                permissionTransitionFailed = true
+                recordRecoverableError("Unable to persist storage safety pause; restart the app before continuing.")
+                return@launch
+            }
+            existingControl?.getAllTorrentIds()?.forEach(existingControl::pauseTorrent)
+            stopMoveEventCollector()
+            if (existingControl != null && !existingControl.destroy()) {
+                permissionTransitionFailed = true
+                recordRecoverableError("Torrent engine could not enter storage-safe mode.")
+                return@launch
+            }
+            daemonControl = null
+            AlertDispatcher.stop()
+            TorrentServer.stop()
+            val mayPublish = synchronized(lifecycleLock) {
+                permissionTransitionGuard.isCurrent(generation) &&
+                    !StoragePermissionChecker.isGranted(applicationContext)
+            }
+            if (!mayPublish) return@launch
+            daemonControl = PermissionBlockedDaemonControl
+            queueStore = store
+            TorrentServer.daemonControl = PermissionBlockedDaemonControl
+            TorrentServer.queueStore = store
+            TorrentServer.destinationCatalog = DestinationCatalog(applicationContext)
+            TorrentServer.queueBindings = QueueRuntimeBindings()
+            TorrentServer.durableOperations = null
+            TorrentServer.moveJournal = MoveJournal(applicationContext)
+            TorrentServer.moveService = null
+            TorrentServer.start(applicationContext)
+            android.util.Log.w(TAG, "Authenticated WebUI running in storage-permission-required mode")
+        }
+        synchronized(lifecycleLock) { permissionTransitionJob = transition }
+        transition.invokeOnCompletion {
+            synchronized(lifecycleLock) {
+                if (permissionTransitionJob === transition && !StoragePermissionChecker.isGranted(applicationContext)) {
+                    permissionTransitionJob = null
+                }
+            }
         }
     }
 
@@ -296,6 +428,18 @@ class TorrentDaemon : Service() {
         currentState.set(DaemonState.Starting)
         currentDaemonState = DaemonState.Starting
 
+        // Durable recovery records must be readable before native ownership is created.
+        val legacySavePath = TorrentDaemon.getLegacySaveDirectory(applicationContext)?.absolutePath
+        val store = FileQueueStore(applicationContext, globalLegacySavePath = legacySavePath)
+        val moveJournal = MoveJournal(applicationContext)
+        val recoveryRecordsValid = runBlocking(Dispatchers.IO) {
+            validateMoveRecoveryRecords(store, moveJournal)
+        }
+        if (!recoveryRecordsValid) {
+            enterJournalRecoveryBlockedMode(store, moveJournal)
+            return
+        }
+
         // Initialize the daemon control (currently wraps TorrentSession)
         val control = daemonControlFactory()
         if (!control.init(applicationContext)) {
@@ -310,10 +454,8 @@ class TorrentDaemon : Service() {
             return
         }
         this.daemonControl = control
+        TorrentServer.daemonControl = control
 
-        // Initialize queue store with the global legacy save path
-        val legacySavePath = TorrentDaemon.getLegacySaveDirectory(applicationContext)?.absolutePath
-        val store = FileQueueStore(applicationContext, globalLegacySavePath = legacySavePath)
         this.queueStore = store
 
         // Initialize destination catalog.
@@ -326,15 +468,17 @@ class TorrentDaemon : Service() {
         TorrentServer.queueBindings = bindings
         TorrentServer.durableOperations = DurableTorrentOperations(control, store, bindings)
 
-        // Initialize move journal and service.
-        val moveJournal = MoveJournal(applicationContext)
-        val moveService = MoveService(applicationContext, store, moveJournal, control, bindings)
+        // Initialize move service after the validated journal is bound.
+        val debuggable = applicationContext.applicationInfo.flags and
+            android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0
+        val moveGate = if (debuggable) DebugFileMoveExecutionGate() else MoveExecutionGate.None
+        val moveService = MoveService(applicationContext, store, moveJournal, control, bindings, moveGate)
         TorrentServer.moveJournal = moveJournal
         TorrentServer.moveService = moveService
 
         // Try to recover queue from previous session (in background), owned by this service.
         val launchedRecovery = daemonScope.launch {
-            val recoveryResult = tryRecoverQueue(store, control, resumePausedEntries = userInitiated)
+            val recoveryResult = tryRecoverQueue(store, control)
             if (recoveryResult == RecoveryResult.Blocked && currentState.get() != DaemonState.Stopping) {
                 currentState.set(DaemonState.RecoveryBlocked)
                 currentDaemonState = DaemonState.RecoveryBlocked
@@ -347,15 +491,11 @@ class TorrentDaemon : Service() {
         synchronized(lifecycleLock) { recoveryJob = launchedRecovery }
 
         // Observe move completion/failure events and advance the journal state machine.
-        daemonScope.launch {
-            EventBus.observeTorrentEvents().collect { event ->
-                when (event) {
-                    is TorrentEvent.MoveCompleted -> handleMoveCompleted(event, control)
-                    is TorrentEvent.MoveFailed -> handleMoveFailed(event, control)
-                    else -> {}
-                }
-            }
-        }
+        replaceMoveEventCollector(control)
+
+        // Start native alert polling after event observers are ready so asynchronous
+        // move completion/failure cannot be consumed without advancing the journal.
+        AlertDispatcher.start()
 
         // Start the Ktor WebUI server
         TorrentServer.start(applicationContext)
@@ -369,8 +509,29 @@ class TorrentDaemon : Service() {
 
         currentState.set(DaemonState.Running)
         currentDaemonState = DaemonState.Running
+        StoragePermissionHistory.markReady(applicationContext)
         lastRecoverableError.set(null)
         android.util.Log.i(TAG, "Daemon started successfully")
+    }
+
+    /** Starts only the authenticated recovery surface; no native session/torrent is created. */
+    private fun enterJournalRecoveryBlockedMode(store: QueueStore, journal: MoveJournal) {
+        val control = RecoveryBlockedDaemonControl
+        daemonControl = control
+        queueStore = store
+        TorrentServer.daemonControl = control
+        TorrentServer.queueStore = store
+        TorrentServer.queueBindings = QueueRuntimeBindings()
+        TorrentServer.destinationCatalog = DestinationCatalog(applicationContext)
+        TorrentServer.durableOperations = null
+        TorrentServer.moveJournal = journal
+        TorrentServer.moveService = null
+        currentState.set(DaemonState.RecoveryBlocked)
+        currentDaemonState = DaemonState.RecoveryBlocked
+        recordRecoverableError("Durable move recovery is blocked. Preserve state and use explicit acceptance teardown or operator recovery.")
+        TorrentServer.start(applicationContext)
+        startForeground(NOTIFICATION_ID, buildNotification())
+        android.util.Log.e(TAG, "Move journal validation blocked native recovery")
     }
 
     private fun stopDaemon(forceStop: Boolean) {
@@ -432,6 +593,7 @@ class TorrentDaemon : Service() {
                 recoveryJob.also { recoveryJob = null }
             }
             recovery?.cancelAndJoin()
+            stopMoveEventCollector()
 
             // Native destruction must succeed before the server or foreground owner is removed.
             if (!control.destroy()) {
@@ -444,6 +606,8 @@ class TorrentDaemon : Service() {
                     currentState.set(DaemonState.Running)
                     currentDaemonState = DaemonState.Running
                 }
+                // Stop failed, so restore the sole move-event consumer before accepting work.
+                replaceMoveEventCollector(control)
                 startCheckpointTimer()
                 return@launch
             }
@@ -466,7 +630,29 @@ class TorrentDaemon : Service() {
         launchService(applicationContext, intent)
     }
 
+    private suspend fun stopMoveEventCollector() {
+        moveEventJobs.stop()
+    }
+
+    private fun replaceMoveEventCollector(control: DaemonControl) {
+        runBlocking {
+            moveEventJobs.replace(daemonScope) {
+                EventBus.observeTorrentEvents().collect { event ->
+                    when (event) {
+                        is TorrentEvent.MoveCompleted -> handleMoveCompleted(event, control)
+                        is TorrentEvent.MoveFailed -> handleMoveFailed(event, control)
+                        is TorrentEvent.VerificationCompleted -> handleVerificationCompleted(event, control)
+                        is TorrentEvent.VerificationFailed -> handleVerificationFailed(event, control)
+                        else -> {}
+                    }
+                }
+            }
+        }
+    }
+
     private fun cleanupAndStop() {
+        moveEventJobs.cancel()
+        AlertDispatcher.stop()
         currentState.set(DaemonState.Stopped)
         currentDaemonState = DaemonState.Stopped
         // Stop foreground service and remove notification
@@ -481,8 +667,7 @@ class TorrentDaemon : Service() {
      */
     private suspend fun tryRecoverQueue(
         store: QueueStore,
-        control: DaemonControl,
-        resumePausedEntries: Boolean
+        control: DaemonControl
     ): RecoveryResult {
         val queue = try {
             // Migrate first, then reload so every recovered entry has its durable destination.
@@ -490,8 +675,8 @@ class TorrentDaemon : Service() {
             store.loadQueueIntent()
         } catch (e: CancellationException) {
             throw e
-        } catch (e: Exception) {
-            android.util.Log.e(TAG, "Failed to load queue intent during recovery: ${e.message}")
+        } catch (_: Exception) {
+            android.util.Log.e(TAG, "Failed to load queue intent during recovery")
             return RecoveryResult.Blocked
         }
 
@@ -518,29 +703,29 @@ class TorrentDaemon : Service() {
                     .isValid
 
                 if (!isDestinationAvailable) {
+                    // Persist the safety pause before native recovery can touch the path.
+                    TorrentServer.durableOperations?.ensureQueueDestinationAvailable(entry.queueId, applicationContext)
                     EventBus.post(TorrentEvent.DestinationUnavailable(
                         torrentId = entry.hashCode().toLong(),
                         path = destinationPath
                     ))
                 }
 
-                // Queue intent is the durable source of truth. Resume data is optional.
+                // Queue intent is the durable source of truth. Safety/user pauses are part of
+                // the native add request so an unavailable path is never active even briefly.
                 val torrentId = control.addMagnet(
                     entry.magnetUri,
-                    TorrentDestination(destinationPath)
+                    recoveryAddRequest(entry, destinationPath, isDestinationAvailable)
                 )
                 if (torrentId > 0) {
                     TorrentServer.queueBindings?.bind(entry.queueId, torrentId)
-                    if (!isDestinationAvailable || (entry.isPaused && !resumePausedEntries)) {
-                        control.pauseTorrent(torrentId)
-                    }
                 } else {
                     hadBlockedEntries = true
                 }
             } catch (e: CancellationException) {
                 throw e
-            } catch (e: Exception) {
-                android.util.Log.w(TAG, "Failed to recover queue entry: ${e.message}")
+            } catch (_: Exception) {
+                android.util.Log.w(TAG, "Failed to recover queue entry")
                 hadBlockedEntries = true
             }
         }
@@ -564,8 +749,21 @@ class TorrentDaemon : Service() {
             }
         } catch (e: CancellationException) {
             throw e
+        } catch (_: Exception) {
+            android.util.Log.e(TAG, "Failed to migrate move journal")
+            return
+        }
+
+        // Any non-terminal move journal that survived a daemon/process restart was
+        // interrupted by definition. Persist the recovery state before exposing it.
+        try {
+            journal.getActiveMoves().forEach { move ->
+                journal.updatePhase(move.queueId, MovePhase.Interrupted)
+            }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            android.util.Log.e(TAG, "Failed to migrate move journal: ${e.message}")
+            android.util.Log.e(TAG, "Failed to mark active moves interrupted")
             return
         }
 
@@ -574,8 +772,8 @@ class TorrentDaemon : Service() {
             journal.getInterruptedMoves()
         } catch (e: CancellationException) {
             throw e
-        } catch (e: Exception) {
-            android.util.Log.e(TAG, "Failed to load move journal: ${e.message}")
+        } catch (_: Exception) {
+            android.util.Log.e(TAG, "Failed to load move journal")
             return
         }
 
@@ -588,6 +786,7 @@ class TorrentDaemon : Service() {
 
         for (move in interruptedMoves) {
             try {
+                restoreSourceBackup(move, bindings.runtimeIdFor(move.queueId), control)
                 val runtimeId = bindings.runtimeIdFor(move.queueId)
                 if (runtimeId != null) {
                     control.pauseTorrent(runtimeId)
@@ -602,62 +801,177 @@ class TorrentDaemon : Service() {
                 }
             } catch (e: CancellationException) {
                 throw e
-            } catch (e: Exception) {
-                android.util.Log.w(TAG, "Failed to recover interrupted move: ${e.message}")
+            } catch (_: Exception) {
+                android.util.Log.w(TAG, "Failed to recover interrupted move")
             }
         }
     }
 
-    /**
-     * Handles a successful native move completion.
-     * Updates the queue destination, removes source data, and clears the journal.
-     */
+    /** Starts normal libtorrent piece verification after native storage movement. */
     private suspend fun handleMoveCompleted(
         event: TorrentEvent.MoveCompleted,
+        control: DaemonControl
+    ) {
+        val journal = TorrentServer.moveJournal ?: return
+        val bindings = TorrentServer.queueBindings ?: return
+        val queueId = bindings.queueIdFor(event.torrentId) ?: return
+        val entry = journal.getMove(queueId) ?: return
+        if (entry.phase != MovePhase.Copying) return
+
+        if (!journal.updatePhase(queueId, MovePhase.Verifying) || !control.verifyTorrent(event.torrentId)) {
+            journal.updatePhase(queueId, MovePhase.Interrupted)
+            control.pauseTorrent(event.torrentId)
+            android.util.Log.w(TAG, "Move verification could not start; recovery is required")
+        }
+    }
+
+    /** Commits the durable destination only after libtorrent piece verification succeeds. */
+    private suspend fun handleVerificationCompleted(
+        event: TorrentEvent.VerificationCompleted,
         control: DaemonControl
     ) {
         val store = queueStore ?: return
         val journal = TorrentServer.moveJournal ?: return
         val bindings = TorrentServer.queueBindings ?: return
-
         val queueId = bindings.queueIdFor(event.torrentId) ?: return
         val entry = journal.getMove(queueId) ?: return
-        if (entry.phase != MovePhase.Copying && entry.phase != MovePhase.Verifying) return
+        if (entry.phase != MovePhase.Verifying) return
 
-        // Update phase to QueueUpdated and atomically update queue destination.
+        val torrentName = control.getTorrentStatus(event.torrentId)?.name?.takeIf { it.isNotBlank() }
+            ?: run {
+                journal.updatePhase(queueId, MovePhase.Interrupted)
+                control.pauseTorrent(event.torrentId)
+                return
+            }
+        if (entry.verifyExistingData) {
+            val preservedSource = entry.sourceBackupPath?.let {
+                resolveMoveOwnedPath(entry.sourcePath, it)
+            }
+            val verifiedTarget = resolveMoveOwnedChild(entry.targetPath, torrentName)
+            val verifiedTargetProgress = withTimeoutOrNull(5_000L) {
+                var progress: Float
+                do {
+                    progress = control.getTorrentStatus(event.torrentId)?.progress ?: 0f
+                    if (progress + 0.0005f < entry.sourceVerifiedProgress) delay(100)
+                } while (progress + 0.0005f < entry.sourceVerifiedProgress)
+                progress
+            } ?: -1f
+            if (!verifiedTargetRetainsSourceProgress(
+                    preservedSource,
+                    verifiedTarget,
+                    entry.sourceVerifiedProgress,
+                    verifiedTargetProgress
+                )
+            ) {
+                handleVerificationFailed(TorrentEvent.VerificationFailed(event.torrentId), control)
+                return
+            }
+        }
         try {
-            store.mutateQueueIntent { queue ->
+            check(control.pauseTorrent(event.torrentId)) { "Unable to pause after target verification" }
+            val updatedQueue = store.mutateQueueIntent { queue ->
+                var found = false
                 queue.map { qEntry ->
                     if (qEntry.queueId == queueId) {
+                        found = true
                         qEntry.copy(destinationPath = entry.targetPath)
                     } else qEntry
+                }.also { require(found) { "Move queue entry disappeared" } }
+            }
+            check(updatedQueue.any { it.queueId == queueId && it.destinationPath == entry.targetPath })
+            if (!journal.updatePhase(queueId, MovePhase.QueueUpdated)) {
+                // Journal durability is part of the transaction. Restore the durable source
+                // destination while the source-side backup is still intact.
+                store.mutateQueueIntent { queue ->
+                    queue.map { qEntry ->
+                        if (qEntry.queueId == queueId) qEntry.copy(destinationPath = entry.sourcePath) else qEntry
+                    }
                 }
+                error("Unable to persist queue-updated move phase")
             }
-            journal.updatePhase(queueId, MovePhase.QueueUpdated)
+            if (control is TorrentSession) control.commitTorrentSavePath(event.torrentId, entry.targetPath)
 
-            // Remove source data.
-            val sourceDir = java.io.File(entry.sourcePath)
-            if (sourceDir.exists()) {
-                sourceDir.deleteRecursively()
+            val sourceOwned = resolveMoveOwnedChild(entry.sourcePath, torrentName)
+                ?: error("Unsafe torrent-owned source path")
+            check(deleteMoveOwnedPath(entry.sourcePath, sourceOwned.path)) {
+                "Unable to remove torrent-owned source after queue update"
             }
-            journal.updatePhase(queueId, MovePhase.SourceRemoved)
-
-            // Mark as completed and remove journal entry.
-            journal.updatePhase(queueId, MovePhase.Completed)
-            journal.removeMove(queueId)
-
-            android.util.Log.i(TAG, "Move completed for torrent")
+            check(entry.sourceBackupPath == null || deleteMoveOwnedPath(entry.sourcePath, entry.sourceBackupPath)) {
+                "Unable to remove retained source backup after queue update"
+            }
+            check(journal.updatePhase(queueId, MovePhase.SourceRemoved))
+            check(journal.updatePhase(queueId, MovePhase.Completed))
+            // Completed is terminal and intentionally retained until torrent removal/acceptance cleanup.
+            android.util.Log.i(TAG, "Move verified and completed for torrent")
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
-        } catch (e: Exception) {
-            android.util.Log.e(TAG, "Failed to finalize move: ${e.message}")
-            journal.updatePhase(queueId, MovePhase.Interrupted)
+        } catch (_: Exception) {
+            android.util.Log.e(TAG, "Failed to finalize verified move")
+            rollbackVerifiedMove(queueId, entry, event.torrentId, control, torrentName)
+            control.pauseTorrent(event.torrentId)
+        }
+    }
+
+    /** Rolls a post-verification failure back to the journal's durable source authority. */
+    private suspend fun rollbackVerifiedMove(
+        queueId: QueueId,
+        entry: PersistedMoveEntry,
+        runtimeId: Long,
+        control: DaemonControl,
+        torrentName: String
+    ): Boolean {
+        val source = resolveMoveOwnedChild(entry.sourcePath, torrentName) ?: return false
+        val backup = entry.sourceBackupPath?.let { resolveMoveOwnedPath(entry.sourcePath, it) }
+        val target = resolveMoveOwnedChild(entry.targetPath, torrentName)
+        val sourceRestored = when {
+            source.exists() -> true
+            backup?.exists() == true -> backup.renameTo(source)
+            target?.exists() == true -> target.copyRecursively(source, overwrite = false)
+            else -> false
+        }
+        val queueRestored = try {
+            val restored = checkNotNull(queueStore).mutateQueueIntent { queue ->
+                queue.map { qEntry ->
+                    if (qEntry.queueId == queueId) qEntry.copy(destinationPath = entry.sourcePath) else qEntry
+                }
+            }
+            restored.any { it.queueId == queueId && it.destinationPath == entry.sourcePath }
+        } catch (_: Exception) {
+            false
+        }
+        val nativeRestored = sourceRestored && queueRestored && control.rollbackStorage(runtimeId, entry.sourcePath)
+        if (!nativeRestored) return false
+        val journalRestored = TorrentServer.moveJournal?.updatePhase(queueId, MovePhase.Interrupted) == true
+        return journalRestored
+    }
+
+    /** Keeps both locations recoverable when target piece verification fails. */
+    private suspend fun handleVerificationFailed(
+        event: TorrentEvent.VerificationFailed,
+        control: DaemonControl
+    ) {
+        val journal = TorrentServer.moveJournal ?: return
+        val bindings = TorrentServer.queueBindings ?: return
+        val queueId = bindings.queueIdFor(event.torrentId) ?: return
+        val entry = journal.getMove(queueId) ?: return
+        if (entry.phase != MovePhase.Verifying) return
+        control.pauseTorrent(event.torrentId)
+        val sourceRestored = restoreSourceBackup(entry, event.torrentId, control)
+        val nativeRestored = sourceRestored && control.rollbackStorage(event.torrentId, entry.sourcePath)
+        if (nativeRestored) {
+            journal.updatePhase(
+                queueId,
+                if (entry.verifyExistingData) MovePhase.StorageConflict else MovePhase.Interrupted
+            )
+            android.util.Log.w(TAG, "Move target verification failed; recovery is required")
+        } else {
+            android.util.Log.e(TAG, "Move target verification failed and native rollback is incomplete")
         }
     }
 
     /**
      * Handles a native move failure.
-     * Marks the journal as interrupted, resets native save path tracking, and pauses the torrent.
+     * Marks the journal as interrupted and pauses the torrent; native tracking still holds source.
      */
     private suspend fun handleMoveFailed(
         event: TorrentEvent.MoveFailed,
@@ -670,21 +984,37 @@ class TorrentDaemon : Service() {
         val entry = journal.getMove(queueId) ?: return
         if (entry.phase != MovePhase.Copying && entry.phase != MovePhase.Verifying) return
 
-        // Mark as interrupted and pause the torrent.
-        journal.updatePhase(queueId, MovePhase.Interrupted)
         control.pauseTorrent(event.torrentId)
-
-        // Reset native save path tracking so status queries report the original source path.
-        if (control is TorrentSession) {
-            control.resetTorrentSavePath(event.torrentId)
+        val sourceRestored = restoreSourceBackup(entry, event.torrentId, control)
+        val nativeRestored = sourceRestored && control.rollbackStorage(event.torrentId, entry.sourcePath)
+        if (!nativeRestored) {
+            android.util.Log.e(TAG, "Move failed and native rollback is incomplete")
+            return
         }
+        if (!journal.updatePhase(queueId, MovePhase.Interrupted)) return
 
-        android.util.Log.w(TAG, "Move failed for torrent: ${event.error}")
+        android.util.Log.w(TAG, "Move failed for torrent; recovery is required")
         EventBus.post(TorrentEvent.MoveInterrupted(
             torrentId = event.torrentId,
             sourcePath = entry.sourcePath,
             targetPath = entry.targetPath
         ))
+    }
+
+    private fun restoreSourceBackup(
+        entry: PersistedMoveEntry,
+        runtimeId: Long?,
+        control: DaemonControl
+    ): Boolean {
+        val backupPath = entry.sourceBackupPath ?: return true
+        val backup = resolveMoveOwnedPath(entry.sourcePath, backupPath) ?: return false
+        if (!backup.exists()) return true
+        val name = runtimeId?.let(control::getTorrentStatus)?.name?.takeIf { it.isNotBlank() } ?: return false
+        val original = resolveMoveOwnedChild(entry.sourcePath, name) ?: return false
+        if (original.exists()) return true
+        return backup.renameTo(original).also { restored ->
+            if (!restored) android.util.Log.w(TAG, "Unable to restore retained move source")
+        }
     }
 
     private fun shouldSuppressAutomaticRecovery(): Boolean {
@@ -781,6 +1111,7 @@ class TorrentDaemon : Service() {
         // Clean up resources
         checkpointJob?.cancel()
         recoveryJob?.cancel()
+        moveEventJobs.cancel()
         daemonScope.coroutineContext[Job]?.cancel()
         TorrentServer.stop()
         daemonControl?.destroy()
@@ -791,12 +1122,67 @@ class TorrentDaemon : Service() {
     private enum class RecoveryResult { OK, Blocked }
 }
 
+internal class OwnedJobSlot {
+    private val mutex = kotlinx.coroutines.sync.Mutex()
+    private var active: Job? = null
+
+    suspend fun replace(scope: CoroutineScope, block: suspend CoroutineScope.() -> Unit): Job =
+        mutex.withLock {
+            active?.cancelAndJoin()
+            scope.launch(block = block).also { active = it }
+        }
+
+    suspend fun stop() {
+        mutex.withLock {
+            val current = kotlinx.coroutines.currentCoroutineContext()[Job]
+            active?.takeIf { it !== current }?.cancelAndJoin()
+            active = null
+        }
+    }
+
+    fun cancel() {
+        active?.cancel()
+        active = null
+    }
+}
+
+internal suspend fun validateMoveRecoveryRecords(store: QueueStore, journal: MoveJournal): Boolean =
+    try {
+        store.migrateLegacyEntries()
+        journal.validateForRecovery(store)
+        true
+    } catch (_: Exception) {
+        false
+    }
+
+internal fun recoveryAddRequest(
+    entry: QueueEntry,
+    destinationPath: String,
+    isDestinationAvailable: Boolean
+): TorrentAddRequest = TorrentAddRequest(
+    destination = TorrentDestination(destinationPath),
+    startPaused = !isDestinationAvailable || entry.isPaused || entry.storagePauseRequired || entry.addCollisionState != null
+)
+
 internal fun serviceRestartMode(hasIntent: Boolean): Int =
     if (hasIntent) Service.START_STICKY else Service.START_NOT_STICKY
 
 internal enum class StartCommandDecision { StartNow, Queued, Ignored }
 
 /** Thread-safe policy for coalescing one start request while a safe stop is in progress. */
+internal class PermissionTransitionGuard {
+    private var generation = 0L
+
+    @Synchronized
+    fun begin(): Long = ++generation
+
+    @Synchronized
+    fun supersede(): Long = ++generation
+
+    @Synchronized
+    fun isCurrent(candidate: Long): Boolean = candidate == generation
+}
+
 internal class DaemonStartCoalescer {
     private var pendingUserInitiated: Boolean? = null
 

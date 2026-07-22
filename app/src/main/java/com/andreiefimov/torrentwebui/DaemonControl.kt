@@ -18,6 +18,13 @@ import android.content.Context
 @JvmInline
 value class TorrentDestination(val path: String)
 
+/** Narrow add operation used to make recovery pause state native from the first instant. */
+data class TorrentAddRequest(
+    val destination: TorrentDestination,
+    val startPaused: Boolean = false,
+    val metadataOnlyUntilVerified: Boolean = false
+)
+
 interface DaemonControl : TorrentSessionOps {
 
     /**
@@ -80,6 +87,61 @@ interface DaemonControl : TorrentSessionOps {
  * Currently returns the singleton [TorrentSession] (JNI-backed). Future milestones will swap
  * in a foreground-service-backed implementation without changing this call site.
  */
+internal object RecoveryBlockedDaemonControl : DaemonControl {
+    override val storagePermissionState: StoragePermissionState = StoragePermissionState.Ready
+    override val isStorageReady: Boolean = false
+    override val lastError: String = "Durable recovery requires operator action"
+    override fun init(context: Context): Boolean = true
+    override fun destroy(): Boolean = true
+    override fun getDiagnostics(): NativeDiagnostics = NativeDiagnostics(
+        abi = android.os.Build.SUPPORTED_ABIS.firstOrNull() ?: "unknown",
+        libtorrentVersion = "inactive",
+        nativeLoaded = false,
+        sessionStarted = false,
+        lastError = lastError
+    )
+    override fun addMagnet(magnetUri: String): Long = -1
+    override fun addMagnet(magnetUri: String, destination: TorrentDestination): Long = -1
+    override fun addMagnet(magnetUri: String, request: TorrentAddRequest): Long = -1
+    override fun moveStorage(torrentId: Long, targetPath: String): Boolean = false
+    override fun pauseTorrent(torrentId: Long): Boolean = false
+    override fun resumeTorrent(torrentId: Long): Boolean = false
+    override fun removeTorrent(torrentId: Long, deleteFiles: Boolean): Boolean = false
+    override fun getAllTorrentIds(): List<Long> = emptyList()
+    override fun getTorrentStatus(torrentId: Long): TorrentStatus? = null
+    override fun popAlerts(): String = "[]"
+    override fun saveTorrentResumeData(torrentId: Long): Boolean = false
+    override fun loadTorrentResumeData(torrentId: Long): ByteArray? = null
+    override fun removeTorrentResumeData(torrentId: Long) = Unit
+}
+
+internal object PermissionBlockedDaemonControl : DaemonControl {
+    override val storagePermissionState: StoragePermissionState = StoragePermissionState.RevokedRuntime
+    override val lastError: String = "Storage permission required"
+    override fun init(context: Context): Boolean = true
+    override fun destroy(): Boolean = true
+    override fun getDiagnostics(): NativeDiagnostics = NativeDiagnostics(
+        abi = android.os.Build.SUPPORTED_ABIS.firstOrNull() ?: "unknown",
+        libtorrentVersion = "inactive",
+        nativeLoaded = false,
+        sessionStarted = false,
+        lastError = lastError
+    )
+    override fun addMagnet(magnetUri: String): Long = -1
+    override fun addMagnet(magnetUri: String, destination: TorrentDestination): Long = -1
+    override fun addMagnet(magnetUri: String, request: TorrentAddRequest): Long = -1
+    override fun moveStorage(torrentId: Long, targetPath: String): Boolean = false
+    override fun pauseTorrent(torrentId: Long): Boolean = false
+    override fun resumeTorrent(torrentId: Long): Boolean = false
+    override fun removeTorrent(torrentId: Long, deleteFiles: Boolean): Boolean = false
+    override fun getAllTorrentIds(): List<Long> = emptyList()
+    override fun getTorrentStatus(torrentId: Long): TorrentStatus? = null
+    override fun popAlerts(): String = "[]"
+    override fun saveTorrentResumeData(torrentId: Long): Boolean = false
+    override fun loadTorrentResumeData(torrentId: Long): ByteArray? = null
+    override fun removeTorrentResumeData(torrentId: Long) = Unit
+}
+
 object DaemonControlFactory {
 
     /** Creates the default production [DaemonControl]. */
@@ -107,12 +169,20 @@ object DaemonControlFactory {
         override fun addMagnet(magnetUri: String): Long = sessionOps.addMagnet(magnetUri)
         override fun addMagnet(magnetUri: String, destination: TorrentDestination): Long =
             sessionOps.addMagnet(magnetUri, destination)
+        override fun addMagnet(magnetUri: String, request: TorrentAddRequest): Long =
+            sessionOps.addMagnet(magnetUri, request)
         override fun pauseTorrent(torrentId: Long): Boolean = sessionOps.pauseTorrent(torrentId)
         override fun resumeTorrent(torrentId: Long): Boolean = sessionOps.resumeTorrent(torrentId)
         override fun removeTorrent(torrentId: Long, deleteFiles: Boolean): Boolean =
             sessionOps.removeTorrent(torrentId, deleteFiles)
         override fun moveStorage(torrentId: Long, targetPath: String): Boolean =
             sessionOps.moveStorage(torrentId, targetPath)
+        override fun moveStorage(torrentId: Long, targetPath: String, reuseExisting: Boolean): Boolean =
+            sessionOps.moveStorage(torrentId, targetPath, reuseExisting)
+        override fun inspectTorrentOwnedData(torrentId: Long): TorrentOwnedDataState =
+            sessionOps.inspectTorrentOwnedData(torrentId)
+        override fun verifyTorrent(torrentId: Long): Boolean = sessionOps.verifyTorrent(torrentId)
+        override suspend fun verifyTorrentData(torrentId: Long): Boolean = sessionOps.verifyTorrentData(torrentId)
         override fun getAllTorrentIds(): List<Long> = sessionOps.getAllTorrentIds()
         override fun getTorrentStatus(torrentId: Long): TorrentStatus? = sessionOps.getTorrentStatus(torrentId)
         override fun popAlerts(): String = sessionOps.popAlerts()

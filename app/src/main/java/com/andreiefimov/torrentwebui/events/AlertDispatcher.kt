@@ -9,6 +9,11 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
+/** Extracts the stable native torrent ID used for v1, hybrid, and v2-only alert correlation. */
+internal fun nativeTorrentIdFromAlertJson(alertJson: String): Long =
+    """"torrent_id"\s*:\s*(-?\d+)""".toRegex()
+        .find(alertJson)?.groupValues?.get(1)?.toLongOrNull() ?: -1L
+
 /**
  * Background coroutine that polls native libtorrent alerts and dispatches typed events.
  *
@@ -16,7 +21,7 @@ import kotlinx.coroutines.launch
  * layer is categorized and posted to [EventBus] as either a [TorrentEvent] or
  * [SessionEvent].
  *
- * Lifecycle: started when the session initializes, stopped when destroyed.
+ * Lifecycle: owned by [com.andreiefimov.torrentwebui.TorrentDaemon]; the Android UI never stops it.
  */
 object AlertDispatcher {
 
@@ -71,55 +76,70 @@ object AlertDispatcher {
 
             for (alert in alerts) {
                 try {
-                    val torrentId = resolveTorrentId(alert.hash, hashMap)
+                    val torrentId = alert.torrentId.takeIf { it > 0 }
+                        ?: resolveTorrentId(alert.hash, hashMap)
+                    val alertType = alert.type.removeSuffix("_alert")
 
-                    when (alert.type) {
-                        "error_alert" -> {
+                    // Fan out only a non-sensitive typed summary. Native alert messages may
+                    // contain destination paths, magnets, or private tracker URLs.
+                    EventBus.postAlert(AlertEvent(type = alertType, message = sanitizedAlertMessage(alertType)))
+
+                    when (alertType) {
+                        "error" -> {
                             if (torrentId > 0) {
-                                EventBus.postTorrentEvent(TorrentEvent.Error(torrentId, alert.message))
+                                EventBus.postTorrentEvent(TorrentEvent.Error(torrentId, "Torrent operation failed"))
                             } else {
-                                EventBus.postSessionEvent(SessionEvent.Error(alert.message))
+                                EventBus.postSessionEvent(SessionEvent.Error("Torrent session operation failed"))
                             }
                         }
-                        "state_changed_alert" -> {
+                        "state_changed" -> {
                             if (torrentId > 0) {
                                 EventBus.postTorrentEvent(TorrentEvent.StateChanged(torrentId, alert.category ?: "unknown"))
                             }
                         }
-                        "torrent_added_alert" -> {
+                        "torrent_added" -> {
                             if (torrentId > 0) {
                                 EventBus.postTorrentEvent(TorrentEvent.Added(torrentId))
                             }
                         }
-                        "torrent_removed_alert" -> {
+                        "torrent_removed" -> {
                             if (torrentId > 0) {
                                 EventBus.postTorrentEvent(TorrentEvent.Removed(torrentId))
                             }
                         }
-                        "storage_moved_alert" -> {
-                            // Native move completed successfully.
-                            if (torrentId > 0) {
+                        "storage_moved" -> {
+                            if (torrentId > 0 && !TorrentSession.completeStorageRollback(torrentId, true)) {
                                 EventBus.postTorrentEvent(TorrentEvent.MoveCompleted(
                                     torrentId = torrentId,
                                     sourcePath = "",
-                                    targetPath = alert.message
+                                    targetPath = ""
                                 ))
                             }
                         }
-                        "storage_moved_failed_alert" -> {
-                            // Native move failed.
-                            if (torrentId > 0) {
+                        "storage_moved_failed" -> {
+                            if (torrentId > 0 && !TorrentSession.completeStorageRollback(torrentId, false)) {
+                                TorrentSession.abandonPendingMoveVerification(torrentId)
                                 EventBus.postTorrentEvent(TorrentEvent.MoveFailed(
                                     torrentId = torrentId,
                                     sourcePath = "",
                                     targetPath = "",
-                                    error = alert.message
+                                    error = "Native storage move failed"
                                 ))
                             }
                         }
-                        "tracker_warning_alert",
-                        "listen_failed_alert" -> {
-                            EventBus.postSessionEvent(SessionEvent.Warning(alert.message))
+                        "torrent_checked" -> {
+                            if (torrentId > 0) {
+                                TorrentSession.completeTorrentVerification(torrentId)?.let { result ->
+                                    EventBus.postTorrentEvent(
+                                        if (result.verified) TorrentEvent.VerificationCompleted(torrentId)
+                                        else TorrentEvent.VerificationFailed(torrentId)
+                                    )
+                                }
+                            }
+                        }
+                        "tracker_warning",
+                        "listen_failed" -> {
+                            EventBus.postSessionEvent(SessionEvent.Warning(sanitizedAlertMessage(alertType)))
                         }
                         else -> {
                             // Unknown alert type — log for debugging but don't post.
@@ -133,6 +153,17 @@ object AlertDispatcher {
         } catch (e: Exception) {
             Log.e(TAG, "Error in processAlerts", e)
         }
+    }
+
+    private fun sanitizedAlertMessage(alertType: String): String = when (alertType) {
+        "storage_moved" -> "Torrent storage move completed"
+        "storage_moved_failed" -> "Torrent storage move failed"
+        "torrent_checked" -> "Torrent data verification completed"
+        "torrent_finished" -> "Torrent finished"
+        "tracker_warning" -> "Tracker reported a warning"
+        "listen_failed" -> "Network listener failed"
+        "error" -> "Torrent operation failed"
+        else -> "Torrent state updated"
     }
 
     private fun resolveTorrentId(hash: String, hashMap: Map<Long, String>): Long {
@@ -151,6 +182,7 @@ object AlertDispatcher {
         val type: String,
         val message: String,
         val category: String?,
+        val torrentId: Long,
         val hash: String,
     )
 
@@ -199,6 +231,7 @@ object AlertDispatcher {
             type = extract("type") ?: "unknown",
             message = extract("message") ?: "",
             category = extract("category"),
+            torrentId = nativeTorrentIdFromAlertJson(obj),
             hash = extract("info_hash") ?: extract("hash") ?: "",
         )
     }

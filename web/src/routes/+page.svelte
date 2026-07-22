@@ -12,6 +12,7 @@
 		savePath: string;
 		destinationPath?: string | null;
 		queueId?: string | null;
+		destinationStatus?: string | null;
 		moveState?: string | null;
 	};
 	type StorageVolume = { path: string; description?: string; isRemovable?: boolean };
@@ -20,7 +21,9 @@
 		canonicalPath?: string | null;
 		rejectionReason?: string | null;
 	};
-	type ProgressAlert = { type: string; name?: string; message?: string; state?: string };
+	type ProgressAlert = { type: 'alert'; alertType: string; message?: string };
+	type MoveStatus = { phase: string; sourcePath?: string | null; targetPath?: string | null };
+	type InterruptedMove = { torrentId: number; phase: string; targetPath?: string | null };
 
 	// --- State (Svelte 5 runes) ---
 	let magnetUri = $state('');
@@ -44,6 +47,9 @@
 	let pastedPath = $state('');
 	let pathValidation = $state<PathValidation | null>(null);
 	let validatingPath = $state(false);
+	let moveTargets = $state<Record<number, string>>({});
+	let moveErrors = $state<Record<number, string>>({});
+	let moveLoading = $state<Record<number, boolean>>({});
 	let storageReady = $derived(storagePermission === 'Ready');
 
 	// WebSocket reference (used only for cleanup)
@@ -58,6 +64,17 @@
 			throw new Error(body.error || `HTTP ${response.status}`);
 		}
 		return response.json();
+	}
+
+	async function loadTorrents() {
+		try {
+			const torrents = await fetchJson<TorrentSnapshot[]>('/api/torrents');
+			lastSnapshot = Array.isArray(torrents) ? torrents : [];
+		} catch (e) {
+			addError = e instanceof Error ? e.message : 'Unable to load torrents.';
+		} finally {
+			loading = false;
+		}
 	}
 
 	async function loadStorageState(preferredPath: string | null = null) {
@@ -146,6 +163,16 @@
 		await approveDestination(path);
 	}
 
+	async function removeApprovedDestination(path: string) {
+		storageError = '';
+		try {
+			await fetchJson(`/api/storage/destinations/${encodeURIComponent(path)}`, { method: 'DELETE' });
+			await loadStorageState();
+		} catch (e) {
+			storageError = e instanceof Error ? e.message : 'Unable to remove this folder.';
+		}
+	}
+
 	async function addMagnet() {
 		const uri = magnetUri.trim();
 		if (!uri) {
@@ -183,7 +210,9 @@
 				downloadRate: 0,
 				uploadRate: 0,
 				peers: 0,
-				savePath: ''
+				savePath: '',
+				destinationPath: selectedDestination,
+				destinationStatus: data.status === 'storage_conflict' ? 'storage_conflict' : null
 			};
 			lastSnapshot = [...lastSnapshot, newTorrent];
 
@@ -194,6 +223,10 @@
 		}
 	}
 
+	function updateTorrentState(id: number, state: string) {
+		lastSnapshot = lastSnapshot.map((torrent) => torrent.id === id ? { ...torrent, state } : torrent);
+	}
+
 	async function pauseTorrent(id: number) {
 		try {
 			const res = await fetch(`/api/torrents/${id}/pause`, { method: 'PUT' });
@@ -201,7 +234,7 @@
 				const err = await res.json().catch(() => ({ error: 'Failed to pause' }));
 				alert(err.error || 'Failed to pause torrent');
 			} else {
-				console.log(`Paused torrent: ${id}`);
+				updateTorrentState(id, 'paused');
 			}
 		} catch (e) {
 			alert(e instanceof Error ? e.message : 'Network error');
@@ -215,7 +248,7 @@
 				const err = await res.json().catch(() => ({ error: 'Failed to resume' }));
 				alert(err.error || 'Failed to resume torrent');
 			} else {
-				console.log(`Resumed torrent: ${id}`);
+				updateTorrentState(id, 'downloading');
 			}
 		} catch (e) {
 			alert(e instanceof Error ? e.message : 'Network error');
@@ -230,10 +263,93 @@
 				const err = await res.json().catch(() => ({ error: 'Failed to remove' }));
 				alert(err.error || 'Failed to remove torrent');
 			} else {
-				console.log(`Removed torrent: ${id}`);
+				lastSnapshot = lastSnapshot.filter((torrent) => torrent.id !== id);
 			}
 		} catch (e) {
 			alert(e instanceof Error ? e.message : 'Network error');
+		}
+	}
+
+	function setMoveTarget(id: number, destinationPath: string) {
+		moveTargets = { ...moveTargets, [id]: destinationPath };
+	}
+
+	function moveTargetFor(torrent: TorrentSnapshot): string {
+		return moveTargets[torrent.id] ?? catalog.find((path) => path !== torrent.destinationPath) ?? '';
+	}
+
+	function updateMoveState(id: number, moveState: string | null) {
+		lastSnapshot = lastSnapshot.map((torrent) =>
+			torrent.id === id ? { ...torrent, moveState } : torrent
+		);
+	}
+
+	function isRecoverableMoveState(moveState?: string | null): boolean {
+		return moveState === 'move-interrupted' || moveState === 'interrupted' || moveState === 'storage-conflict';
+	}
+
+	async function refreshMoveStatus(id: number) {
+		const status = await fetchJson<MoveStatus>(`/api/torrents/${id}/move/status`);
+		if (status.targetPath) setMoveTarget(id, status.targetPath);
+		updateMoveState(id, status.phase === 'none' ? null : status.phase);
+	}
+
+	async function submitMove(id: number, destinationPath: string, endpoint: 'move' | 'move/retry') {
+		if (!destinationPath) {
+			moveErrors = { ...moveErrors, [id]: 'Choose an approved destination.' };
+			return;
+		}
+		moveLoading = { ...moveLoading, [id]: true };
+		moveErrors = { ...moveErrors, [id]: '' };
+		try {
+			const response = await fetch(`/api/torrents/${id}/${endpoint}`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ destinationPath })
+			});
+			const result = await response.json().catch(() => ({})) as MoveStatus & { status?: string; error?: string };
+			if (!response.ok && result.status !== 'interrupted' && result.status !== 'storage_conflict') {
+				throw new Error(result.error || `HTTP ${response.status}`);
+			}
+			updateMoveState(id, result.phase);
+			await refreshMoveStatus(id);
+		} catch (e) {
+			moveErrors = { ...moveErrors, [id]: e instanceof Error ? e.message : 'Unable to update the move.' };
+		} finally {
+			moveLoading = { ...moveLoading, [id]: false };
+		}
+	}
+
+	function moveTorrent(id: number, destinationPath: string) {
+		return submitMove(id, destinationPath, 'move');
+	}
+
+	function retryMove(id: number, destinationPath: string) {
+		return submitMove(id, destinationPath, 'move/retry');
+	}
+
+	async function cancelMove(id: number) {
+		moveLoading = { ...moveLoading, [id]: true };
+		moveErrors = { ...moveErrors, [id]: '' };
+		try {
+			await fetchJson(`/api/torrents/${id}/move/cancel`, { method: 'POST' });
+			updateMoveState(id, null);
+		} catch (e) {
+			moveErrors = { ...moveErrors, [id]: e instanceof Error ? e.message : 'Unable to cancel move.' };
+		} finally {
+			moveLoading = { ...moveLoading, [id]: false };
+		}
+	}
+
+	async function loadInterruptedMoves() {
+		try {
+			const moves = await fetchJson<InterruptedMove[]>('/api/storage/moves');
+			moves.forEach((move) => {
+				if (move.targetPath) setMoveTarget(move.torrentId, move.targetPath);
+				updateMoveState(move.torrentId, move.phase.toLowerCase().replace('_', '-'));
+			});
+		} catch (e) {
+			storageError = e instanceof Error ? e.message : 'Unable to load interrupted moves.';
 		}
 	}
 
@@ -274,18 +390,26 @@
 		}
 	}
 
-	function toggleInfo(torrent: TorrentSnapshot) {
-		console.log('toggleInfo called with:', torrent);
+	async function toggleInfo(torrent: TorrentSnapshot) {
 		if (showInfo && selectedTorrent?.id === torrent.id) {
-			console.log('Closing info for torrent:', torrent.id);
-			showInfo = false;
-			selectedTorrent = null;
-		} else {
-			console.log('Opening info for torrent:', torrent.id);
-			selectedTorrent = torrent;
-			showInfo = true;
+			closeInfo();
+			return;
 		}
-		console.log('Current state:', { showInfo, selectedTorrent: selectedTorrent?.id });
+		selectedTorrent = torrent;
+		showInfo = true;
+		try {
+			const destination = await fetchJson<{ canonicalPath?: string | null; path?: string }>(
+				`/api/torrents/${torrent.id}/destination`
+			);
+			if (selectedTorrent?.id === torrent.id) {
+				selectedTorrent = {
+					...torrent,
+					destinationPath: destination.canonicalPath ?? destination.path ?? torrent.destinationPath
+				};
+			}
+		} catch (e) {
+			moveErrors = { ...moveErrors, [torrent.id]: e instanceof Error ? e.message : 'Unable to load destination.' };
+		}
 	}
 
 	function closeInfo() {
@@ -342,15 +466,15 @@
 	}
 
 	function handleAlert(alert: ProgressAlert) {
-		switch (alert.type) {
+		switch (alert.alertType) {
 			case 'torrent_finished':
-				console.log(`Torrent finished: ${alert.name}`);
+				console.log('Torrent finished');
 				break;
-			case 'torrent_error':
-				console.error(`Torrent error: ${alert.message}`);
+			case 'error':
+				console.error('Torrent operation failed');
 				break;
 			case 'state_changed':
-				console.log(`State changed: ${alert.name} → ${alert.state}`);
+				console.log('Torrent state changed');
 				break;
 		}
 	}
@@ -403,7 +527,8 @@
 
 	onMount(() => {
 		connectWebSocket();
-		loadStorageState();
+		void loadTorrents();
+		void loadStorageState().then(loadInterruptedMoves);
 	});
 
 	onDestroy(() => {
@@ -441,15 +566,18 @@
 				<fieldset class="catalog-list">
 					<legend>Approved folders</legend>
 					{#each catalog as path}
-						<label class="path-option">
-							<input
-								type="radio"
-								name="destination"
-								checked={selectedDestination === path}
-								on:change={() => selectApprovedDestination(path)}
-							/>
-							<code>{path}</code>
-						</label>
+						<div class="path-option">
+							<label>
+								<input
+									type="radio"
+									name="destination"
+									checked={selectedDestination === path}
+									on:change={() => selectApprovedDestination(path)}
+								/>
+								<code>{path}</code>
+							</label>
+							<button class="forget-destination" on:click={() => removeApprovedDestination(path)}>Forget</button>
+						</div>
 					{/each}
 				</fieldset>
 			{:else}
@@ -569,25 +697,53 @@
 						<span>👥 {torrent.peers} peers</span>
 					</div>
 
-					{#if torrent.savePath}
-						<p class="save-path">📁 {torrent.savePath}</p>
+					{#if torrent.destinationPath || torrent.savePath}
+						<p class="save-path">📁 {torrent.destinationPath || torrent.savePath}</p>
+					{/if}
+
+					{#if torrent.destinationStatus === 'destination_unavailable'}
+						<p class="move-warning">⏸️ Destination unavailable — torrent paused until storage returns.</p>
+					{:else if torrent.destinationStatus === 'storage_conflict'}
+						<p class="move-warning">⚠️ Storage conflict — existing torrent data did not verify. Remove or repair it, then Resume to verify again.</p>
 					{/if}
 
 					{#if torrent.moveState === 'storage-conflict'}
 						<p class="move-warning">⚠️ Storage conflict — target directory has data. Retry or cancel the move.</p>
+					{:else if torrent.moveState && torrent.moveState !== 'none' && !isRecoverableMoveState(torrent.moveState)}
+						<p class="move-status">🔄 Move status: {torrent.moveState}</p>
 					{/if}
 
-					{#if torrent.moveState === 'moving'}
-						<p class="move-status">🔄 Moving to new destination...</p>
-					{/if}
-
-					{#if torrent.moveState === 'move-interrupted'}
+					{#if torrent.moveState === 'move-interrupted' || torrent.moveState === 'interrupted'}
 						<p class="move-warning">⏸️ Move interrupted — retry or cancel to recover.</p>
 					{/if}
 
+					{#if isRecoverableMoveState(torrent.moveState) || catalog.some((path) => path !== torrent.destinationPath)}
+						<div class="move-controls">
+							<label for={`move-destination-${torrent.id}`}>Move to</label>
+							<select
+								id={`move-destination-${torrent.id}`}
+								value={moveTargetFor(torrent)}
+								disabled={isRecoverableMoveState(torrent.moveState)}
+								on:change={(event) => setMoveTarget(torrent.id, (event.currentTarget as HTMLSelectElement).value)}
+							>
+								<option value="">Choose approved folder</option>
+								{#each catalog.filter((path) => path !== torrent.destinationPath) as path}
+									<option value={path}>{path}</option>
+								{/each}
+							</select>
+							{#if isRecoverableMoveState(torrent.moveState)}
+								<button class="btn btn-resume" on:click={() => retryMove(torrent.id, moveTargetFor(torrent))} disabled={moveLoading[torrent.id]}>Retry move</button>
+								<button class="btn btn-remove" on:click={() => cancelMove(torrent.id)} disabled={moveLoading[torrent.id]}>Cancel move</button>
+							{:else}
+								<button class="btn btn-move" on:click={() => moveTorrent(torrent.id, moveTargetFor(torrent))} disabled={moveLoading[torrent.id] || torrent.destinationStatus === 'destination_unavailable'}>Move</button>
+							{/if}
+						</div>
+					{/if}
+					{#if moveErrors[torrent.id]}<p class="error">{moveErrors[torrent.id]}</p>{/if}
+
 					<div class="card-actions">
 						{#if torrent.state === 'paused' || torrent.state === 'pause_requested'}
-							<button class="btn btn-resume" on:click={() => resumeTorrent(torrent.id)}>▶ Resume</button>
+							<button class="btn btn-resume" on:click={() => resumeTorrent(torrent.id)} disabled={torrent.destinationStatus === 'destination_unavailable'}>▶ Resume</button>
 						{:else}
 							<button class="btn btn-pause" on:click={() => pauseTorrent(torrent.id)}>⏸ Pause</button>
 						{/if}
@@ -693,10 +849,10 @@
 					<span class="label">Peers:</span>
 					<span class="value">{selectedTorrent.peers}</span>
 				</div>
-				{#if selectedTorrent.savePath}
+				{#if selectedTorrent.destinationPath || selectedTorrent.savePath}
 					<div class="info-row">
-						<span class="label">Save Path:</span>
-						<span class="value path">{selectedTorrent.savePath}</span>
+						<span class="label">Destination:</span>
+						<span class="value path">{selectedTorrent.destinationPath || selectedTorrent.savePath}</span>
 					</div>
 				{/if}
 			</div>
@@ -906,12 +1062,27 @@
 	.path-option {
 		display: flex;
 		align-items: flex-start;
+		justify-content: space-between;
 		gap: 0.6rem;
 		padding: 0.65rem;
 		border: 1px solid var(--border);
 		border-radius: 6px;
 		margin-bottom: 0.5rem;
+	}
+
+	.path-option label {
+		display: flex;
+		align-items: flex-start;
+		gap: 0.6rem;
 		cursor: pointer;
+	}
+
+	.forget-destination {
+		background: transparent;
+		border: 1px solid var(--border);
+		color: var(--muted);
+		padding: 0.25rem 0.5rem;
+		font-size: 0.75rem;
 	}
 
 	.path-option code, .path-button code, .browser-current code,
@@ -1147,6 +1318,26 @@
 		margin-bottom: 0.5rem;
 	}
 
+	.move-controls {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		flex-wrap: wrap;
+		margin-bottom: 0.75rem;
+		font-size: 0.8rem;
+		color: var(--muted);
+	}
+
+	.move-controls select {
+		flex: 1 1 180px;
+		min-width: 0;
+		padding: 0.4rem;
+		border: 1px solid var(--border);
+		border-radius: 4px;
+		background: var(--input-bg);
+		color: var(--text);
+	}
+
 	.card-actions {
 		display: flex;
 		gap: 0.5rem;
@@ -1164,6 +1355,7 @@
 	.btn-info { background: var(--border); color: var(--text); }
 	.btn-remove { background: #555; color: white; }
 	.btn-delete { background: var(--accent); color: white; }
+	.btn-move { background: #6b5bd2; color: white; }
 
 	/* Header actions */
 

@@ -7,7 +7,6 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.andreiefimov.torrentwebui.events.AlertDispatcher
 import com.andreiefimov.torrentwebui.events.AlertEvent
 import com.andreiefimov.torrentwebui.events.EventBus
 import com.andreiefimov.torrentwebui.events.SessionEvent
@@ -173,9 +172,11 @@ class TorrentViewModel(application: Application) : AndroidViewModel(application)
                             refreshTorrents()
                         }
                         is TorrentEvent.MoveFailed -> {
-                            Log.w("TorrentViewModel", "Move failed: ${event.error}")
+                            Log.w("TorrentViewModel", "Move failed; recovery is required")
                             refreshTorrents()
                         }
+                        is TorrentEvent.VerificationCompleted,
+                        is TorrentEvent.VerificationFailed -> refreshTorrents()
                         is TorrentEvent.MoveInterrupted -> {
                             Log.w("TorrentViewModel", "Torrent move was interrupted")
                             refreshTorrents()
@@ -235,7 +236,6 @@ class TorrentViewModel(application: Application) : AndroidViewModel(application)
         super.onCleared()
         pollingJob?.cancel()
         eventSubscription?.cancel()
-        AlertDispatcher.stop()
         // TorrentDaemon owns the production session lifecycle; clearing the Android UI
         // must not destroy a foreground daemon that continues in the background.
     }

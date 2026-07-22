@@ -90,9 +90,14 @@ value class QueueId(val value: String) {
 @Serializable
 data class QueueEntry(
     val magnetUri: String,
+    /** Explicit user pause intent; never overwritten by storage safety pauses. */
     val isPaused: Boolean = false,
     val destinationPath: String? = null,
-    val queueId: QueueId = QueueId.random()
+    val queueId: QueueId = QueueId.random(),
+    /** A recoverable safety pause that requires an explicit resume after storage restoration. */
+    val storagePauseRequired: Boolean = false,
+    /** Add-time torrent-owned collision state; null after safe verification or for empty targets. */
+    val addCollisionState: String? = null
 )
 
 @Serializable

@@ -14,15 +14,26 @@ import java.io.IOException
 /**
  * Represents the current phase of a torrent data move operation.
  */
-enum class MovePhase {
-    JournalPersisted,
-    Copying,
-    Verifying,
-    QueueUpdated,
-    SourceRemoved,
-    Completed,
-    Interrupted
+enum class MovePhase(val apiName: String) {
+    JournalPersisted("journal-persisted"),
+    Copying("copying"),
+    Verifying("verifying"),
+    QueueUpdated("queue-updated"),
+    SourceRemoved("source-removed"),
+    Completed("completed"),
+    Cancelled("cancelled"),
+    Interrupted("move-interrupted"),
+    StorageConflict("storage-conflict");
+
+    val requiresUserAction: Boolean
+        get() = this == Interrupted || this == StorageConflict
+
+    val isTerminal: Boolean
+        get() = this == Completed || this == Cancelled
 }
+
+/** Canonical move state used by WebSocket snapshots and the WebUI. */
+internal fun MovePhase.webSocketApiName(): String = apiName
 
 /**
  * Persists move journal entries for recovery across process death.
@@ -32,7 +43,7 @@ enum class MovePhase {
  * one queue entry matches the recorded source path. Ambiguous records stay
  * interrupted and unassociated.
  */
-class MoveJournal(private val context: Context) {
+open class MoveJournal(private val context: Context) {
 
     private val journalFile = File(context.filesDir, "move_journal_v2.json")
     private val v1JournalFile = File(context.filesDir, "move_journal.txt")
@@ -42,20 +53,55 @@ class MoveJournal(private val context: Context) {
         private const val JOURNAL_FORMAT_VERSION = 2
     }
 
-    /** Creates a new move journal entry. */
-    suspend fun createMove(queueId: QueueId, sourcePath: String, targetPath: String): Boolean = withContext(Dispatchers.IO) {
+    /**
+     * Atomically creates or resumes one move while holding the persistence lock.
+     * A second request cannot replace an active record for the torrent or reuse an
+     * active target owned by another torrent.
+     */
+    open suspend fun beginMove(
+        queueId: QueueId,
+        sourcePath: String,
+        targetPath: String,
+        verifyExistingData: Boolean = false,
+        sourceBackupPath: String? = null,
+        sourceVerifiedProgress: Float = 1f
+    ): Boolean = withContext(Dispatchers.IO) {
         journalMutex.withLock {
             try {
-                val entry = PersistedMoveEntry(
-                    queueId = queueId,
-                    sourcePath = sourcePath,
-                    targetPath = targetPath,
-                    phase = MovePhase.JournalPersisted,
-                    createdAt = System.currentTimeMillis(),
-                    updatedAt = System.currentTimeMillis()
-                )
-                val entries = loadEntries() + entry
-                writeEntries(entries)
+                val entries = loadEntries()
+                val currentIndex = entries.indexOfLast { it.queueId == queueId && !it.phase.isTerminal }
+                val current = entries.getOrNull(currentIndex)
+                if (current != null && (!current.phase.requiresUserAction || current.targetPath != targetPath)) {
+                    return@withLock false
+                }
+                if (entries.any { it.queueId != queueId && !it.phase.isTerminal && it.targetPath == targetPath }) {
+                    return@withLock false
+                }
+                val now = System.currentTimeMillis()
+                val entry = if (current != null) {
+                    current.copy(
+                        phase = MovePhase.JournalPersisted,
+                        verifyExistingData = verifyExistingData,
+                        sourceBackupPath = sourceBackupPath ?: current.sourceBackupPath,
+                        sourceVerifiedProgress = sourceVerifiedProgress,
+                        updatedAt = now
+                    )
+                } else {
+                    PersistedMoveEntry(
+                        queueId = queueId,
+                        sourcePath = sourcePath,
+                        targetPath = targetPath,
+                        phase = MovePhase.JournalPersisted,
+                        verifyExistingData = verifyExistingData,
+                        sourceBackupPath = sourceBackupPath,
+                        sourceVerifiedProgress = sourceVerifiedProgress,
+                        createdAt = now,
+                        updatedAt = now
+                    )
+                }
+                val updated = entries.toMutableList()
+                if (currentIndex >= 0) updated[currentIndex] = entry else updated += entry
+                writeEntries(updated)
                 true
             } catch (_: Exception) {
                 false
@@ -63,12 +109,29 @@ class MoveJournal(private val context: Context) {
         }
     }
 
+    /** Compatibility entry point used by existing direct journal tests. */
+    open suspend fun createMove(
+        queueId: QueueId,
+        sourcePath: String,
+        targetPath: String,
+        verifyExistingData: Boolean = false,
+        sourceBackupPath: String? = null,
+        sourceVerifiedProgress: Float = 1f
+    ): Boolean = beginMove(
+        queueId,
+        sourcePath,
+        targetPath,
+        verifyExistingData,
+        sourceBackupPath,
+        sourceVerifiedProgress
+    )
+
     /** Updates the phase of an active move. */
-    suspend fun updatePhase(queueId: QueueId, phase: MovePhase): Boolean = withContext(Dispatchers.IO) {
+    open suspend fun updatePhase(queueId: QueueId, phase: MovePhase): Boolean = withContext(Dispatchers.IO) {
         journalMutex.withLock {
             try {
                 val entries = loadEntries().toMutableList()
-                val idx = entries.indexOfFirst { it.queueId == queueId }
+                val idx = entries.indexOfLast { it.queueId == queueId && !it.phase.isTerminal }
                 if (idx < 0) return@withLock false
 
                 entries[idx] = entries[idx].copy(phase = phase, updatedAt = System.currentTimeMillis())
@@ -95,21 +158,47 @@ class MoveJournal(private val context: Context) {
         }
     }
 
-    /** Returns the current move entry for a torrent, or null if no active move. */
+    /** Returns the current non-terminal move entry, or null when no move needs action. */
     suspend fun getMove(queueId: QueueId): PersistedMoveEntry? = withContext(Dispatchers.IO) {
-        journalMutex.withLock { loadEntries().find { it.queueId == queueId } }
+        journalMutex.withLock { loadEntries().lastOrNull { it.queueId == queueId && !it.phase.isTerminal } }
     }
 
-    /** Returns all active (non-completed, non-interrupted) moves. */
+    /** Returns the retained audit/reconciliation record, including terminal cancellation. */
+    suspend fun getRetainedMove(queueId: QueueId): PersistedMoveEntry? = withContext(Dispatchers.IO) {
+        journalMutex.withLock { loadEntries().lastOrNull { it.queueId == queueId } }
+    }
+
+    /** Returns all terminal audit records retained for a torrent. */
+    suspend fun getAuditMoves(queueId: QueueId): List<PersistedMoveEntry> = withContext(Dispatchers.IO) {
+        journalMutex.withLock { loadEntries().filter { it.queueId == queueId && it.phase.isTerminal } }
+    }
+
+    /**
+     * Validates the current journal before native recovery starts.
+     *
+     * Parsing/version failures propagate without rewriting either journal file. A valid legacy
+     * journal may be migrated before this check; migration itself is also fail-closed.
+     */
+    suspend fun validateForRecovery(queueStore: QueueStore) = withContext(Dispatchers.IO) {
+        if (v1JournalFile.exists()) migrateV1Journal(queueStore)
+        journalMutex.withLock { loadEntries() }
+    }
+
+    /** All records that still protect their source/target catalog paths. */
+    suspend fun getPathLockMoves(): List<PersistedMoveEntry> = withContext(Dispatchers.IO) {
+        journalMutex.withLock { loadEntries().filter { it.phase != MovePhase.Cancelled } }
+    }
+
+    /** Returns moves still progressing without waiting for user recovery action. */
     suspend fun getActiveMoves(): List<PersistedMoveEntry> = withContext(Dispatchers.IO) {
         journalMutex.withLock {
-            loadEntries().filter { it.phase != MovePhase.Completed && it.phase != MovePhase.Interrupted }
+            loadEntries().filter { !it.phase.isTerminal && !it.phase.requiresUserAction }
         }
     }
 
-    /** Returns all interrupted moves (need user action to retry or cancel). */
+    /** Returns moves requiring explicit retry or cancel, including storage conflicts. */
     suspend fun getInterruptedMoves(): List<PersistedMoveEntry> = withContext(Dispatchers.IO) {
-        journalMutex.withLock { loadEntries().filter { it.phase == MovePhase.Interrupted } }
+        journalMutex.withLock { loadEntries().filter { it.phase.requiresUserAction } }
     }
 
     /**
@@ -174,14 +263,31 @@ class MoveJournal(private val context: Context) {
                 }
             }
 
-            // Merge with any existing v2 entries (avoid duplicates).
-            val merged = (existing + migrated).distinctBy { it.queueId }
-            writeEntries(merged)
+            // Preserve every terminal audit while selecting one deterministic non-terminal
+            // recovery authority per queue identity and active target. Legacy files may contain
+            // duplicate/out-of-order lines after repeated process crashes.
+            val terminalAudits = migrated.filter { it.phase.isTerminal }
+            val latestPerQueue = migrated
+                .filterNot { it.phase.isTerminal }
+                .groupBy { it.queueId }
+                .values
+                .map { records -> records.maxWith(compareBy<PersistedMoveEntry> { it.updatedAt }.thenBy { it.createdAt }) }
+            val latestPerTarget = latestPerQueue
+                .groupBy { it.targetPath }
+                .values
+                .map { records -> records.maxWith(compareBy<PersistedMoveEntry> { it.updatedAt }.thenBy { it.createdAt }) }
+            val existingActiveQueues = existing.filterNot { it.phase.isTerminal }.mapTo(mutableSetOf()) { it.queueId }
+            val existingActiveTargets = existing.filterNot { it.phase.isTerminal }.mapTo(mutableSetOf()) { it.targetPath }
+            val selectedAuthorities = latestPerTarget
+                .sortedWith(compareBy<PersistedMoveEntry> { it.createdAt }.thenBy { it.updatedAt })
+                .filter { it.queueId !in existingActiveQueues && it.targetPath !in existingActiveTargets }
+            val selected = terminalAudits + selectedAuthorities
+            writeEntries(existing + selected)
 
             // Remove v1 file after successful migration.
             v1JournalFile.delete()
 
-            migrated.size
+            selected.size
         }
     }
 
@@ -189,41 +295,31 @@ class MoveJournal(private val context: Context) {
 
     private fun loadV1Entries(): List<V1MoveEntry> {
         if (!v1JournalFile.exists()) return emptyList()
-        return try {
-            v1JournalFile.readText().lines()
-                .mapNotNull { line ->
-                    val parts = line.split("|", limit = 6)
-                    if (parts.size == 6) {
-                        V1MoveEntry(
-                            torrentId = parts[0].toLongOrNull() ?: return@mapNotNull null,
-                            sourcePath = parts[1],
-                            targetPath = parts[2],
-                            phase = try { MovePhase.valueOf(parts[3]) } catch (_: Exception) { return@mapNotNull null },
-                            createdAt = parts[4].toLongOrNull() ?: return@mapNotNull null,
-                            updatedAt = parts[5].toLongOrNull() ?: System.currentTimeMillis()
-                        )
-                    } else null
-                }
-        } catch (_: Exception) {
-            emptyList()
-        }
+        val content = v1JournalFile.readText()
+        require(content.isNotBlank()) { "Legacy move journal is empty" }
+        return content.lineSequence().filter { it.isNotBlank() }.map { line ->
+            val parts = line.split("|", limit = 6)
+            require(parts.size == 6) { "Invalid legacy move journal entry" }
+            V1MoveEntry(
+                torrentId = requireNotNull(parts[0].toLongOrNull()) { "Invalid legacy torrent identity" },
+                sourcePath = parts[1],
+                targetPath = parts[2],
+                phase = MovePhase.valueOf(parts[3]),
+                createdAt = requireNotNull(parts[4].toLongOrNull()) { "Invalid legacy timestamp" },
+                updatedAt = requireNotNull(parts[5].toLongOrNull()) { "Invalid legacy update timestamp" }
+            )
+        }.toList()
     }
 
     // ---- V2 format (JSON, QueueId-backed) ----
 
     private fun loadEntries(): List<PersistedMoveEntry> {
         if (!journalFile.exists()) return emptyList()
-        return try {
-            val content = journalFile.readText()
-            if (content.isBlank()) return emptyList()
-            val persisted = Json.decodeFromString(PersistedJournal.serializer(), content)
-            require(persisted.version == JOURNAL_FORMAT_VERSION) {
-                "Unsupported journal format version ${persisted.version}"
-            }
-            persisted.entries
-        } catch (_: Exception) {
-            emptyList()
-        }
+        val content = journalFile.readText()
+        require(content.isNotBlank()) { "Move journal is empty" }
+        val persisted = Json.decodeFromString(PersistedJournal.serializer(), content)
+        require(persisted.version == JOURNAL_FORMAT_VERSION) { "Unsupported move journal format" }
+        return persisted.entries
     }
 
     private fun writeEntries(entries: List<PersistedMoveEntry>) {
@@ -260,6 +356,10 @@ data class PersistedMoveEntry(
     val sourcePath: String,
     val targetPath: String,
     val phase: MovePhase,
+    val verifyExistingData: Boolean = false,
+    val sourceBackupPath: String? = null,
+    /** Verified source fraction that the replacement target must retain or exceed. */
+    val sourceVerifiedProgress: Float = 1f,
     val createdAt: Long,
     val updatedAt: Long = System.currentTimeMillis()
 )
@@ -274,6 +374,6 @@ private data class PersistedJournal(
  * Result of a move operation.
  */
 data class MoveResult(
-    val status: String, // "ok", "interrupted", "error"
+    val status: String, // "ok", "interrupted", "storage_conflict", "error"
     val recoverableError: String? = null
 )

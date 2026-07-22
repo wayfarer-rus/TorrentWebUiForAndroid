@@ -4,24 +4,23 @@
 
 ```
 ┌─────────────────────────────────────────────┐
-│  Android UI (Compose, onboarding/controls)   │
+│ Android fallback UI + authenticated WebUI   │
 ├─────────────────────────────────────────────┤
-│  Shared Domain / Backend Model               │
-│  - TorrentStatus DTO                         │
-│  - NativeDiagnostics DTO                     │
+│ TorrentDaemon (foreground lifecycle owner)  │
+│ - Ktor server, queue/journal recovery        │
+│ - permission/storage safety transitions      │
 ├─────────────────────────────────────────────┤
-│  ViewModel (TorrentViewModel)                │
-│  - Session lifecycle management              │
-│  - 1-second polling of native state          │
+│ Shared domain/backend model                  │
+│ - canonical per-torrent destinations         │
+│ - durable queue, catalog, and move states    │
 ├─────────────────────────────────────────────┤
-│  JNI Bridge (TorrentSession object)          │
-│  - Narrow, typed DTOs                       │
-│  - No raw pointers, no JSON                 │
+│ JNI Bridge (TorrentSession object)           │
+│ - narrow typed add/move/verify operations    │
+│ - no raw pointers or giant JSON models       │
 ├─────────────────────────────────────────────┤
-│  Native Engine (libtorrent 2.0.10, C++)      │
-│  - Session lifecycle                        │
-│  - Torrent management                       │
-│  - Network I/O                              │
+│ Native Engine (libtorrent 2.0.10, C++)       │
+│ - native session/handle ownership            │
+│ - transfer, move, and piece verification     │
 └─────────────────────────────────────────────┘
 ```
 
@@ -35,13 +34,13 @@ app/
     AndroidManifest.xml     # App manifest, INTERNET/FOREGROUND_SERVICE/POST_NOTIFICATIONS permissions
     jni/torrent_jni.cpp     # JNI bridge implementation (includes resume data methods)
     java/.../
-      MainActivity.kt       # Compose activity (M3: minimal fallback — health + Start/Stop only)
-      TorrentDaemon.kt      # Foreground service (M3: owns session + WebUI lifecycle)
-      TorrentServer.kt      # Ktor server (M3: adds /api/daemon/health and /api/daemon/stop)
-      TorrentSession.kt     # Kotlin JNI interface (implements DaemonControl)
-      TorrentViewModel.kt   # ViewModel (routes through DaemonControl seam)
-      DaemonControl.kt      # Unified control seam (ops + lifecycle) — M3 addition
-      QueueStore.kt         # Durable queue persistence interface + implementations — M3 addition
+      MainActivity.kt       # Minimal permission/service-health fallback UI
+      TorrentDaemon.kt      # Foreground owner of native session, Ktor, and recovery
+      TorrentServer.kt      # Authenticated WebUI/API using the shared backend model
+      TorrentSession.kt     # Sole Kotlin JNI entry point (implements DaemonControl)
+      TorrentViewModel.kt   # Android fallback state; does not own the native lifecycle
+      DaemonControl.kt      # Shared typed operation/lifecycle seam
+      QueueStore.kt         # Durable queue intent with canonical per-torrent destinations
       RecoverySuppressionStore.kt # Durable force-stop auto-recovery suppression — M3 addition
       ForceStopDetector.kt   # Android API 30+ force-stop exit-reason reader — M3 addition
       TorrentStatus.kt      # DTO models
@@ -82,12 +81,13 @@ scripts/
 - **libtorrent**: Pinned git submodule at tag `v2.0.10` (commit `74bc93a37`). Submodule deps (`try_signal`, `asio-gnutls`) are also pinned.
 - **Boost 1.86.0**: Downloaded via `scripts/bootstrap-deps.sh` with SHA-256 verification. Checksum pinned in `dep/boost-sha256.txt` and in the bootstrap script. Not tracked in git (headers-only, ~200MB).
 
-## Daemon Control Seam (M3)
+## Daemon and Storage Control Seam (M3/M4)
 
-- **`DaemonControl`** interface unifies session operations (`TorrentSessionOps`) with lifecycle management (`init`, `destroy`, `getDiagnostics`, resume data methods).
-- **`TorrentSession`** object implements `DaemonControl` directly.
-- **`DaemonControlFactory`** provides production (`TorrentSession`) and test (mock-backed) entry points.
-- **`TorrentServer`** and **`TorrentViewModel`** both talk through `DaemonControl`, so the native session can move behind a foreground service without changing callers.
+- **`TorrentDaemon`** is the production lifecycle owner for the native session, alert dispatcher, durable recovery, and Ktor server; Activity/ViewModel cleanup never destroys daemon-owned native state.
+- **`DaemonControl`** unifies lifecycle and small typed torrent operations. `TorrentAddRequest` carries a canonical destination and initial pause policy; move/rollback/verification remain narrow JNI calls.
+- **`TorrentSession`** is the sole Kotlin JNI entry point while native code owns libtorrent objects.
+- **`QueueStore`**, **`DestinationCatalog`**, and **`MoveJournal`** are the durable authority consumed by both Android fallback state and authenticated WebUI/API responses.
+- Recovery validates queue/journal records and storage availability before native work. Corrupt journals fail closed; unavailable destinations enter native recovery paused from the first instant.
 
 ## Queue Persistence (M3)
 
@@ -108,11 +108,12 @@ scripts/
 - On ordinary system termination, the next app launch restores eligible queue entries (at most 30 seconds of transfer progress may be lost).
 - Android Force stop is detected on API 30+ from the latest `REASON_USER_REQUESTED` process exit and persisted as a local suppression marker. App-launch recovery is skipped while queue records remain available; **Start downloads** clears the marker and resumes recovery.
 
-## WebUI Endpoints (M3)
+## Authenticated WebUI/API (M3/M4)
 
-- **`GET /api/daemon/health`** — returns non-sensitive daemon health status (lifecycle state, recovery blocked flag).
-- **`POST /api/daemon/stop`** — initiates safe stop of the daemon (invokes shared safe-stop behavior).
-- After Stop downloads, the WebUI is unavailable (Ktor server stops) and Android fallback is the required restart path.
+- **`GET /api/daemon/health`** returns non-sensitive daemon lifecycle/recovery state; **`POST /api/daemon/stop`** performs shared safe stop.
+- Authenticated storage routes expose permission state, validated volume roots/canonical directories, approved destinations, latest selection, per-torrent destination availability, and move status/retry/cancel.
+- Torrent REST and WebSocket snapshots resolve canonical destinations from the durable queue, not transient native paths.
+- Permission revocation replaces native operation control with a permission-blocked backend while keeping authenticated Ktor available. An explicit stop still removes Ktor and requires Android fallback restart.
 
 ## Android Fallback UI (M3)
 
@@ -139,7 +140,7 @@ scripts/
 ## Data Flow: Native to Compose UI
 
 1. Native layer: `lt::torrent_status` queried via `handle.status()`
-2. JNI: `nativeGetTorrentStatus()` returns `jlongArray[6]` (id, progress\*1000, downloadRate, uploadRate, peers, stateCode)
+2. JNI: `nativeGetTorrentStatus()` returns `jlongArray[7]` (id, progress\*1000, downloadRate, uploadRate, peers, stateCode, paused flag)
 3. JNI: `nativeGetTorrentName()` returns `jstring`
 4. JNI: `nativeGetSavePath()` returns session save path `jstring`
 5. JNI: `nativePopAlerts()` drains alert queue each cycle
@@ -147,10 +148,16 @@ scripts/
 7. ViewModel: Polls every 1s, updates `MutableStateFlow<TorrentUiState>`
 8. Compose: `collectAsStateWithLifecycle()` drives UI updates
 
+## Milestone 4 Storage and Recovery
+
+- New torrents use backend-validated canonical shared/external filesystem paths; SAF URIs and synthetic aliases are rejected.
+- The versioned queue persists per-torrent destination, user pause intent, and storage-safety pause state. The destination catalog and move journal are app-private durable configuration.
+- One-torrent moves pause only the selected torrent, retain source/target recovery state, use libtorrent movement and piece verification, and update the durable queue only after verification. Retry/cancel remain explicit.
+- All Files Access loss keeps an authenticated permission-blocked WebUI available while native storage work is stopped. Restoration never auto-resumes storage-safety-paused torrents.
+- Automated M4 acceptance uses a real API 36 AVD, JNI/libtorrent, Ktor, authenticated browser traffic over owned ADB forwarding, deterministic fixtures, and teardown verification. Physical-device deployment validation remains optional and unperformed.
+
 ## Known Limitations
 
-- **No path-based destination model yet.** The current implementation remains app-private/global-path; Milestone 4's target design is specified in [docs/milestone-4-storage-model.md](docs/milestone-4-storage-model.md).
 - **No encryption/HTTPS tracker support.** OpenSSL disabled.
-- **Polling-based.** No alert-driven updates (alerts are consumed for queue management only).
-- **Magnet-only.** No `.torrent` file support.
-- **No physical-device LAN acceptance yet.** Emulator acceptance tests compile and are ready for AVD execution.
+- **Magnet-only.** No `.torrent` file upload support.
+- **No physical-device M4 deployment check yet.** The required automated acceptance is emulator-based; any later Termux/SSH comparison must be recorded separately in `TEST_REPORT.md`.

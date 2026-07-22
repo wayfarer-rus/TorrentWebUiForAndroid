@@ -75,7 +75,7 @@ A Torrent Data Move targets exactly one torrent:
 6. remove the source only after that durable destination update succeeds;
 7. resume only on explicit user action where the torrent was previously paused or recovery requires it.
 
-Failure or cancellation preserves the source and target data, retains the journal, and leaves the torrent paused with a recoverable status. A process kill, reboot, USB loss, or permission revocation produces `move_interrupted`; startup inspects both locations and requires an explicit retry or cancel. No automatic deletion or guessed recovery is permitted.
+Failure or cancellation preserves the source and target data, retains the journal, and leaves the torrent paused with a recoverable status. Cancellation changes the retained entry to terminal `cancelled`: it is audit/reconciliation history, not an active target lock, and is removed only with the torrent or explicit acceptance teardown. A process kill, reboot, USB loss, or permission revocation produces `move_interrupted`; startup inspects both locations and requires an explicit retry or cancel. No automatic deletion or guessed recovery is permitted.
 
 ### Legacy Destinations
 

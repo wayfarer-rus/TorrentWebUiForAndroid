@@ -5,6 +5,7 @@
 #include <mutex>
 #include <cstring>
 #include <algorithm>
+#include <sys/stat.h>
 
 #include <libtorrent/session.hpp>
 #include <libtorrent/torrent_handle.hpp>
@@ -15,6 +16,7 @@
 #include <libtorrent/magnet_uri.hpp>
 #include <libtorrent/error_code.hpp>
 #include <libtorrent/info_hash.hpp>
+#include <libtorrent/hex.hpp>
 #include <libtorrent/session_params.hpp>
 #include <libtorrent/add_torrent_params.hpp>
 
@@ -69,7 +71,6 @@ Java_com_andreiefimov_torrentwebui_TorrentSession_nativeInit(
         params.settings.set_int(lt::settings_pack::alert_mask,
             static_cast<int>(lt::alert::error_notification | lt::alert::storage_notification
                              | lt::alert::status_notification | lt::alert::tracker_notification
-                             | lt::alert::connect_notification | lt::alert::peer_notification
                              | lt::alert::performance_warning));
         params.settings.set_int(lt::settings_pack::alert_queue_size, 256);
         params.settings.set_int(lt::settings_pack::connections_limit, 160);
@@ -88,7 +89,7 @@ Java_com_andreiefimov_torrentwebui_TorrentSession_nativeInit(
     }
 }
 
-extern "C" JNIEXPORT void JNICALL
+extern "C" JNIEXPORT jboolean JNICALL
 Java_com_andreiefimov_torrentwebui_TorrentSession_nativeDestroy(
         JNIEnv*, jobject, jlong jId) {
     try {
@@ -96,8 +97,10 @@ Java_com_andreiefimov_torrentwebui_TorrentSession_nativeDestroy(
         uint64_t id = static_cast<uint64_t>(jId);
         g_sessions.erase(id);
         LOGI("Session %llu destroyed", id);
+        return JNI_TRUE;
     } catch (std::exception const& e) {
         LOGE("nativeDestroy failed: %s", e.what());
+        return JNI_FALSE;
     }
 }
 
@@ -114,7 +117,8 @@ Java_com_andreiefimov_torrentwebui_TorrentSession_nativeVersion(JNIEnv* env, job
 // ---------------------------------------------------------------------------
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_andreiefimov_torrentwebui_TorrentSession_nativeAddMagnet(
-        JNIEnv* env, jobject, jlong jId, jstring jMagnet, jstring jDestinationPath) {
+        JNIEnv* env, jobject, jlong jId, jstring jMagnet, jstring jDestinationPath,
+        jboolean jStartPaused, jboolean jMetadataOnly) {
     try {
         std::lock_guard<std::mutex> lock(g_mutex);
         uint64_t id = static_cast<uint64_t>(jId);
@@ -131,6 +135,14 @@ Java_com_andreiefimov_torrentwebui_TorrentSession_nativeAddMagnet(
 
         lt::add_torrent_params p = lt::parse_magnet_uri(magnet);
         p.save_path = destinationPath;
+        if (jStartPaused == JNI_TRUE) {
+            p.flags &= ~lt::torrent_flags::auto_managed;
+            p.flags |= lt::torrent_flags::paused;
+        }
+        if (jMetadataOnly == JNI_TRUE) {
+            // upload_mode permits metadata exchange but never requests payload pieces.
+            p.flags |= lt::torrent_flags::upload_mode;
+        }
 
         lt::torrent_handle h = sit->second.session->add_torrent(p);
         uint64_t torrentId = sit->second.next_torrent_id++;
@@ -139,9 +151,39 @@ Java_com_andreiefimov_torrentwebui_TorrentSession_nativeAddMagnet(
 
         LOGI("Added torrent %llu", torrentId);
         return static_cast<jlong>(torrentId);
-    } catch (std::exception const& e) {
-        LOGE("nativeAddMagnet failed: %s", e.what());
+    } catch (std::exception const&) {
+        LOGE("nativeAddMagnet failed");
         return -1;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// JNI: Inspect torrent-owned data at the current save path.
+// 0 = metadata pending, 1 = no owned files present, 2 = owned data present.
+// ---------------------------------------------------------------------------
+extern "C" JNIEXPORT jint JNICALL
+Java_com_andreiefimov_torrentwebui_TorrentSession_nativeInspectTorrentOwnedData(
+        JNIEnv*, jobject, jlong jId, jlong jTorrentId) {
+    try {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto sit = g_sessions.find(static_cast<uint64_t>(jId));
+        if (sit == g_sessions.end()) return 0;
+        auto const tid = static_cast<uint64_t>(jTorrentId);
+        auto tit = sit->second.torrents.find(tid);
+        auto pit = sit->second.torrent_save_paths.find(tid);
+        if (tit == sit->second.torrents.end() || pit == sit->second.torrent_save_paths.end()) return 0;
+        auto info = tit->second.torrent_file();
+        if (!info) return 0;
+        auto const& files = info->files();
+        for (lt::file_index_t index : files.file_range()) {
+            std::string path = pit->second + "/" + files.file_path(index);
+            struct stat value {};
+            if (::lstat(path.c_str(), &value) == 0) return 2;
+        }
+        return 1;
+    } catch (std::exception const&) {
+        LOGE("nativeInspectTorrentOwnedData failed");
+        return 0;
     }
 }
 
@@ -162,8 +204,9 @@ Java_com_andreiefimov_torrentwebui_TorrentSession_nativePauseTorrent(
         if (tit == sit->second.torrents.end()) return JNI_FALSE;
 
         LOGI("Pausing torrent %llu", (uint64_t)tid);
-        // Use set_flags to explicitly set the paused flag, ensuring it's reflected immediately
-        // in torrent_status.flags. The pause() method may not set the flag synchronously.
+        // User/storage safety pauses must not be undone by libtorrent auto-management.
+        // Clear auto-managed first, then set the paused flag synchronously.
+        tit->second.unset_flags(lt::torrent_flags::auto_managed | lt::torrent_flags::stop_when_ready);
         tit->second.set_flags(lt::torrent_flags::paused);
         return JNI_TRUE;
     } catch (std::exception const& e) {
@@ -186,6 +229,7 @@ Java_com_andreiefimov_torrentwebui_TorrentSession_nativeResumeTorrent(
         if (tit == sit->second.torrents.end()) return JNI_FALSE;
 
         LOGI("Resuming torrent %llu", tid);
+        tit->second.unset_flags(lt::torrent_flags::upload_mode | lt::torrent_flags::stop_when_ready);
         tit->second.resume();
         return JNI_TRUE;
     } catch (std::exception const& e) {
@@ -353,7 +397,7 @@ Java_com_andreiefimov_torrentwebui_TorrentSession_nativeGetAllTorrentIds(
 
 // ---------------------------------------------------------------------------
 // JNI: Get all pending alerts as a JSON string
-// Format: [{"type":"...","message":"...","category":"...","info_hash":"..."}, ...]
+// Format: [{"type":"...","message":"...","category":"...","torrent_id":1,"info_hash":"..."}, ...]
 // ---------------------------------------------------------------------------
 
 static std::string escape_json_string(const std::string& s) {
@@ -374,7 +418,7 @@ static std::string escape_json_string(const std::string& s) {
     return out;
 }
 
-static std::string alert_to_json(lt::alert* alert) {
+static std::string alert_to_json(SessionEntry const& entry, lt::alert* alert) {
     std::string json;
     json += "{";
     json += "\"type\":\"";
@@ -394,8 +438,35 @@ static std::string alert_to_json(lt::alert* alert) {
     json += escape_json_string(cat);
     json += "\",";
 
-    // Info hash (if the alert is associated with a torrent)
-    json += "\"info_hash\":\"\"";
+    // Correlate with the stable JNI torrent ID first. Unlike a v1-only info hash,
+    // this remains available for v2-only torrents and before metadata is complete.
+    int64_t torrent_id = -1;
+    std::string info_hash;
+    if (auto const* torrent_alert = dynamic_cast<lt::torrent_alert const*>(alert)) {
+        try {
+            if (torrent_alert->handle.is_valid()) {
+                for (auto const& [candidate_id, handle] : entry.torrents) {
+                    if (handle == torrent_alert->handle) {
+                        torrent_id = static_cast<int64_t>(candidate_id);
+                        break;
+                    }
+                }
+                auto const hashes = torrent_alert->handle.info_hashes();
+                if (hashes.has_v1()) {
+                    info_hash = lt::aux::to_hex(hashes.v1.to_string());
+                }
+            }
+        } catch (...) {
+            torrent_id = -1;
+            info_hash.clear();
+        }
+    }
+    json += "\"torrent_id\":";
+    json += std::to_string(torrent_id);
+    json += ",";
+    json += "\"info_hash\":\"";
+    json += escape_json_string(info_hash);
+    json += "\"";
     json += "}";
     return json;
 }
@@ -422,7 +493,7 @@ Java_com_andreiefimov_torrentwebui_TorrentSession_nativeGetAllAlerts(
         std::string json = "[";
         for (size_t i = 0; i < alerts.size(); ++i) {
             if (i > 0) json += ",";
-            json += alert_to_json(alerts[i]);
+            json += alert_to_json(sit->second, alerts[i]);
         }
         json += "]";
 
@@ -494,7 +565,7 @@ Java_com_andreiefimov_torrentwebui_TorrentSession_nativeGetTorrentIdByHash(
                 if (!handle.is_valid()) continue;
                 lt::sha1_hash hash = handle.info_hashes().v1;
                 if (hash.is_all_zeros()) continue;
-                std::string h = hash.to_string();
+                std::string h = lt::aux::to_hex(hash.to_string());
                 std::transform(h.begin(), h.end(), h.begin(), ::tolower);
                 if (h == target) return static_cast<jlong>(tid);
             } catch (...) {
@@ -556,7 +627,8 @@ Java_com_andreiefimov_torrentwebui_TorrentSession_nativeLoadTorrentResumeData(
 // ---------------------------------------------------------------------------
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_andreiefimov_torrentwebui_TorrentSession_nativeMoveStorage(
-        JNIEnv* env, jobject, jlong jId, jlong jTorrentId, jstring jTargetPath) {
+        JNIEnv* env, jobject, jlong jId, jlong jTorrentId, jstring jTargetPath,
+        jboolean jReuseExisting) {
     try {
         std::lock_guard<std::mutex> lock(g_mutex);
         uint64_t id = static_cast<uint64_t>(jId);
@@ -571,23 +643,76 @@ Java_com_andreiefimov_torrentwebui_TorrentSession_nativeMoveStorage(
         std::string targetPath(cpath);
         env->ReleaseStringUTFChars(jTargetPath, cpath);
 
-        tit->second.move_storage(targetPath);
-        // Update tracked save path immediately; it will be the new canonical path
-        // once the move completes. On failure, the daemon handler resets it.
-        sit->second.torrent_save_paths[tid] = targetPath;
+        auto const flags = jReuseExisting == JNI_TRUE
+            ? lt::move_flags_t::dont_replace
+            : lt::move_flags_t::always_replace_files;
+        tit->second.move_storage(targetPath, flags);
+        // Keep reporting the durable source until Kotlin receives storage_moved_alert
+        // and commits the target after its queue update succeeds.
         return JNI_TRUE;
-    } catch (std::exception const& e) {
-        LOGE("nativeMoveStorage failed: %s", e.what());
+    } catch (std::exception const&) {
+        LOGE("nativeMoveStorage failed");
         return JNI_FALSE;
     }
 }
 
 // ---------------------------------------------------------------------------
-// JNI: Reset tracked save path for a torrent (used on move failure).
+// JNI: Roll the live libtorrent handle back to the durable canonical source.
+// Completion/failure is correlated through the normal storage move alerts.
+// ---------------------------------------------------------------------------
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_andreiefimov_torrentwebui_TorrentSession_nativeRollbackStorage(
+        JNIEnv* env, jobject, jlong jId, jlong jTorrentId, jstring jSourcePath) {
+    try {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto sit = g_sessions.find(static_cast<uint64_t>(jId));
+        if (sit == g_sessions.end()) return JNI_FALSE;
+        auto tit = sit->second.torrents.find(static_cast<uint64_t>(jTorrentId));
+        if (tit == sit->second.torrents.end() || !tit->second.is_valid()) return JNI_FALSE;
+        const char* cpath = env->GetStringUTFChars(jSourcePath, nullptr);
+        std::string sourcePath(cpath);
+        env->ReleaseStringUTFChars(jSourcePath, cpath);
+        // The preserved canonical source must never be overwritten by partial target data.
+        tit->second.move_storage(sourcePath, lt::move_flags_t::dont_replace);
+        return JNI_TRUE;
+    } catch (std::exception const&) {
+        LOGE("nativeRollbackStorage failed");
+        return JNI_FALSE;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// JNI: Verify the torrent's current storage using libtorrent piece hashing.
+// Completion is reported through torrent_checked_alert.
+// ---------------------------------------------------------------------------
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_andreiefimov_torrentwebui_TorrentSession_nativeVerifyTorrent(
+        JNIEnv*, jobject, jlong jId, jlong jTorrentId) {
+    try {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto sit = g_sessions.find(static_cast<uint64_t>(jId));
+        if (sit == g_sessions.end()) return JNI_FALSE;
+        auto tit = sit->second.torrents.find(static_cast<uint64_t>(jTorrentId));
+        if (tit == sit->second.torrents.end() || !tit->second.is_valid()) return JNI_FALSE;
+        // Libtorrent does not hash a paused torrent. stop_when_ready pauses at the
+        // post-check state boundary so corrupt target data cannot be downloaded/repaired
+        // before Kotlin classifies the verification result.
+        tit->second.set_flags(lt::torrent_flags::stop_when_ready);
+        tit->second.unset_flags(lt::torrent_flags::paused | lt::torrent_flags::upload_mode);
+        tit->second.force_recheck();
+        return JNI_TRUE;
+    } catch (std::exception const&) {
+        LOGE("nativeVerifyTorrent failed");
+        return JNI_FALSE;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// JNI: Commit the tracked save path after durable move finalization.
 // ---------------------------------------------------------------------------
 extern "C" JNIEXPORT void JNICALL
-Java_com_andreiefimov_torrentwebui_TorrentSession_nativeResetTorrentSavePath(
-        JNIEnv* env, jobject, jlong jId, jlong jTorrentId) {
+Java_com_andreiefimov_torrentwebui_TorrentSession_nativeCommitTorrentSavePath(
+        JNIEnv* env, jobject, jlong jId, jlong jTorrentId, jstring jTargetPath) {
     try {
         std::lock_guard<std::mutex> lock(g_mutex);
         uint64_t id = static_cast<uint64_t>(jId);
@@ -595,9 +720,13 @@ Java_com_andreiefimov_torrentwebui_TorrentSession_nativeResetTorrentSavePath(
         if (sit == g_sessions.end()) return;
 
         uint64_t tid = static_cast<uint64_t>(jTorrentId);
-        sit->second.torrent_save_paths.erase(tid);
-    } catch (std::exception const& e) {
-        LOGE("nativeResetTorrentSavePath failed: %s", e.what());
+        if (sit->second.torrents.find(tid) == sit->second.torrents.end()) return;
+
+        const char* cpath = env->GetStringUTFChars(jTargetPath, nullptr);
+        sit->second.torrent_save_paths[tid] = cpath;
+        env->ReleaseStringUTFChars(jTargetPath, cpath);
+    } catch (std::exception const&) {
+        LOGE("nativeCommitTorrentSavePath failed");
     }
 }
 

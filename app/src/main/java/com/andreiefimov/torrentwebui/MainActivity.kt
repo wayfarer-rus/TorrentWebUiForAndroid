@@ -124,6 +124,10 @@ class MainActivity : ComponentActivity() {
                 }
             }
             StartupGateAction.RequestStoragePermission -> {
+                if (hasNotificationPermission() && StoragePermissionHistory.hasBeenReady(this)) {
+                    daemonStartRequested = false
+                    TorrentDaemon.startPermissionBlocked(applicationContext)
+                }
                 if (allowStoragePrompt && !storageSettingsLaunched) {
                     storageSettingsLaunched = true
                     startActivity(StoragePermissionChecker.launchPermissionSettings(this))

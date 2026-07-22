@@ -20,14 +20,16 @@ class MoveOperationTest {
     @Test
     fun `MovePhase has expected values`() {
         val phases = MovePhase.values()
-        assertEquals(7, phases.size)
+        assertEquals(9, phases.size)
         assertTrue(phases.contains(MovePhase.JournalPersisted))
         assertTrue(phases.contains(MovePhase.Copying))
         assertTrue(phases.contains(MovePhase.Verifying))
         assertTrue(phases.contains(MovePhase.QueueUpdated))
         assertTrue(phases.contains(MovePhase.SourceRemoved))
         assertTrue(phases.contains(MovePhase.Completed))
+        assertTrue(phases.contains(MovePhase.Cancelled))
         assertTrue(phases.contains(MovePhase.Interrupted))
+        assertTrue(phases.contains(MovePhase.StorageConflict))
     }
 
     @Test
@@ -38,7 +40,25 @@ class MoveOperationTest {
         assertEquals("QueueUpdated", MovePhase.QueueUpdated.name)
         assertEquals("SourceRemoved", MovePhase.SourceRemoved.name)
         assertEquals("Completed", MovePhase.Completed.name)
+        assertEquals("Cancelled", MovePhase.Cancelled.name)
         assertEquals("Interrupted", MovePhase.Interrupted.name)
+        assertEquals("StorageConflict", MovePhase.StorageConflict.name)
+    }
+
+    @Test
+    fun `MovePhase exposes stable API states for user recovery`() {
+        assertEquals("move-interrupted", MovePhase.Interrupted.apiName)
+        assertEquals("storage-conflict", MovePhase.StorageConflict.apiName)
+        assertTrue(MovePhase.Interrupted.requiresUserAction)
+        assertTrue(MovePhase.StorageConflict.requiresUserAction)
+        assertFalse(MovePhase.Copying.requiresUserAction)
+        assertTrue(MovePhase.Cancelled.isTerminal)
+        assertFalse(MovePhase.Cancelled.requiresUserAction)
+    }
+
+    @Test
+    fun `WebSocket snapshot keeps canonical storage conflict state`() {
+        assertEquals("storage-conflict", MovePhase.StorageConflict.webSocketApiName())
     }
 
     // ---- PersistedMoveEntry data class ----
@@ -93,6 +113,13 @@ class MoveOperationTest {
     }
 
     @Test
+    fun `MoveResult_storageConflict_status_withError`() {
+        val result = MoveResult(status = "storage_conflict", recoverableError = "Target already contains data")
+        assertEquals("storage_conflict", result.status)
+        assertEquals("Target already contains data", result.recoverableError)
+    }
+
+    @Test
     fun `MoveResult_error_status_withReason`() {
         val result = MoveResult(status = "error", recoverableError = "Permission denied")
         assertEquals("error", result.status)
@@ -129,6 +156,49 @@ class MoveOperationTest {
         assertEquals("error", resp.status)
         assertEquals("error", resp.phase)
         assertEquals("Invalid path", resp.error)
+    }
+
+    @Test
+    fun `storage safety pause preserves explicit user pause intent`() {
+        val active = QueueEntry("magnet:?xt=urn:btih:active")
+            .copy(storagePauseRequired = true)
+        val userPaused = QueueEntry("magnet:?xt=urn:btih:paused", isPaused = true)
+            .copy(storagePauseRequired = true)
+
+        assertFalse(active.isPaused)
+        assertTrue(active.storagePauseRequired)
+        assertTrue(userPaused.isPaused)
+        assertTrue(userPaused.storagePauseRequired)
+        val restoredUserPause = userPaused.copy(storagePauseRequired = false)
+        assertTrue(restoredUserPause.isPaused)
+        assertFalse(restoredUserPause.storagePauseRequired)
+    }
+
+    @Test
+    fun `permission restoration supersedes an in-flight blocked transition`() {
+        val guard = PermissionTransitionGuard()
+        val blockedGeneration = guard.begin()
+        assertTrue(guard.isCurrent(blockedGeneration))
+
+        val restoredGeneration = guard.supersede()
+        assertFalse(guard.isCurrent(blockedGeneration))
+        assertTrue(guard.isCurrent(restoredGeneration))
+    }
+
+    @Test
+    fun `move cleanup deletes only canonical torrent-owned paths`() {
+        val root = java.nio.file.Files.createTempDirectory("m4-owned-root").toFile()
+        val outside = java.nio.file.Files.createTempFile("m4-outside", ".bin").toFile()
+        val owned = root.resolve("fixture.bin").apply { writeText("owned") }
+        try {
+            assertFalse(deleteMoveOwnedPath(root.canonicalPath, outside.canonicalPath))
+            assertTrue(outside.exists())
+            assertTrue(deleteMoveOwnedPath(root.canonicalPath, owned.canonicalPath))
+            assertFalse(owned.exists())
+        } finally {
+            root.deleteRecursively()
+            outside.delete()
+        }
     }
 
     // ---- Move journal serialization format ----

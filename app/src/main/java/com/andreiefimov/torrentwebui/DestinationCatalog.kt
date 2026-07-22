@@ -1,6 +1,7 @@
 package com.andreiefimov.torrentwebui
 
 import android.content.Context
+import android.util.AtomicFile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -18,21 +19,17 @@ import java.io.IOException
 class DestinationCatalog(private val context: Context) {
 
     private val catalogFile = File(context.filesDir, "destination_catalog.txt")
+    private val atomicCatalogFile = AtomicFile(catalogFile)
     private val catalogMutex = Mutex()
 
     /** Returns all approved destination paths (canonical, sorted). */
     suspend fun listDestinations(): List<String> = withContext(Dispatchers.IO) {
-        catalogMutex.withLock { loadCatalog().keys.sorted() }
+        catalogMutex.withLock { loadState().entries.keys.sorted() }
     }
 
     /** Returns the latest-selected destination path, or null if none has been selected. */
     suspend fun getLatestSelected(): String? = withContext(Dispatchers.IO) {
-        catalogMutex.withLock {
-            try {
-                val prefs = context.getSharedPreferences("destination_catalog_prefs", Context.MODE_PRIVATE)
-                prefs.getString(LATEST_SELECTED_KEY, null)
-            } catch (_: Exception) { null }
-        }
+        catalogMutex.withLock { loadState().latestSelected }
     }
 
     /**
@@ -42,15 +39,13 @@ class DestinationCatalog(private val context: Context) {
     suspend fun addDestination(canonicalPath: String): Boolean = withContext(Dispatchers.IO) {
         catalogMutex.withLock {
             try {
-                val catalog = loadCatalog()
-                if (!catalog.containsKey(canonicalPath)) {
-                    catalog[canonicalPath] = System.currentTimeMillis()
-                    writeCatalog(catalog)
+                val state = loadState()
+                if (!state.entries.containsKey(canonicalPath)) {
+                    state.entries[canonicalPath] = System.currentTimeMillis()
                 }
-
-                // Selecting an existing approved path must also durably update the default.
-                val prefs = context.getSharedPreferences("destination_catalog_prefs", Context.MODE_PRIVATE)
-                prefs.edit().putString(LATEST_SELECTED_KEY, canonicalPath).commit()
+                state.latestSelected = canonicalPath
+                writeState(state)
+                true
             } catch (_: Exception) {
                 false
             }
@@ -76,26 +71,18 @@ class DestinationCatalog(private val context: Context) {
 
                 // Check move journal references (source or target paths).
                 moveJournal?.let { journal ->
-                    val entries = journal.getActiveMoves() + journal.getInterruptedMoves()
+                    val entries = journal.getPathLockMoves()
                     if (entries.any { it.sourcePath == canonicalPath || it.targetPath == canonicalPath }) {
                         return@withLock false
                     }
                 }
 
-                val catalog = loadCatalog()
-                if (!catalog.containsKey(canonicalPath)) return@withLock false
+                val state = loadState()
+                if (!state.entries.containsKey(canonicalPath)) return@withLock false
 
-                catalog.remove(canonicalPath)
-                writeCatalog(catalog)
-
-                // If this was the latest-selected, durably clear it.
-                val prefs = context.getSharedPreferences("destination_catalog_prefs", Context.MODE_PRIVATE)
-                if (prefs.getString(LATEST_SELECTED_KEY, null) == canonicalPath &&
-                    !prefs.edit().remove(LATEST_SELECTED_KEY).commit()
-                ) {
-                    return@withLock false
-                }
-
+                state.entries.remove(canonicalPath)
+                if (state.latestSelected == canonicalPath) state.latestSelected = null
+                writeState(state)
                 true
             } catch (_: Exception) {
                 false
@@ -105,40 +92,74 @@ class DestinationCatalog(private val context: Context) {
 
     /** Returns true if the given path is in the catalog. */
     suspend fun contains(canonicalPath: String): Boolean = withContext(Dispatchers.IO) {
-        catalogMutex.withLock { loadCatalog().containsKey(canonicalPath) }
+        catalogMutex.withLock { loadState().entries.containsKey(canonicalPath) }
     }
 
     // ---- Internal persistence ----
 
-    private fun loadCatalog(): MutableMap<String, Long> {
-        if (!catalogFile.exists()) return mutableMapOf()
+    private data class CatalogState(
+        val entries: MutableMap<String, Long>,
+        var latestSelected: String?
+    )
+
+    private fun loadState(): CatalogState {
+        if (!catalogFile.exists()) return CatalogState(mutableMapOf(), legacyLatestSelected())
         return try {
-            catalogFile.readText().lines()
-                .mapNotNull { line ->
-                    val parts = line.split("|", limit = 2)
-                    if (parts.size == 2) {
-                        val timestamp = parts[1].toLongOrNull() ?: return@mapNotNull null
-                        parts[0] to timestamp
-                    } else null
+            var hasEmbeddedLatest = false
+            var latestSelected: String? = null
+            val entries = mutableMapOf<String, Long>()
+            atomicCatalogFile.openRead().bufferedReader().useLines { lines ->
+                lines.forEach { line ->
+                    if (line.startsWith(LATEST_SELECTED_PREFIX)) {
+                        hasEmbeddedLatest = true
+                        latestSelected = line.removePrefix(LATEST_SELECTED_PREFIX).ifEmpty { null }
+                    } else {
+                        val parts = line.split("|", limit = 2)
+                        val timestamp = parts.getOrNull(1)?.toLongOrNull()
+                        if (timestamp != null) entries[parts[0]] = timestamp
+                    }
                 }
-                .toMap()
-                .toMutableMap()
+            }
+            CatalogState(
+                entries,
+                if (hasEmbeddedLatest) latestSelected else legacyLatestSelected()
+            )
         } catch (_: Exception) {
-            mutableMapOf()
+            CatalogState(mutableMapOf(), null)
         }
     }
 
-    private fun writeCatalog(catalog: Map<String, Long>) {
-        val json = catalog.entries.joinToString("\n") { "${it.key}|${it.value}" }
-        val tempFile = File(catalogFile.parentFile, "${catalogFile.name}.tmp")
-        tempFile.writeText(json)
-        if (!tempFile.renameTo(catalogFile)) {
-            tempFile.delete()
-            throw IOException("Unable to replace destination catalog")
+    private fun legacyLatestSelected(): String? = try {
+        context.getSharedPreferences(LEGACY_PREFERENCES, Context.MODE_PRIVATE)
+            .getString(LEGACY_LATEST_SELECTED_KEY, null)
+    } catch (_: Exception) {
+        null
+    }
+
+    private fun writeState(state: CatalogState) {
+        val content = buildString {
+            append(LATEST_SELECTED_PREFIX)
+            append(state.latestSelected.orEmpty())
+            state.entries.toSortedMap().forEach { (path, timestamp) ->
+                append('\n')
+                append(path)
+                append('|')
+                append(timestamp)
+            }
+        }
+        val output = atomicCatalogFile.startWrite()
+        try {
+            output.write(content.toByteArray(Charsets.UTF_8))
+            atomicCatalogFile.finishWrite(output)
+        } catch (failure: Exception) {
+            atomicCatalogFile.failWrite(output)
+            throw IOException("Unable to replace destination catalog", failure)
         }
     }
 
     companion object {
-        private const val LATEST_SELECTED_KEY = "latest_selected"
+        private const val LATEST_SELECTED_PREFIX = "@latest|"
+        private const val LEGACY_PREFERENCES = "destination_catalog_prefs"
+        private const val LEGACY_LATEST_SELECTED_KEY = "latest_selected"
     }
 }

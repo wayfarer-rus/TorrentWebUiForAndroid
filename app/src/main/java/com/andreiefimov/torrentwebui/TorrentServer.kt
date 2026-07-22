@@ -30,8 +30,11 @@ import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.collect
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import com.andreiefimov.torrentwebui.events.AlertEvent
+import com.andreiefimov.torrentwebui.events.EventBus
 import io.ktor.server.auth.Authentication
 import io.ktor.server.auth.authenticate
 import io.ktor.server.auth.basic
@@ -137,7 +140,7 @@ object TorrentServer {
             // Ktor 3.x uses default ping/pong settings; no explicit configuration needed.
         }
 
-        // Basic Authentication — protects all routes except /health and /ws/progress.
+        // Basic Authentication — protects every WebUI/API/WebSocket route except /health.
         application.install(io.ktor.server.auth.Authentication) {
             basic("Torrent WebUI") {
                 validate { credentials ->
@@ -165,43 +168,46 @@ object TorrentServer {
                 }
             }
 
-            // WebSocket: live torrent progress + alerts (bypasses auth — page-level auth is the gate).
-            webSocket("/ws/progress") {
-                Log.i(TAG, "WebSocket client connected")
+            // ---- Authenticated routes ----
+            authenticate("Torrent WebUI") {
+                // WebSocket: live torrent progress plus alerts fanned out by AlertDispatcher.
+                // AlertDispatcher remains the sole native-alert consumer; every frame is one JSON value.
+                webSocket("/ws/progress") {
+                    Log.i(TAG, "Authenticated WebSocket client connected")
 
-                val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
-                try {
-                    // Send an initial snapshot immediately.
-                    send(Frame.Text(buildSnapshotJson()))
-                    scope.launch {
-                        try {
-                            while (true) {
-                                delay(1000L)
-                                send(Frame.Text(buildSnapshotJson()))
+                    val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+                    try {
+                        send(Frame.Text(buildSnapshotJson()))
+                        scope.launch {
+                            try {
+                                while (true) {
+                                    delay(1000L)
+                                    send(Frame.Text(buildSnapshotJson()))
+                                }
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                Log.w(TAG, "WebSocket snapshot error", e)
                             }
-                        } catch (e: CancellationException) {
-                            throw e
-                        } catch (e: Exception) {
-                            Log.w(TAG, "WebSocket snapshot error", e)
                         }
-                    }
+                        scope.launch {
+                            EventBus.observeAlerts().collect { alert ->
+                                send(Frame.Text(buildAlertJson(alert)))
+                            }
+                        }
 
-                    // Handle incoming messages (keep alive until client disconnects).
-                    for (frame in incoming) {
-                        if (frame is Frame.Text) {
-                            val text = frame.readText()
-                            if (text == "ping") {
+                        for (frame in incoming) {
+                            if (frame is Frame.Text && frame.readText() == "ping") {
                                 send(Frame.Text("pong"))
                             }
                         }
+                    } finally {
+                        scope.cancel()
+                        Log.i(TAG, "Authenticated WebSocket client disconnected")
                     }
-                } finally {
-                    scope.cancel()
-                    Log.i(TAG, "WebSocket client disconnected")
                 }
             }
 
-            // ---- Authenticated routes ----
             route("") {
                 authenticate("Torrent WebUI") {
                     // Serve the WebUI entry point.
@@ -320,13 +326,18 @@ object TorrentServer {
                             val queueStore = TorrentServer.queueStore
                                 ?: run { call.respond(HttpStatusCode.InternalServerError, ErrorResponse("Queue store unavailable")); return@delete }
 
-                            val removed = catalog.removeDestination(destPath, queueStore)
+                            val removed = catalog.removeDestination(destPath, queueStore, TorrentServer.moveJournal)
                             if (removed) {
                                 call.respond(ControlResponse("ok"))
                             } else {
                                 val queue = queueStore.loadQueueIntent()
-                                if (queue.any { it.destinationPath == destPath }) {
-                                    call.respond(HttpStatusCode.Conflict, ErrorResponse("Destination is still referenced by a queue entry"))
+                                val journal = TorrentServer.moveJournal
+                                val moveReferencesPath = journal != null &&
+                                    (journal.getActiveMoves() + journal.getInterruptedMoves()).any {
+                                        it.sourcePath == destPath || it.targetPath == destPath
+                                    }
+                                if (queue.any { it.destinationPath == destPath } || moveReferencesPath) {
+                                    call.respond(HttpStatusCode.Conflict, ErrorResponse("Destination is still referenced by a queue entry or move"))
                                 } else {
                                     call.respond(HttpStatusCode.NotFound, ErrorResponse("Destination not found in catalog"))
                                 }
@@ -343,6 +354,7 @@ object TorrentServer {
 
                         // GET /api/storage/permission — returns current storage permission state.
                         get("/permission") {
+                            TorrentServer.daemonControl.refreshStoragePermissionState(appContext)
                             val state = TorrentServer.daemonControl.storagePermissionState
                             call.respond(StoragePermissionResponse(state.name))
                         }
@@ -360,7 +372,7 @@ object TorrentServer {
                                         torrentId = runtimeId,
                                         sourcePath = move.sourcePath,
                                         targetPath = move.targetPath,
-                                        phase = move.phase.name,
+                                        phase = move.phase.apiName,
                                         createdAt = move.createdAt
                                     )
                                 }
@@ -391,64 +403,54 @@ object TorrentServer {
                                 return@post
                             }
 
-                            // Determine destination: use provided, or default to latest-selected.
-                            var destinationPath = body.destinationPath?.trim()
-                            val catalog = TorrentServer.destinationCatalog
-
-                            if (destinationPath == null || destinationPath.isEmpty()) {
-                                // Default to latest-selected.
-                                if (catalog != null) {
-                                    destinationPath = catalog.getLatestSelected()
-                                }
-                            } else {
-                                // Validate the provided destination.
-                                if (isLegacySavePath(destinationPath, TorrentDaemon.getLegacySaveDirectory(appContext)?.absolutePath)) {
-                                    call.respond(
-                                        HttpStatusCode.BadRequest,
-                                        ErrorResponse("Cannot use legacy save directory as destination for new torrents")
-                                    )
-                                    return@post
-                                }
-
-                                val validation = DirectoryValidationService.validate(appContext, destinationPath)
-                                if (!validation.isValid) {
-                                    call.respond(
-                                        HttpStatusCode.BadRequest,
-                                        ErrorResponse(validation.rejectionReason ?: "Invalid destination path")
-                                    )
-                                    return@post
-                                }
-
-                                // Ensure it's in the catalog.
-                                if (catalog != null && !catalog.contains(validation.canonicalPath!!)) {
-                                    catalog.addDestination(validation.canonicalPath!!)
-                                }
+                            // Re-check at operation time to catch runtime permission revocation.
+                            TorrentServer.daemonControl.refreshStoragePermissionState(appContext)
+                            if (!TorrentServer.daemonControl.isStorageReady) {
+                                call.respond(
+                                    HttpStatusCode.ServiceUnavailable,
+                                    ErrorResponse("Storage permission required. Grant All Files Access in system settings and restart downloads.")
+                                )
+                                return@post
                             }
 
-                            // Legacy destination protection: reject even when it came from the catalog default.
-                            if (destinationPath != null && isLegacySavePath(destinationPath, TorrentDaemon.getLegacySaveDirectory(appContext)?.absolutePath)) {
+                            val catalog = TorrentServer.destinationCatalog ?: run {
+                                call.respond(
+                                    HttpStatusCode.ServiceUnavailable,
+                                    ErrorResponse("Destination catalog is unavailable")
+                                )
+                                return@post
+                            }
+                            val requestedPath = body.destinationPath?.trim()?.takeIf { it.isNotEmpty() }
+                                ?: catalog.getLatestSelected()
+                                ?: run {
+                                    call.respond(
+                                        HttpStatusCode.BadRequest,
+                                        ErrorResponse("A destination path is required")
+                                    )
+                                    return@post
+                                }
+
+                            // Explicit and latest-selected destinations share the same operation-time validation.
+                            if (isLegacySavePath(requestedPath, TorrentDaemon.getLegacySaveDirectory(appContext)?.absolutePath)) {
                                 call.respond(
                                     HttpStatusCode.BadRequest,
                                     ErrorResponse("Cannot use legacy save directory as destination for new torrents")
                                 )
                                 return@post
                             }
-
-                            // Block storage operations when permission is unavailable.
-                            if (!TorrentServer.daemonControl.isStorageReady) {
+                            val validation = DirectoryValidationService.validate(appContext, requestedPath)
+                            if (!validation.isValid) {
                                 call.respond(
-                                    HttpStatusCode.ServiceUnavailable,
-                                    ErrorResponse("Storage permission required. Grant All Files Access in system settings and restart downloads.")
+                                    HttpStatusCode.BadRequest,
+                                    ErrorResponse(validation.rejectionReason ?: "Invalid destination path")
                                 )
                                 return@post
                             }
-
-                            // Re-check at operation time to catch runtime revocation.
-                            TorrentServer.daemonControl.refreshStoragePermissionState(appContext)
-                            if (!TorrentServer.daemonControl.isStorageReady) {
+                            val destinationPath = validation.canonicalPath!!
+                            if (!catalog.addDestination(destinationPath)) {
                                 call.respond(
-                                    HttpStatusCode.ServiceUnavailable,
-                                    ErrorResponse("Storage permission required. Grant All Files Access in system settings and restart downloads.")
+                                    HttpStatusCode.InternalServerError,
+                                    ErrorResponse("Failed to persist destination selection")
                                 )
                                 return@post
                             }
@@ -474,7 +476,7 @@ object TorrentServer {
                                 MagnetResponse(
                                     id = added.runtimeId,
                                     queueId = added.queueId.value,
-                                    status = "ok"
+                                    status = added.status
                                 )
                             )
                         }
@@ -490,11 +492,17 @@ object TorrentServer {
                                 daemonControl.getTorrentStatus(id)?.let { status ->
                                     val queueId = bindings?.queueIdFor(status.id)
                                     val moveEntry = queueId?.let { qId -> journal?.getMove(qId) }
-                                    val moveState = when {
-                                        moveEntry != null -> moveEntry.phase.name.lowercase().replace('_', '-')
-                                        else -> null
-                                    }
+                                    val moveState = moveEntry?.phase?.apiName
                                     val queueEntry = queueId?.let { qId -> queueEntries.find { it.queueId == qId } }
+                                    val destinationPath = queueEntry?.destinationPath?.ifEmpty { null }
+                                        ?: status.savePath.ifEmpty { null }
+                                    val destinationStatus = when {
+                                        queueEntry?.addCollisionState != null -> "storage_conflict"
+                                        destinationPath != null &&
+                                            TorrentServer.durableOperations?.ensureDestinationAvailable(id, appContext) == false ->
+                                            "destination_unavailable"
+                                        else -> status.destinationStatus
+                                    }
                                     TorrentListItem(
                                         id = status.id,
                                         queueId = queueId?.value,
@@ -505,8 +513,8 @@ object TorrentServer {
                                         uploadRate = status.uploadRate,
                                         peers = status.peers,
                                         savePath = status.savePath,
-                                        destinationPath = queueEntry?.destinationPath?.ifEmpty { null }
-                                            ?: status.savePath.ifEmpty { null },
+                                        destinationPath = destinationPath,
+                                        destinationStatus = destinationStatus,
                                         moveState = moveState
                                     )
                                 }
@@ -539,10 +547,10 @@ object TorrentServer {
                                 return@put
                             }
                             val queueId = try {
-                                TorrentServer.durableOperations?.resume(id)
+                                TorrentServer.durableOperations?.resume(id, appContext)
                                     ?: throw IllegalStateException("Queue persistence unavailable")
                             } catch (e: Exception) {
-                                call.respond(HttpStatusCode.Conflict, ErrorResponse("Unable to durably resume torrent"))
+                                call.respond(HttpStatusCode.Conflict, ErrorResponse("Unable to resume while destination is unavailable"))
                                 return@put
                             }
                             call.respond(ControlResponse("ok", queueId.value))
@@ -555,14 +563,27 @@ object TorrentServer {
                                 return@get
                             }
                             val status = daemonControl.getTorrentStatus(id)
-                            // Use the savePath from native as fallback; per-torrent destination
-                            // matching requires a magnetUri↔torrentId mapping not yet maintained.
-                            val savePath = status?.savePath ?: ""
+                            val queueId = TorrentServer.queueBindings?.queueIdFor(id)
+                            val queueEntry = queueId?.let { resolvedQueueId ->
+                                TorrentServer.queueStore?.loadQueueIntent()
+                                    ?.find { it.queueId == resolvedQueueId }
+                            }
+                            val durablePath = queueEntry?.destinationPath
+                            // Only legacy entries fall back to the native save path.
+                            val destinationPath = durablePath ?: status?.savePath.orEmpty()
+                            val available = destinationPath.isNotEmpty() &&
+                                TorrentServer.durableOperations?.ensureDestinationAvailable(id, appContext) != false &&
+                                DirectoryValidationService.validate(appContext, destinationPath).isValid
                             call.respond(DestinationStatusResponse(
-                                path = savePath,
-                                valid = true,
-                                canonicalPath = savePath.ifEmpty { null },
-                                status = "ok"
+                                path = destinationPath,
+                                valid = available,
+                                canonicalPath = destinationPath.ifEmpty { null },
+                                status = when {
+                                    destinationPath.isEmpty() -> "not_found"
+                                    queueEntry?.addCollisionState != null -> "storage_conflict"
+                                    available -> "ok"
+                                    else -> "destination_unavailable"
+                                }
                             ))
                         }
 
@@ -597,7 +618,11 @@ object TorrentServer {
                                 "ok" -> call.respond(MoveResponse(status = "ok", phase = "moving"))
                                 "interrupted" -> call.respond(
                                     HttpStatusCode.Conflict,
-                                    MoveResponse(status = "interrupted", phase = "interrupted", error = result.recoverableError)
+                                    MoveResponse(status = "interrupted", phase = MovePhase.Interrupted.apiName, error = result.recoverableError)
+                                )
+                                "storage_conflict" -> call.respond(
+                                    HttpStatusCode.Conflict,
+                                    MoveResponse(status = "storage_conflict", phase = MovePhase.StorageConflict.apiName, error = result.recoverableError)
                                 )
                                 else -> call.respond(
                                     HttpStatusCode.BadRequest,
@@ -627,7 +652,7 @@ object TorrentServer {
                             val entry = journal.getMove(queueId)
                             if (entry != null) {
                                 call.respond(MoveStatusResponse(
-                                    phase = entry.phase.name.lowercase().replace('_', '-'),
+                                    phase = entry.phase.apiName,
                                     sourcePath = entry.sourcePath,
                                     targetPath = entry.targetPath
                                 ))
@@ -659,14 +684,18 @@ object TorrentServer {
                                 return@post
                             }
                             val entry = journal.getMove(queueId)
-                            if (entry == null || entry.phase != MovePhase.Interrupted) {
+                            if (entry == null || !entry.phase.requiresUserAction) {
                                 call.respond(
                                     HttpStatusCode.Conflict,
-                                    ErrorResponse("Cancel available only when move is interrupted")
+                                    ErrorResponse("Cancel available only when move requires recovery")
                                 )
                                 return@post
                             }
-                            if (journal.removeMove(queueId)) {
+                            val moveService = TorrentServer.moveService ?: run {
+                                call.respond(HttpStatusCode.ServiceUnavailable, ErrorResponse("Move service unavailable"))
+                                return@post
+                            }
+                            if (moveService.cancelMove(id)) {
                                 call.respond(ControlResponse("ok"))
                             } else {
                                 call.respond(HttpStatusCode.InternalServerError, ErrorResponse("Unable to cancel move"))
@@ -695,15 +724,30 @@ object TorrentServer {
                                 return@post
                             }
 
+                            val journal = TorrentServer.moveJournal
+                                ?: run { call.respond(HttpStatusCode.ServiceUnavailable, ErrorResponse("Move journal unavailable")); return@post }
+                            val bindings = TorrentServer.queueBindings
+                                ?: run { call.respond(HttpStatusCode.ServiceUnavailable, ErrorResponse("Queue bindings unavailable")); return@post }
+                            val queueId = bindings.queueIdFor(id)
+                                ?: run { call.respond(HttpStatusCode.NotFound, ErrorResponse("Torrent not found")); return@post }
+                            val interruptedMove = journal.getMove(queueId)
+                            if (interruptedMove?.phase?.requiresUserAction != true || body.destinationPath != interruptedMove.targetPath) {
+                                call.respond(HttpStatusCode.Conflict, ErrorResponse("Retry must use the pending move destination"))
+                                return@post
+                            }
                             val moveService = TorrentServer.moveService
                                 ?: run { call.respond(HttpStatusCode.ServiceUnavailable, ErrorResponse("Move service unavailable")); return@post }
 
                             val result = moveService.retryMove(id, body.destinationPath)
                             when (result.status) {
                                 "ok" -> call.respond(MoveResponse(status = "ok", phase = "moving"))
+                                "storage_conflict" -> call.respond(
+                                    HttpStatusCode.Conflict,
+                                    MoveResponse(status = result.status, phase = MovePhase.StorageConflict.apiName, error = result.recoverableError)
+                                )
                                 else -> call.respond(
                                     HttpStatusCode.Conflict,
-                                    MoveResponse(status = result.status, phase = "interrupted", error = result.recoverableError)
+                                    MoveResponse(status = result.status, phase = MovePhase.Interrupted.apiName, error = result.recoverableError)
                                 )
                             }
                         }
@@ -721,6 +765,9 @@ object TorrentServer {
                             } catch (e: Exception) {
                                 call.respond(HttpStatusCode.Conflict, ErrorResponse("Unable to durably remove torrent"))
                                 return@delete
+                            }
+                            TorrentServer.moveJournal?.getRetainedMove(queueId)?.let {
+                                TorrentServer.moveJournal?.removeMove(queueId)
                             }
                             call.respond(ControlResponse("ok", queueId.value))
                         }
@@ -786,22 +833,34 @@ object TorrentServer {
         }
     }
 
-    /** Builds a JSON snapshot of all torrents and pending alerts. */
-    private suspend fun buildSnapshotJson(): String {
+    /** Builds one valid JSON snapshot using the durable queue as destination authority. */
+    internal suspend fun buildSnapshotJson(): String {
         val ids = daemonControl.getAllTorrentIds()
         val journal = TorrentServer.moveJournal
         val bindings = TorrentServer.queueBindings
+        val queueEntries = TorrentServer.queueStore?.loadQueueIntent() ?: emptyList()
         val torrents = ids.mapNotNull { id ->
             daemonControl.getTorrentStatus(id)?.let { s ->
                 val qId = bindings?.queueIdFor(s.id)
                 val moveEntry = qId?.let { journal?.getMove(it) }
+                val queueEntry = qId?.let { queueId -> queueEntries.find { it.queueId == queueId } }
+                val destinationPath = queueEntry?.destinationPath?.ifEmpty { null }
+                    ?: s.savePath.ifEmpty { null }
+                val destinationStatus = when {
+                    queueEntry?.addCollisionState != null -> "storage_conflict"
+                    ::appContext.isInitialized && destinationPath != null &&
+                        TorrentServer.durableOperations?.ensureDestinationAvailable(id, appContext) == false ->
+                        "destination_unavailable"
+                    else -> s.destinationStatus
+                }
                 TorrentListItem(
                     id = s.id, name = s.name, state = s.state, progress = s.progress,
                     downloadRate = s.downloadRate, uploadRate = s.uploadRate,
                     peers = s.peers, savePath = s.savePath,
-                    destinationPath = s.savePath.ifEmpty { null },
+                    destinationPath = destinationPath,
                     queueId = qId?.value,
-                    moveState = moveEntry?.phase?.name?.lowercase()?.replace('_', '-')
+                    destinationStatus = destinationStatus,
+                    moveState = moveEntry?.phase?.webSocketApiName()
                 )
             }
         }
@@ -821,21 +880,18 @@ object TorrentServer {
                 append(",\"savePath\":\"${escapeJson(item.savePath)}\"")
                 append(",\"destinationPath\":\"${escapeJson(item.destinationPath ?: "")}\"")
                 append(",\"queueId\":\"${escapeJson(item.queueId ?: "")}\"")
+                append(",\"destinationStatus\":\"${escapeJson(item.destinationStatus ?: "")}\"")
                 append(",\"moveState\":\"${escapeJson(item.moveState ?: "")}\"")
                 append("}")
             }
             append("]")
         }
-        val envelope = """{"type":"torrents","data":$torrentsJson}"""
-
-        // Append any pending alerts as separate messages.
-        val alertJson = daemonControl.popAlerts()
-        if (alertJson != "[]") {
-            return envelope + alertJson
-        }
-
-        return envelope
+        return """{"type":"torrents","data":$torrentsJson}"""
     }
+
+    /** Builds one WebSocket-safe alert envelope from AlertDispatcher's fan-out channel. */
+    private fun buildAlertJson(alert: AlertEvent): String =
+        """{"type":"alert","alertType":"${escapeJson(alert.type)}","message":"${escapeJson(alert.message)}"}"""
 
     /** Escapes special characters in a string for JSON encoding. */
     private fun escapeJson(s: String): String {
@@ -999,6 +1055,7 @@ data class TorrentListItem(
     val savePath: String,
     val destinationPath: String? = null,
     val queueId: String? = null,
+    val destinationStatus: String? = null,
     val moveState: String? = null
 )
 

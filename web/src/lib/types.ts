@@ -8,6 +8,10 @@ export interface TorrentListItem {
 	uploadRate: number; // bytes/s
 	peers: number;
 	savePath: string;
+	destinationPath?: string | null;
+	queueId?: string | null;
+	destinationStatus?: string | null;
+	moveState?: string | null;
 }
 
 /** Alert types from WebSocket */
