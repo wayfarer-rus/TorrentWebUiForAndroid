@@ -5,7 +5,8 @@ import { extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createAndroidUi } from './m4-android-ui.mjs';
 import { startOwnedFixtureController } from './m4-fixture.mjs';
-import { catalogStateOwnedByM4 } from './m4-private-state.mjs';
+import { OFFICIAL_TORRENT_SOURCES } from './m4-official-torrents.mjs';
+import { CATALOG_STATE_PATHS, catalogStatesOwnedByM4 } from './m4-private-state.mjs';
 
 const e2eDirectory = fileURLToPath(new URL('.', import.meta.url));
 const repositoryRoot = resolve(e2eDirectory, '../..');
@@ -16,6 +17,7 @@ const adb = process.env.ADB ?? `${process.env.HOME}/Library/Android/sdk/platform
 
 assert(!Object.hasOwn(process.env, 'M4_KEEP_STATE'), 'M4_KEEP_STATE is forbidden: M4 acceptance must always run complete teardown.');
 assert(process.env.WEBUI_PASSWORD, 'WEBUI_PASSWORD must be set.');
+const basicAuthorization = `Basic ${Buffer.from(`:${process.env.WEBUI_PASSWORD}`).toString('base64')}`;
 
 const forbiddenPermissionCommands = [
 	new RegExp(['pm', 'grant'].join('\\s+'), 'i'),
@@ -73,7 +75,7 @@ assert.equal(adbArgs('shell', 'getprop', 'ro.kernel.qemu'), '1', 'M4 acceptance 
 assert.equal(adbArgs('shell', 'getprop', 'ro.boot.qemu.avd_name'), 'emulator_skill', 'M4 acceptance requires the isolated emulator_skill AVD.');
 const androidUi = createAndroidUi({ adb, serial, packageName });
 
-function cleanupOwnedPrivateStateAfterFailure() {
+function cleanupOwnedPrivateState() {
 	const packageState = adbArgs(
 		'shell',
 		`if pm path '${packageName}' >/dev/null 2>&1; then echo present; else echo absent; fi`
@@ -97,15 +99,14 @@ function cleanupOwnedPrivateStateAfterFailure() {
 	}
 	const queueText = readPrivate('files/queue_intent.json');
 	const journalText = readPrivate('files/move_journal_v2.json');
-	const catalogText = readPrivate('files/destination_catalog.txt');
-	const catalogBackupText = readPrivate('files/destination_catalog.txt.bak');
+	const catalogStates = CATALOG_STATE_PATHS.map(readPrivate);
 	const queueEntries = persistedEntries(queueText, 'files/queue_intent.json');
 	const journalEntries = persistedEntries(journalText, 'files/move_journal_v2.json');
 	const queueOwned = queueEntries.every((entry) => String(entry.destinationPath ?? '').includes('TorrentWebUi-M4-'));
 	const journalOwned = journalEntries.every((entry) =>
 		String(entry.sourcePath ?? '').includes('TorrentWebUi-M4-') && String(entry.targetPath ?? '').includes('TorrentWebUi-M4-')
 	);
-	const catalogOwned = catalogStateOwnedByM4(catalogText) && catalogStateOwnedByM4(catalogBackupText);
+	const catalogOwned = catalogStatesOwnedByM4(catalogStates);
 	const resumeState = adbArgs('exec-out', 'run-as', packageName, 'sh', '-c',
 		"if [ -d files/resume_data ]; then find files/resume_data -mindepth 1 -maxdepth 1 -type f -print; elif [ -e files/resume_data ]; then echo invalid; fi"
 	);
@@ -120,7 +121,7 @@ function cleanupOwnedPrivateStateAfterFailure() {
 	adbArgs(
 		'exec-out', 'run-as', packageName, 'rm', '-f',
 		'files/queue_intent.json', 'files/move_journal_v2.json',
-		'files/destination_catalog.txt', 'files/destination_catalog.txt.bak'
+		...CATALOG_STATE_PATHS
 	);
 	adbArgs('exec-out', 'run-as', packageName, 'rm', '-rf', 'files/resume_data');
 }
@@ -135,6 +136,12 @@ const addValidDestination = `${fixtureRoot}/destination-add-valid`;
 const addCorruptDestination = `${fixtureRoot}/destination-add-corrupt`;
 const addUnrelatedDestination = `${fixtureRoot}/destination-add-unrelated`;
 const stagingDestination = `${fixtureRoot}/staging`;
+const officialDestinations = Object.fromEntries(
+	OFFICIAL_TORRENT_SOURCES.map(({ label }) => [
+		label,
+		`${fixtureRoot}/official-${label.toLowerCase().replaceAll(' ', '-')}`
+	])
+);
 const cleanupFailures = [];
 let primaryFailure = null;
 let fixtureController = null;
@@ -143,7 +150,7 @@ let removableVolumeId = null;
 try {
 	// Fail closed before the destructive clean-install-equivalent reset. This helper
 	// removes only proven M4-owned leftovers and rejects user credentials/state.
-	cleanupOwnedPrivateStateAfterFailure();
+	cleanupOwnedPrivateState();
 	assert.match(adbArgs('shell', 'pm', 'clear', packageName), /Success/, 'Unable to establish clean-install-equivalent app state.');
 	adbArgs('shell', 'sm', 'set-virtual-disk', 'true');
 	const diskId = waitFor(() => adbArgs('shell', 'sm', 'list-disks').split('\n').find((line) => line.startsWith('disk:')), 'virtual storage disk');
@@ -158,7 +165,8 @@ try {
 	const interruptedDestination = `${volume.path}/TorrentWebUi-M4-${process.pid}/interrupted-target`;
 
 	adbArgs('shell', 'mkdir', '-p', firstDestination, secondDestination, moveDestination, conflictDestination, partialDestination,
-		addValidDestination, addCorruptDestination, addUnrelatedDestination, stagingDestination, interruptedDestination);
+		addValidDestination, addCorruptDestination, addUnrelatedDestination, stagingDestination, interruptedDestination,
+		...Object.values(officialDestinations));
 	fixtureController = await startOwnedFixtureController(adbArgs);
 	await fixtureController.provision(fixtureController.completed, secondDestination);
 	await fixtureController.provision(fixtureController.reuse, stagingDestination);
@@ -184,6 +192,9 @@ try {
 	const observedAddCorrupt = adbArgs('shell', 'readlink', '-f', addCorruptDestination);
 	const observedAddUnrelated = adbArgs('shell', 'readlink', '-f', addUnrelatedDestination);
 	const observedInterrupted = adbArgs('shell', 'readlink', '-f', interruptedDestination);
+	const observedOfficialDestinations = Object.fromEntries(
+		Object.entries(officialDestinations).map(([label, path]) => [label, adbArgs('shell', 'readlink', '-f', path)])
+	);
 	assert.equal(observedFirst, firstDestination, 'ADB did not observe the first canonical fixture directory.');
 	assert.equal(observedSecond, secondDestination, 'ADB did not observe the second canonical fixture directory.');
 	assert.equal(observedMove, moveDestination, 'ADB did not observe the completed-move fixture directory.');
@@ -193,6 +204,7 @@ try {
 	assert.equal(observedAddCorrupt, addCorruptDestination, 'ADB did not observe the safe-add conflict directory.');
 	assert.equal(observedAddUnrelated, addUnrelatedDestination, 'ADB did not observe the safe-add unrelated directory.');
 	assert.equal(observedInterrupted, interruptedDestination, 'ADB did not observe the removable canonical fixture directory.');
+	assert.deepEqual(observedOfficialDestinations, officialDestinations, 'ADB did not observe canonical official-smoke directories.');
 
 	await androidUi.assertStartupDenialAndRestore();
 	adbArgs('forward', `tcp:${hostPort}`, `tcp:${devicePort}`);
@@ -231,6 +243,8 @@ try {
 		M4_INTERRUPTED_MAGNET: fixtureController.interrupted.magnet,
 		M4_INTERRUPTED_NAME: fixtureController.interrupted.name,
 		M4_FIXTURE_CONTROL_URL: fixtureController.controlBaseUrl,
+		M4_OFFICIAL_DESTINATIONS: JSON.stringify(officialDestinations),
+		M4_ADB_OFFICIAL_DESTINATIONS: JSON.stringify(observedOfficialDestinations),
 		M4_ADB_FIRST_DESTINATION: observedFirst,
 		M4_ADB_SECOND_DESTINATION: observedSecond,
 		M4_ADB_MOVE_DESTINATION: observedMove,
@@ -250,8 +264,28 @@ try {
 } catch (error) {
 	primaryFailure = error;
 } finally {
-	if (primaryFailure) {
-		try { cleanupOwnedPrivateStateAfterFailure(); } catch (error) { cleanupFailures.push(new Error('Owned app-private fixture cleanup failed', { cause: error })); }
+	try {
+		const listenerPattern = new RegExp(`:${devicePort}\\s`);
+		if (listenerPattern.test(adbArgs('shell', 'ss', '-tln'))) {
+			adbArgs('forward', `tcp:${hostPort}`, `tcp:${devicePort}`);
+			const response = await fetch(`http://127.0.0.1:${hostPort}/api/daemon/stop`, {
+				method: 'POST',
+				headers: { Authorization: basicAuthorization },
+				signal: AbortSignal.timeout(5_000)
+			});
+			const body = await response.text();
+			assert(response.ok, `Failure cleanup could not stop daemon: HTTP ${response.status} ${body}`);
+			waitFor(
+				() => !listenerPattern.test(adbArgs('shell', 'ss', '-tln')),
+				'daemon/Ktor shutdown during outer cleanup',
+				10_000
+			);
+		}
+	} catch (error) {
+		cleanupFailures.push(new Error('Failure-safe daemon/server cleanup failed', { cause: error }));
+	}
+	try { cleanupOwnedPrivateState(); } catch (error) {
+		cleanupFailures.push(new Error('Owned app-private fixture cleanup failed', { cause: error }));
 	}
 	if (removableVolumeId) {
 		try { adbArgs('shell', 'sm', 'mount', removableVolumeId); } catch (error) { cleanupFailures.push(new Error('Removable volume remount cleanup failed', { cause: error })); }

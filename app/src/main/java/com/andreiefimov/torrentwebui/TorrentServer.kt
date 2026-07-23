@@ -463,7 +463,11 @@ object TorrentServer {
                                 return@post
                             }
                             val added = try {
-                                operations.add(magnetUri, TorrentDestination(destinationPath!!))
+                                operations.add(
+                                    magnetUri,
+                                    TorrentDestination(destinationPath!!),
+                                    startPaused = body.startPaused
+                                )
                             } catch (e: Exception) {
                                 call.respond(
                                     HttpStatusCode.InternalServerError,
@@ -1039,7 +1043,8 @@ data class LatestSelectedResponse(val path: String?)
 @Serializable
 data class MagnetRequest(
     val magnet: String = "",
-    val destinationPath: String? = null
+    val destinationPath: String? = null,
+    val startPaused: Boolean = false
 )
 
 /** Response item for GET /api/torrents — mirrors TorrentStatus fields */

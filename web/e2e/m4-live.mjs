@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { chromium } from '@playwright/test';
 import { createAndroidUi } from './m4-android-ui.mjs';
+import { loadOfficialTorrents } from './m4-official-torrents.mjs';
 
 const baseUrl = process.env.WEBUI_BASE_URL ?? 'http://127.0.0.1:8081';
 const password = process.env.WEBUI_PASSWORD;
@@ -39,8 +40,11 @@ const adbObservedAddValidDestination = process.env.M4_ADB_ADD_VALID_DESTINATION;
 const adbObservedAddCorruptDestination = process.env.M4_ADB_ADD_CORRUPT_DESTINATION;
 const adbObservedAddUnrelatedDestination = process.env.M4_ADB_ADD_UNRELATED_DESTINATION;
 const adbObservedInterruptedDestination = process.env.M4_ADB_INTERRUPTED_DESTINATION;
-const archMagnet = process.env.ARCH_MAGNET ??
-	'magnet:?xt=urn:btih:0eb308382b47ee044a2c33a4f9feb46732671706&dn=archlinux-2026.07.01-x86_64.iso';
+const runOfficialTorrentSmoke = process.env.M4_OFFICIAL_TORRENT_SMOKE === 'true';
+const officialDestinationsJson = process.env.M4_OFFICIAL_DESTINATIONS;
+const adbOfficialDestinationsJson = process.env.M4_ADB_OFFICIAL_DESTINATIONS;
+let officialDestinations = {};
+let adbOfficialDestinations = {};
 const addedTorrentIds = [];
 const approvedDestinations = [];
 const cleanupFailures = [];
@@ -48,32 +52,14 @@ const basicAuthorization = `Basic ${Buffer.from(`:${password}`).toString('base64
 const moveGateHold = '.torrentwebui-m4-move-hold';
 const moveGateReached = '.torrentwebui-m4-move-reached';
 const moveGateRelease = '.torrentwebui-m4-move-release';
-
-for (const [name, value] of Object.entries({
-	password, firstDestination, secondDestination, moveDestination, conflictDestination, partialDestination,
-	addValidDestination, addCorruptDestination, addUnrelatedDestination, interruptedDestination,
-	interruptedVolumeId, stagedReusePayload, fixtureMagnet, fixtureName, reuseMagnet, reuseName,
-	partialMagnet, partialName, addValidMagnet, addValidName, addCorruptMagnet, addCorruptName,
-	addUnrelatedMagnet, addUnrelatedName, interruptedMagnet, interruptedName, fixtureControlUrl
-})) assert(value, `${name} must be set by the host runner.`);
-assert.equal(firstDestination, adbObservedFirstDestination, 'The first API path differs from the ADB-observed canonical path.');
-assert.equal(secondDestination, adbObservedSecondDestination, 'The second API path differs from the ADB-observed canonical path.');
-assert.equal(moveDestination, adbObservedMoveDestination, 'The move API path differs from the ADB-observed canonical path.');
-assert.equal(conflictDestination, adbObservedConflictDestination, 'The conflict API path differs from the ADB-observed canonical path.');
-assert.equal(partialDestination, adbObservedPartialDestination, 'The partial API path differs from the ADB-observed canonical path.');
-assert.equal(addValidDestination, adbObservedAddValidDestination, 'The add-reuse API path differs from ADB.');
-assert.equal(addCorruptDestination, adbObservedAddCorruptDestination, 'The add-conflict API path differs from ADB.');
-assert.equal(addUnrelatedDestination, adbObservedAddUnrelatedDestination, 'The add-unrelated API path differs from ADB.');
-assert.equal(interruptedDestination, adbObservedInterruptedDestination, 'The removable API path differs from the ADB-observed canonical path.');
-
-const androidUi = createAndroidUi({
-	adb: process.env.M4_ADB,
-	serial: process.env.M4_ADB_SERIAL,
-	packageName: 'com.andreiefimov.torrentwebui'
-});
-const browser = await chromium.launch({ headless: true });
-const context = await browser.newContext({ httpCredentials: { username: '', password } });
-const page = await context.newPage();
+const officialPayloadLimitKiB = 8 * 1024;
+const officialPauseTriggerKiB = 512;
+const officialResumeWindowMs = 1_000;
+const officialSizePollMs = 25;
+let androidUi = null;
+let browser = null;
+let context = null;
+let page = null;
 
 async function apiResponse(path, options = {}) {
 	const response = await page.request.fetch(`${baseUrl}${path}`, options);
@@ -98,6 +84,65 @@ async function poll(check, description, timeoutMs = 30_000) {
 		await new Promise((resolve) => setTimeout(resolve, 250));
 	}
 	assert.fail(`Timed out waiting for ${description}; last value=${JSON.stringify(lastValue)}`);
+}
+
+function officialDestinationSizeKiB(label, destinationPath) {
+	const sizeKiB = Number.parseInt(androidUi.run('shell', 'du', '-sk', destinationPath).split(/\s+/)[0], 10);
+	assert(Number.isFinite(sizeKiB), `${label} destination size could not be measured.`);
+	return sizeKiB;
+}
+
+async function resumeOfficialWithinPayloadBound(entry) {
+	const failures = [];
+	const pauseButton = entry.card.getByRole('button', { name: /Pause/ });
+	let peakSizeKiB = officialDestinationSizeKiB(entry.source.label, entry.destinationPath);
+	let activeSince = null;
+
+	try {
+		await entry.card.getByRole('button', { name: /Resume/ }).click();
+		const resumeObservationDeadline = Date.now() + 5_000;
+		while (Date.now() < resumeObservationDeadline) {
+			const sizeKiB = officialDestinationSizeKiB(entry.source.label, entry.destinationPath);
+			peakSizeKiB = Math.max(peakSizeKiB, sizeKiB);
+			assert(sizeKiB <= officialPayloadLimitKiB,
+				`${entry.source.label} exceeded the 8 MiB smoke-test payload bound while resumed.`);
+			if (await pauseButton.isVisible()) {
+				activeSince ??= Date.now();
+				if (sizeKiB >= officialPauseTriggerKiB || Date.now() - activeSince >= officialResumeWindowMs) break;
+			}
+			await new Promise((resolve) => setTimeout(resolve, officialSizePollMs));
+		}
+		assert(activeSince !== null, `${entry.source.label} never exposed an active state after resume.`);
+	} catch (error) {
+		failures.push(error);
+	}
+
+	try {
+		await pauseButton.click({ timeout: 5_000 });
+	} catch (error) {
+		failures.push(new Error(`${entry.source.label} could not be re-paused through the WebUI.`, { cause: error }));
+		try {
+			await api(`/api/torrents/${entry.result.id}/pause`, { method: 'PUT' });
+		} catch (fallbackError) {
+			failures.push(new Error(`${entry.source.label} failure-closed API pause also failed.`, { cause: fallbackError }));
+		}
+	}
+
+	try {
+		await poll(async () => {
+			const torrent = (await api('/api/torrents')).find((candidate) => candidate.id === entry.result.id);
+			return torrent && ['paused', 'pause_requested'].includes(torrent.state) ? torrent : null;
+		}, `official ${entry.source.label} re-pause`);
+		const finalSizeKiB = officialDestinationSizeKiB(entry.source.label, entry.destinationPath);
+		peakSizeKiB = Math.max(peakSizeKiB, finalSizeKiB);
+		assert(finalSizeKiB <= officialPayloadLimitKiB,
+			`${entry.source.label} exceeded the 8 MiB smoke-test payload bound after re-pause.`);
+	} catch (error) {
+		failures.push(error);
+	}
+
+	if (failures.length) throw new AggregateError(failures, `${entry.source.label} bounded resume failed.`);
+	return peakSizeKiB;
 }
 
 async function assertUnauthenticatedWebSocketRejected() {
@@ -210,6 +255,30 @@ async function addMagnet(magnet, expectedName, expectedStatus = 'ok') {
 	return { result, card };
 }
 
+async function addPausedOfficial(source, destinationPath) {
+	const response = await page.request.fetch(`${baseUrl}/api/torrents/magnet`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		data: { magnet: source.magnet, destinationPath, startPaused: true },
+		timeout: 10_000
+	});
+	let result = null;
+	try { result = await response.json(); } catch { /* status-only failure below */ }
+	if (typeof result?.id === 'number') addedTorrentIds.push(result.id);
+	assert.equal(response.status(), 200, `${source.label} paused add failed with HTTP ${response.status()}.`);
+	assert.equal(result?.status, 'ok', `${source.label} paused add did not return ok.`);
+	assert.equal(typeof result?.id, 'number', `${source.label} paused add returned no native runtime ID.`);
+	return { source, destinationPath, result };
+}
+
+async function removeTorrentAndWait(torrentId) {
+	const response = await page.request.fetch(`${baseUrl}/api/torrents/${torrentId}?deleteFiles=true`, { method: 'DELETE' });
+	assert(response.ok() || response.status() === 404, `Torrent removal failed with HTTP ${response.status()}.`);
+	await poll(async () => !(await api('/api/torrents')).some((torrent) => torrent.id === torrentId), `torrent ${torrentId} removal`);
+	const trackedIndex = addedTorrentIds.indexOf(torrentId);
+	if (trackedIndex >= 0) addedTorrentIds.splice(trackedIndex, 1);
+}
+
 async function waitForTorrentComplete(torrentId, timeoutMs = 60_000) {
 	return poll(async () => {
 		const torrent = (await api('/api/torrents')).find((candidate) => candidate.id === torrentId);
@@ -233,6 +302,39 @@ async function waitForCompletedMove(torrentId, expectedDestination, timeoutMs = 
 
 let primaryFailure = null;
 try {
+	for (const [name, value] of Object.entries({
+		password, firstDestination, secondDestination, moveDestination, conflictDestination, partialDestination,
+		addValidDestination, addCorruptDestination, addUnrelatedDestination, interruptedDestination,
+		interruptedVolumeId, stagedReusePayload, fixtureMagnet, fixtureName, reuseMagnet, reuseName,
+		partialMagnet, partialName, addValidMagnet, addValidName, addCorruptMagnet, addCorruptName,
+		addUnrelatedMagnet, addUnrelatedName, interruptedMagnet, interruptedName, fixtureControlUrl
+	})) assert(value, `${name} must be set by the host runner.`);
+	assert.equal(firstDestination, adbObservedFirstDestination, 'The first API path differs from the ADB-observed canonical path.');
+	assert.equal(secondDestination, adbObservedSecondDestination, 'The second API path differs from the ADB-observed canonical path.');
+	assert.equal(moveDestination, adbObservedMoveDestination, 'The move API path differs from the ADB-observed canonical path.');
+	assert.equal(conflictDestination, adbObservedConflictDestination, 'The conflict API path differs from the ADB-observed canonical path.');
+	assert.equal(partialDestination, adbObservedPartialDestination, 'The partial API path differs from the ADB-observed canonical path.');
+	assert.equal(addValidDestination, adbObservedAddValidDestination, 'The add-reuse API path differs from ADB.');
+	assert.equal(addCorruptDestination, adbObservedAddCorruptDestination, 'The add-conflict API path differs from ADB.');
+	assert.equal(addUnrelatedDestination, adbObservedAddUnrelatedDestination, 'The add-unrelated API path differs from ADB.');
+	assert.equal(interruptedDestination, adbObservedInterruptedDestination, 'The removable API path differs from the ADB-observed canonical path.');
+	if (runOfficialTorrentSmoke) {
+		assert(officialDestinationsJson, 'M4_OFFICIAL_DESTINATIONS must be set for the optional official smoke.');
+		assert(adbOfficialDestinationsJson, 'M4_ADB_OFFICIAL_DESTINATIONS must be set for the optional official smoke.');
+		officialDestinations = JSON.parse(officialDestinationsJson);
+		adbOfficialDestinations = JSON.parse(adbOfficialDestinationsJson);
+		assert.deepEqual(officialDestinations, adbOfficialDestinations, 'Official-smoke API paths differ from ADB-observed canonical paths.');
+	}
+
+	androidUi = createAndroidUi({
+		adb: process.env.M4_ADB,
+		serial: process.env.M4_ADB_SERIAL,
+		packageName: 'com.andreiefimov.torrentwebui'
+	});
+	browser = await chromium.launch({ headless: true });
+	context = await browser.newContext({ httpCredentials: { username: '', password } });
+	page = await context.newPage();
+
 	assert.equal((await api('/health')).status, 'ok');
 	await assertUnauthenticatedWebSocketRejected();
 	await cleanupStaleOwnedState();
@@ -253,11 +355,82 @@ try {
 	});
 	assert.equal(rejectedUri.isValid, false, 'The API accepted a SAF document URI.');
 
-	await approveDestination(firstDestination);
-	const arch = await addMagnet(archMagnet, 'archlinux-');
-	assert.equal((await api(`/api/torrents/${arch.result.id}/destination`)).canonicalPath, firstDestination);
-	await arch.card.getByRole('button', { name: /Pause/ }).click();
-	await arch.card.getByRole('button', { name: /Resume/ }).click();
+	if (runOfficialTorrentSmoke) {
+		const officialTorrents = await loadOfficialTorrents();
+		assert.deepEqual(
+			officialTorrents.map((source) => source.label).sort(),
+			Object.keys(officialDestinations).sort(),
+			'Official source and destination matrices differ.'
+		);
+		for (const destination of Object.values(officialDestinations)) {
+			if (!approvedDestinations.includes(destination)) approvedDestinations.push(destination);
+		}
+		const archSource = officialTorrents.find((source) => source.label === 'Arch Linux');
+		assert(archSource, 'The required official Arch source is absent.');
+		await approveDestination(officialDestinations['Arch Linux']);
+		await page.route('**/api/torrents/magnet', async (route) => {
+			const body = route.request().postDataJSON();
+			if (body.magnet !== archSource.magnet) return route.continue();
+			await route.continue({ postData: JSON.stringify({ ...body, startPaused: true }) });
+		});
+		let arch;
+		try {
+			arch = await addMagnet(archSource.magnet, archSource.name);
+		} finally {
+			await page.unroute('**/api/torrents/magnet');
+		}
+		const companionResults = await Promise.allSettled(
+			officialTorrents
+				.filter((source) => source !== archSource)
+				.map((source) => addPausedOfficial(source, officialDestinations[source.label]))
+		);
+		const companionFailures = companionResults.filter((result) => result.status === 'rejected');
+		if (companionFailures.length) {
+			throw new AggregateError(companionFailures.map((result) => result.reason), 'Paused official torrent adds failed.');
+		}
+		const officialEntries = [
+			{ source: archSource, destinationPath: officialDestinations['Arch Linux'], result: arch.result },
+			...companionResults.map((result) => result.value)
+		];
+		assert.equal(new Set(officialEntries.map((entry) => entry.result.id)).size, officialEntries.length, 'Official adds did not receive distinct runtime IDs.');
+		await poll(async () => (await page.locator('.torrent-card').count()) === officialEntries.length, 'all official torrents to be visible together');
+		for (const entry of officialEntries) {
+			const snapshot = (await api('/api/torrents')).find((torrent) => torrent.id === entry.result.id);
+			assert(snapshot, `${entry.source.label} is absent from the authenticated queue.`);
+			assert.equal(snapshot.destinationPath, entry.destinationPath, `${entry.source.label} did not keep its explicit canonical destination.`);
+			assert(['paused', 'pause_requested'].includes(snapshot.state), `${entry.source.label} did not start paused.`);
+			await page.locator('.torrent-card').filter({ hasText: entry.source.name }).first().waitFor();
+			await waitForWebSocketTorrent(
+				entry.result.id,
+				(torrent) => ['paused', 'pause_requested'].includes(torrent.state),
+				`${entry.source.label} paused WebSocket snapshot`
+			);
+		}
+		const archPeakSizeKiB = await resumeOfficialWithinPayloadBound({
+			source: archSource,
+			destinationPath: officialDestinations['Arch Linux'],
+			result: arch.result,
+			card: arch.card
+		});
+		for (const entry of officialEntries) {
+			const sizeKiB = officialDestinationSizeKiB(entry.source.label, entry.destinationPath);
+			assert(sizeKiB <= officialPayloadLimitKiB, `${entry.source.label} exceeded the 8 MiB smoke-test payload bound.`);
+		}
+		const companions = officialEntries.filter((entry) => entry.source !== archSource);
+		const removedThroughUi = companions.shift();
+		const removedResponse = page.waitForResponse((response) =>
+			response.url().includes(`/api/torrents/${removedThroughUi.result.id}?`) && response.request().method() === 'DELETE'
+		);
+		await page.locator('.torrent-card').filter({ hasText: removedThroughUi.source.name }).first()
+			.getByRole('button', { name: /Remove & Delete Files/ }).click();
+		assert.equal((await removedResponse).status(), 200, 'Official UI removal failed.');
+		await poll(async () => !(await api('/api/torrents')).some((torrent) => torrent.id === removedThroughUi.result.id), 'official UI removal');
+		const removedTrackedIndex = addedTorrentIds.indexOf(removedThroughUi.result.id);
+		assert(removedTrackedIndex >= 0, 'UI-removed official torrent was not registered for cleanup.');
+		addedTorrentIds.splice(removedTrackedIndex, 1);
+		await Promise.all([...companions, { result: arch.result }].map((entry) => removeTorrentAndWait(entry.result.id)));
+		console.log(`Optional M4 official native-entry smoke passed for ${officialEntries.map((entry) => entry.source.label).join(', ')}; all created distinct paused native entries, Arch alone exercised bounded resume/re-pause (peak ${archPeakSizeKiB} KiB), all remained under 8 MiB, and every entry was removed.`);
+	}
 
 	await approveDestination(secondDestination);
 	const fixture = await addMagnet(fixtureMagnet, fixtureName);
@@ -265,7 +438,7 @@ try {
 	await waitForTorrentComplete(fixture.result.id, Number(process.env.M4_FIXTURE_READY_TIMEOUT ?? 60_000));
 
 	const catalog = await api('/api/storage/catalog');
-	assert(catalog.includes(firstDestination) && catalog.includes(secondDestination));
+	assert(catalog.includes(secondDestination));
 	assert.equal((await api('/api/storage/latest-selected')).path, secondDestination);
 
 	await approveDestination(moveDestination);
@@ -315,9 +488,9 @@ try {
 	await waitForTorrentComplete(reused.result.id);
 
 	// Preserve one explicit user pause separately from storage safety pauses.
-	await arch.card.getByRole('button', { name: /Pause/ }).click();
+	await partial.card.getByRole('button', { name: /Pause/ }).click();
 	await poll(async () => {
-		const torrent = (await api('/api/torrents')).find((candidate) => candidate.id === arch.result.id);
+		const torrent = (await api('/api/torrents')).find((candidate) => candidate.id === partial.result.id);
 		return torrent && ['paused', 'pause_requested'].includes(torrent.state) ? torrent : null;
 	}, 'explicit pre-revocation user pause');
 
@@ -363,17 +536,22 @@ try {
 	await page.goto(baseUrl, { waitUntil: 'networkidle' });
 	await startAuthenticatedWebSocketObserver();
 	assert.equal((await api('/api/storage/permission')).state, 'Ready');
+	const recoveryHandles = [fixture, reused, partial];
+	for (const handle of recoveryHandles) assert.equal(typeof handle.result.queueId, 'string', 'An add response omitted its durable queue ID.');
 	const recoveredTorrents = await poll(async () => {
 		const torrents = await api('/api/torrents');
-		const requiredIds = [arch.result.id, fixture.result.id, reused.result.id, partial.result.id];
-		return requiredIds.every((torrentId) => {
-			const torrent = torrents.find((candidate) => candidate.id === torrentId);
+		return recoveryHandles.every((handle) => {
+			const torrent = torrents.find((candidate) => candidate.queueId === handle.result.queueId);
 			return torrent && ['paused', 'pause_requested'].includes(torrent.state);
 		}) ? torrents : null;
 	}, 'durable safety/user pauses after permission restoration', 30_000);
-	const recoveredIds = recoveredTorrents.map((torrent) => torrent.id);
-	for (const torrentId of [arch.result.id, fixture.result.id, reused.result.id, partial.result.id]) {
-		assert(recoveredIds.includes(torrentId), `Torrent ${torrentId} was not durably recovered after permission loss.`);
+	for (const handle of recoveryHandles) {
+		const recovered = recoveredTorrents.find((torrent) => torrent.queueId === handle.result.queueId);
+		assert(recovered, 'A durable queue identity was not recovered after permission loss.');
+		const trackedIndex = addedTorrentIds.indexOf(handle.result.id);
+		assert(trackedIndex >= 0, 'A recovered torrent was not registered for cleanup.');
+		addedTorrentIds[trackedIndex] = recovered.id;
+		handle.result.id = recovered.id;
 	}
 	await page.getByRole('heading', { name: 'Download folder' }).waitFor();
 	const recoveredReuseCard = page.locator('.torrent-card').filter({ hasText: reuseName }).first();
@@ -382,7 +560,7 @@ try {
 		const torrent = (await api('/api/torrents')).find((candidate) => candidate.id === reused.result.id);
 		return torrent && !['paused', 'pause_requested'].includes(torrent.state) ? torrent : null;
 	}, 'explicit resume of previously active torrent after permission restoration');
-	const stillUserPaused = (await api('/api/torrents')).find((torrent) => torrent.id === arch.result.id);
+	const stillUserPaused = (await api('/api/torrents')).find((torrent) => torrent.id === partial.result.id);
 	assert(stillUserPaused && ['paused', 'pause_requested'].includes(stillUserPaused.state), 'User-paused torrent resumed during permission recovery.');
 
 	await approveDestination(addUnrelatedDestination);
@@ -589,40 +767,47 @@ try {
 	const unaffectedAfterRecovery = (await api('/api/torrents')).find((torrent) => torrent.id === reused.result.id);
 	assert(unaffectedAfterRecovery && !['paused', 'pause_requested'].includes(unaffectedAfterRecovery.state), 'Unaffected torrent was paused during storage recovery.');
 
-	console.log('M4 live flow passed: authenticated parseable WebSocket frames, owned fixtures, destination reuse/differences, visible permission denial/revocation, canonical paths, collision-safe valid/corrupt/unrelated adds, completed/partial/conflict/native-failure moves, unavailable storage, explicit interrupted retry/cancel, explicit resume, and recovery.');
+	console.log('M4 deterministic live flow passed: authenticated parseable WebSocket frames, owned fixtures, destination reuse/differences, visible permission denial/revocation, canonical paths, collision-safe valid/corrupt/unrelated adds, completed/partial/conflict/native-failure moves, unavailable storage, explicit interrupted retry/cancel, explicit resume, and recovery.');
 } catch (error) {
 	primaryFailure = error;
 } finally {
-	try { androidUi.run('shell', 'sm', 'mount', interruptedVolumeId); } catch (error) { cleanupFailures.push(new Error('Removable volume cleanup remount failed', { cause: error })); }
-	for (const torrentId of [...addedTorrentIds].reverse()) {
-		try { await page.request.fetch(`${baseUrl}/api/torrents/${torrentId}/move/cancel`, { method: 'POST' }); } catch (error) { cleanupFailures.push(new Error(`Move cleanup failed for torrent ${torrentId}`, { cause: error })); }
-		try {
-			const response = await page.request.fetch(`${baseUrl}/api/torrents/${torrentId}?deleteFiles=true`, { method: 'DELETE' });
-			if (!response.ok() && response.status() !== 404) cleanupFailures.push(new Error(`Torrent cleanup failed for ${torrentId}: HTTP ${response.status()}`));
-		} catch (error) { cleanupFailures.push(new Error(`Torrent cleanup failed for ${torrentId}`, { cause: error })); }
+	if (androidUi && interruptedVolumeId) {
+		try { androidUi.run('shell', 'sm', 'mount', interruptedVolumeId); } catch (error) { cleanupFailures.push(new Error('Removable volume cleanup remount failed', { cause: error })); }
 	}
-	for (const destination of [...approvedDestinations].reverse()) {
+	if (page) {
+		for (const torrentId of [...addedTorrentIds].reverse()) {
+			try { await page.request.fetch(`${baseUrl}/api/torrents/${torrentId}/move/cancel`, { method: 'POST' }); } catch (error) { cleanupFailures.push(new Error(`Move cleanup failed for torrent ${torrentId}`, { cause: error })); }
+			try {
+				const response = await page.request.fetch(`${baseUrl}/api/torrents/${torrentId}?deleteFiles=true`, { method: 'DELETE' });
+				if (!response.ok() && response.status() !== 404) cleanupFailures.push(new Error(`Torrent cleanup failed for ${torrentId}: HTTP ${response.status()}`));
+			} catch (error) { cleanupFailures.push(new Error(`Torrent cleanup failed for ${torrentId}`, { cause: error })); }
+		}
+		for (const destination of [...approvedDestinations].reverse()) {
+			try {
+				const response = await page.request.fetch(`${baseUrl}/api/storage/destinations/${encodeURIComponent(destination)}`, { method: 'DELETE' });
+				if (!response.ok() && response.status() !== 404) cleanupFailures.push(new Error(`Destination cleanup failed for ${destination}: HTTP ${response.status()}`));
+			} catch (error) { cleanupFailures.push(new Error(`Destination cleanup failed for ${destination}`, { cause: error })); }
+		}
 		try {
-			const response = await page.request.fetch(`${baseUrl}/api/storage/destinations/${encodeURIComponent(destination)}`, { method: 'DELETE' });
-			if (!response.ok() && response.status() !== 404) cleanupFailures.push(new Error(`Destination cleanup failed for ${destination}: HTTP ${response.status()}`));
-		} catch (error) { cleanupFailures.push(new Error(`Destination cleanup failed for ${destination}`, { cause: error })); }
+			const remainingTorrents = await api('/api/torrents');
+			const remainingMoves = await api('/api/storage/moves');
+			const remainingCatalog = await api('/api/storage/catalog');
+			for (const torrentId of addedTorrentIds) {
+				if (remainingTorrents.some((torrent) => torrent.id === torrentId)) cleanupFailures.push(new Error(`Torrent/queue record still exists for ${torrentId}`));
+				if (remainingMoves.some((move) => move.torrentId === torrentId)) cleanupFailures.push(new Error(`Move journal still exists for ${torrentId}`));
+			}
+			for (const destination of approvedDestinations) {
+				if (remainingCatalog.includes(destination)) cleanupFailures.push(new Error(`Catalog entry still exists for ${destination}`));
+			}
+		} catch (error) { cleanupFailures.push(new Error('API cleanup verification failed', { cause: error })); }
 	}
 	try {
-		const remainingTorrents = await api('/api/torrents');
-		const remainingMoves = await api('/api/storage/moves');
-		const remainingCatalog = await api('/api/storage/catalog');
-		for (const torrentId of addedTorrentIds) {
-			if (remainingTorrents.some((torrent) => torrent.id === torrentId)) cleanupFailures.push(new Error(`Torrent/queue record still exists for ${torrentId}`));
-			if (remainingMoves.some((move) => move.torrentId === torrentId)) cleanupFailures.push(new Error(`Move journal still exists for ${torrentId}`));
-		}
-		for (const destination of approvedDestinations) {
-			if (remainingCatalog.includes(destination)) cleanupFailures.push(new Error(`Catalog entry still exists for ${destination}`));
-		}
-	} catch (error) { cleanupFailures.push(new Error('API cleanup verification failed', { cause: error })); }
-	try {
-		const response = await page.request.fetch(`${baseUrl}/api/daemon/stop`, { method: 'POST' });
+		const response = await fetch(`${baseUrl}/api/daemon/stop`, {
+			method: 'POST',
+			headers: { Authorization: basicAuthorization }
+		});
 		const body = await response.text();
-		if (!response.ok()) cleanupFailures.push(new Error(`Daemon stop failed: HTTP ${response.status()} ${body}`));
+		if (!response.ok) cleanupFailures.push(new Error(`Daemon stop failed: HTTP ${response.status} ${body}`));
 	} catch (error) { cleanupFailures.push(new Error('Daemon stop request failed', { cause: error })); }
 	try {
 		await poll(async () => {
@@ -631,10 +816,14 @@ try {
 				return false;
 			} catch { return true; }
 		}, 'Ktor server shutdown', 10_000);
-		const listeners = androidUi.run('shell', 'ss', '-tln');
-		assert(!/:8080\s/.test(listeners), 'Ktor listener remains after daemon stop.');
+		if (androidUi) {
+			const listeners = androidUi.run('shell', 'ss', '-tln');
+			assert(!/:8080\s/.test(listeners), 'Ktor listener remains after daemon stop.');
+		}
 	} catch (error) { cleanupFailures.push(new Error('Independent daemon/server shutdown verification failed', { cause: error })); }
-	try { await browser.close(); } catch (error) { cleanupFailures.push(new Error('Browser cleanup failed', { cause: error })); }
+	if (browser) {
+		try { await browser.close(); } catch (error) { cleanupFailures.push(new Error('Browser cleanup failed', { cause: error })); }
+	}
 }
 
 if (primaryFailure) {

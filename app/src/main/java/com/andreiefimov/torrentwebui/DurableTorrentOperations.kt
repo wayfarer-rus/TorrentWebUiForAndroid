@@ -17,36 +17,47 @@ class DurableTorrentOperations(
 
     data class AddedTorrent(val runtimeId: Long, val queueId: QueueId, val status: String = "ok")
 
-    suspend fun add(magnetUri: String, destination: TorrentDestination): AddedTorrent =
-        mutationMutex.withLock {
-            val collisionGuardRequired = File(destination.path).list()?.isNotEmpty() == true
-            val runtimeId = control.addMagnet(
-                magnetUri,
-                TorrentAddRequest(destination, metadataOnlyUntilVerified = collisionGuardRequired)
+    suspend fun add(
+        magnetUri: String,
+        destination: TorrentDestination,
+        startPaused: Boolean = false
+    ): AddedTorrent = mutationMutex.withLock {
+        val collisionGuardRequired = File(destination.path).list()?.isNotEmpty() == true
+        val runtimeId = control.addMagnet(
+            magnetUri,
+            TorrentAddRequest(
+                destination,
+                // A paused magnet cannot fetch the metadata needed to identify owned paths.
+                // For non-empty destinations, inspect in metadata-only mode first and apply
+                // the requested durable pause after the collision guard resolves.
+                startPaused = startPaused && !collisionGuardRequired,
+                metadataOnlyUntilVerified = collisionGuardRequired
             )
-            check(runtimeId > 0) { control.lastError ?: "Unable to add torrent" }
-            val entry = QueueEntry(
-                magnetUri = magnetUri,
-                destinationPath = destination.path,
-                storagePauseRequired = collisionGuardRequired,
-                addCollisionState = if (collisionGuardRequired) "checking" else null
-            )
-            try {
-                store.mutateQueueIntent { it + entry }
-            } catch (failure: Exception) {
-                control.removeTorrent(runtimeId, deleteFiles = false)
-                throw failure
-            }
-            bindings.bind(entry.queueId, runtimeId)
-            if (!collisionGuardRequired) return@withLock AddedTorrent(runtimeId, entry.queueId)
-
-            val reusable = resolveAddCollisionLocked(runtimeId, entry.queueId)
-            AddedTorrent(
-                runtimeId,
-                entry.queueId,
-                status = if (reusable) "ok" else "storage_conflict"
-            )
+        )
+        check(runtimeId > 0) { control.lastError ?: "Unable to add torrent" }
+        val entry = QueueEntry(
+            magnetUri = magnetUri,
+            destinationPath = destination.path,
+            isPaused = startPaused,
+            storagePauseRequired = collisionGuardRequired,
+            addCollisionState = if (collisionGuardRequired) "checking" else null
+        )
+        try {
+            store.mutateQueueIntent { it + entry }
+        } catch (failure: Exception) {
+            control.removeTorrent(runtimeId, deleteFiles = false)
+            throw failure
         }
+        bindings.bind(entry.queueId, runtimeId)
+        if (!collisionGuardRequired) return@withLock AddedTorrent(runtimeId, entry.queueId)
+
+        val reusable = resolveAddCollisionLocked(runtimeId, entry.queueId, resumeWhenReusable = !startPaused)
+        AddedTorrent(
+            runtimeId,
+            entry.queueId,
+            status = if (reusable) "ok" else "storage_conflict"
+        )
+    }
 
     suspend fun pause(runtimeId: Long): QueueId = mutationMutex.withLock {
         val queueId = requireBinding(runtimeId)
@@ -99,6 +110,9 @@ class DurableTorrentOperations(
             }
         }
         if (entry.addCollisionState != null) {
+            check(control.resumeMetadataOnly(runtimeId)) {
+                control.lastError ?: "Unable to resume metadata validation"
+            }
             check(resolveAddCollisionLocked(runtimeId, queueId)) { "Storage conflict" }
         } else {
             check(control.resumeTorrent(runtimeId)) { control.lastError ?: "Torrent not found" }
@@ -112,7 +126,11 @@ class DurableTorrentOperations(
         queueId
     }
 
-    private suspend fun resolveAddCollisionLocked(runtimeId: Long, queueId: QueueId): Boolean {
+    private suspend fun resolveAddCollisionLocked(
+        runtimeId: Long,
+        queueId: QueueId,
+        resumeWhenReusable: Boolean = true
+    ): Boolean {
         val ownedState = withTimeoutOrNull(30_000L) {
             var state: TorrentOwnedDataState
             do {
@@ -127,9 +145,27 @@ class DurableTorrentOperations(
             TorrentOwnedDataState.Present -> verifyCompleteOwnedData(runtimeId)
             TorrentOwnedDataState.MetadataPending -> false
         }
-        if (reusable && control.resumeTorrent(runtimeId)) {
-            update(queueId) { it.copy(addCollisionState = null, storagePauseRequired = false) }
-            return true
+        if (reusable) {
+            val nativeStateApplied = if (resumeWhenReusable) {
+                control.resumeTorrent(runtimeId)
+            } else {
+                control.pauseTorrent(runtimeId)
+            }
+            if (nativeStateApplied) {
+                try {
+                    update(queueId) {
+                        it.copy(
+                            addCollisionState = null,
+                            storagePauseRequired = false,
+                            isPaused = !resumeWhenReusable
+                        )
+                    }
+                } catch (failure: Exception) {
+                    if (resumeWhenReusable) control.pauseTorrent(runtimeId)
+                    throw failure
+                }
+                return true
+            }
         }
         control.pauseTorrent(runtimeId)
         update(queueId) { it.copy(addCollisionState = "storage_conflict", storagePauseRequired = true) }

@@ -43,6 +43,9 @@ interface TorrentSessionOps {
     /** Reports whether metadata identifies torrent-owned files already at the save path. */
     fun inspectTorrentOwnedData(torrentId: Long): TorrentOwnedDataState = TorrentOwnedDataState.MetadataPending
 
+    /** Resumes metadata exchange while keeping payload piece downloads disabled. */
+    fun resumeMetadataOnly(torrentId: Long): Boolean = false
+
     /** Starts normal libtorrent piece verification for the torrent's current storage. */
     fun verifyTorrent(torrentId: Long): Boolean = false
 
@@ -334,6 +337,16 @@ object TorrentSession : DaemonControl {
         }
     }
 
+    override fun resumeMetadataOnly(torrentId: Long): Boolean {
+        return try {
+            if (sessionId <= 0) return false
+            nativeResumeMetadataOnly(sessionId, torrentId)
+        } catch (e: Exception) {
+            _lastError = e.message
+            false
+        }
+    }
+
     override fun removeTorrent(torrentId: Long, deleteFiles: Boolean): Boolean {
         return try {
             if (sessionId <= 0) return false
@@ -619,6 +632,7 @@ object TorrentSession : DaemonControl {
     private external fun nativeInspectTorrentOwnedData(sessionId: Long, torrentId: Long): Int
     private external fun nativePauseTorrent(sessionId: Long, torrentId: Long): Boolean
     private external fun nativeResumeTorrent(sessionId: Long, torrentId: Long): Boolean
+    private external fun nativeResumeMetadataOnly(sessionId: Long, torrentId: Long): Boolean
     private external fun nativeRemoveTorrent(sessionId: Long, torrentId: Long, deleteFiles: Boolean): Boolean
     private external fun nativeGetTorrentStatus(sessionId: Long, torrentId: Long): LongArray?
     private external fun nativeGetTorrentName(sessionId: Long, torrentId: Long): String

@@ -55,6 +55,49 @@ class DurableTorrentOperationsTest {
     }
 
     @Test
+    fun `explicit paused add is native and durable before returning`() = runTest {
+        val destination = createTempDirectory("m4-add-paused-").toFile()
+        try {
+            val native = RecordingSessionOps()
+            val store = InMemoryQueueStore()
+            DurableTorrentOperations(native, store, QueueRuntimeBindings())
+                .add("magnet:paused", TorrentDestination(destination.canonicalPath), startPaused = true)
+
+            assertTrue(native.startPaused)
+            assertTrue(store.loadQueueIntent().single().isPaused)
+            assertTrue(native.resumed.isEmpty())
+        } finally {
+            destination.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `explicit paused add fetches metadata before applying pause after collision check`() = runTest {
+        val destination = createTempDirectory("m4-add-paused-collision-").toFile()
+        try {
+            File(destination, "unrelated.txt").writeText("keep")
+            val native = RecordingSessionOps(
+                ownedDataSnapshots = listOf(
+                    TorrentOwnedDataState.MetadataPending,
+                    TorrentOwnedDataState.None
+                )
+            )
+            val store = InMemoryQueueStore()
+            val added = DurableTorrentOperations(native, store, QueueRuntimeBindings())
+                .add("magnet:paused", TorrentDestination(destination.canonicalPath), startPaused = true)
+
+            assertEquals("ok", added.status)
+            assertFalse(native.startPaused)
+            assertEquals(listOf(1L), native.paused)
+            assertTrue(native.resumed.isEmpty())
+            assertTrue(store.loadQueueIntent().single().isPaused)
+            assertNull(store.loadQueueIntent().single().addCollisionState)
+        } finally {
+            destination.deleteRecursively()
+        }
+    }
+
+    @Test
     fun `safe add ignores unrelated siblings and resumes paused handle`() = runTest {
         val destination = createTempDirectory("m4-add-unrelated-").toFile()
         try {
@@ -136,6 +179,50 @@ class DurableTorrentOperationsTest {
     }
 
     @Test
+    fun `explicit resume after add collision clears durable pause intent`() = runTest {
+        val destination = createTempDirectory("m4-resume-add-collision-").toFile()
+        try {
+            val queueId = QueueId("collision")
+            val store = InMemoryQueueStore().also {
+                it.saveQueueIntent(
+                    listOf(
+                        QueueEntry(
+                            magnetUri = "magnet:collision",
+                            queueId = queueId,
+                            destinationPath = destination.canonicalPath,
+                            isPaused = true,
+                            storagePauseRequired = true,
+                            addCollisionState = "storage_conflict"
+                        )
+                    )
+                )
+            }
+            val native = RecordingSessionOps(
+                ownedDataSnapshots = listOf(
+                    TorrentOwnedDataState.MetadataPending,
+                    TorrentOwnedDataState.None
+                )
+            )
+            val operations = DurableTorrentOperations(
+                native,
+                store,
+                QueueRuntimeBindings().apply { bind(queueId, 17L) }
+            )
+
+            operations.resume(17L)
+
+            val recovered = store.loadQueueIntent().single()
+            assertFalse(recovered.isPaused)
+            assertFalse(recovered.storagePauseRequired)
+            assertNull(recovered.addCollisionState)
+            assertEquals(listOf(17L), native.metadataOnlyResumed)
+            assertEquals(listOf(17L), native.resumed)
+        } finally {
+            destination.deleteRecursively()
+        }
+    }
+
+    @Test
     fun `add conflict recovers initially paused until explicit revalidation`() {
         val request = recoveryAddRequest(
             QueueEntry(
@@ -167,12 +254,15 @@ class DurableTorrentOperationsTest {
     }
 
     private class RecordingSessionOps(
-        private val ownedData: TorrentOwnedDataState = TorrentOwnedDataState.None,
+        ownedData: TorrentOwnedDataState = TorrentOwnedDataState.None,
         progress: Float = 1f,
-        private val progressSnapshots: List<Float> = listOf(progress)
+        private val progressSnapshots: List<Float> = listOf(progress),
+        private val ownedDataSnapshots: List<TorrentOwnedDataState> = listOf(ownedData)
     ) : TorrentSessionOps {
         private var progressSnapshotIndex = 0
+        private var ownedDataSnapshotIndex = 0
         val paused = mutableListOf<Long>()
+        val metadataOnlyResumed = mutableListOf<Long>()
         val resumed = mutableListOf<Long>()
         var startPaused = false
         var metadataOnly = false
@@ -183,12 +273,16 @@ class DurableTorrentOperationsTest {
             metadataOnly = request.metadataOnlyUntilVerified
             return 1L
         }
-        override fun inspectTorrentOwnedData(torrentId: Long): TorrentOwnedDataState = ownedData
+        override fun inspectTorrentOwnedData(torrentId: Long): TorrentOwnedDataState =
+            ownedDataSnapshots[ownedDataSnapshotIndex.coerceAtMost(ownedDataSnapshots.lastIndex)].also {
+                ownedDataSnapshotIndex++
+            }
         override suspend fun verifyTorrentData(torrentId: Long): Boolean {
             verifications++
             return true
         }
         override fun pauseTorrent(torrentId: Long): Boolean = paused.add(torrentId)
+        override fun resumeMetadataOnly(torrentId: Long): Boolean = metadataOnlyResumed.add(torrentId)
         override fun resumeTorrent(torrentId: Long): Boolean = resumed.add(torrentId)
         override fun removeTorrent(torrentId: Long, deleteFiles: Boolean): Boolean = true
         override fun moveStorage(torrentId: Long, targetPath: String): Boolean = true

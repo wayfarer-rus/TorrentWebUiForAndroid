@@ -216,6 +216,30 @@ Java_com_andreiefimov_torrentwebui_TorrentSession_nativePauseTorrent(
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
+Java_com_andreiefimov_torrentwebui_TorrentSession_nativeResumeMetadataOnly(
+        JNIEnv*, jobject, jlong jId, jlong jTorrentId) {
+    try {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        uint64_t id = static_cast<uint64_t>(jId);
+        auto sit = g_sessions.find(id);
+        if (sit == g_sessions.end()) return JNI_FALSE;
+
+        uint64_t tid = static_cast<uint64_t>(jTorrentId);
+        auto tit = sit->second.torrents.find(tid);
+        if (tit == sit->second.torrents.end()) return JNI_FALSE;
+
+        LOGI("Resuming metadata-only validation for torrent %llu", tid);
+        tit->second.set_flags(lt::torrent_flags::upload_mode);
+        tit->second.unset_flags(lt::torrent_flags::stop_when_ready);
+        tit->second.resume();
+        return JNI_TRUE;
+    } catch (std::exception const& e) {
+        LOGE("nativeResumeMetadataOnly failed: %s", e.what());
+        return JNI_FALSE;
+    }
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
 Java_com_andreiefimov_torrentwebui_TorrentSession_nativeResumeTorrent(
         JNIEnv*, jobject, jlong jId, jlong jTorrentId) {
     try {
