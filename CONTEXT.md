@@ -5,12 +5,7 @@ This file defines the domain vocabulary used across the Torrent WebUI project. C
 ## Authentication
 
 ### Password
-- The secret credential used to authenticate WebUI access.
-- Stored in Android `SharedPreferences` under key `webui_password`.
-- Default value: `start123`; changing it is optional, but the WebUI continues to remind the user until it changes.
-- Minimum length: 4 characters. No maximum (passphrases allowed).
-- Changed via `POST /api/settings/password` or the Setup Wizard.
-- Takes effect immediately on next auth check (no cache).
+- The secret credential used to authenticate WebUI access; its accepted default is `start123`.
 
 ### Authentication (HTTP Basic)
 - The authentication scheme used by the WebUI.
@@ -38,28 +33,31 @@ This file defines the domain vocabulary used across the Torrent WebUI project. C
 - It controls application-specific settings and torrent behavior, but not Android platform-permission onboarding. Milestone 4 limits those settings to storage.
 
 ### WebSocket Endpoint
-- `/ws/progress` provides real-time torrent status updates.
-- Bypasses HTTP Basic Auth (page-level auth is the gate).
-- Used by WebUI JavaScript to receive live progress and alerts.
+- The authenticated `/ws/progress` stream that provides real-time torrent status updates and alerts to the WebUI.
 
-### Android Startup Permission Onboarding
-- The native first-run flow that requests and verifies all Android platform permissions required before the torrent service is usable.
-- It does not own application-specific configuration, which remains a Torrent WebUI control.
-_Avoid_: WebUI setup wizard
+### Android Startup Bootstrap
+- The bare-bones native prerequisite flow that requests and verifies required Android platform permissions before the torrent service becomes usable.
+- It does not own Consumer Onboarding or application-specific configuration.
+_Avoid_: Android onboarding, setup wizard
+
+### Consumer Onboarding
+- The mandatory WebUI-owned first-use journey that establishes service readiness, an Approved Destination, and an explicit Password decision for a household user.
+- Its completion is durable and distinct from Android Startup Bootstrap and later recovery flows.
+_Avoid_: Android onboarding, permission onboarding
+
+### Onboarding Readiness
+- The non-technical Consumer Onboarding state reported as **Ready**, **Action needed on Android**, or **Service unavailable**.
+_Avoid_: Daemon health, diagnostics
 
 ## Android UI
 
 ### Android Fallback Control
-- The Android app provides onboarding, permissions, daemon health, and emergency override only.
-- It is not a day-to-day torrent-control surface in Milestone 3; the WebUI is the sole primary control surface.
-- Its M3 emergency actions are limited to viewing daemon health and starting or stopping downloads; it does not duplicate the queue list or individual torrent controls.
+- The bare-bones Android surface provides Android Startup Bootstrap, daemon health, emergency transfer controls, WebUI Port configuration, and local Password Reset.
+- It never duplicates the torrent queue, individual torrent controls, or Consumer Onboarding.
 
 ### MainActivity
-- The Android app's bootstrap, health, and fallback-control screen.
-- M3: deliberately minimal — shows daemon health and Start/Stop downloads only.
-- No queue list, magnet input, or per-torrent controls (those are WebUI-only).
-- Provides gear icon to open password settings sheet (WebUI-only in M3; Android fallback removed).
-- Creates `DefaultAuthManager` and passes it to `TorrentServer.start()`.
+- The Android app's bare-bones bootstrap, health, and fallback-control screen.
+- It exposes Android platform capabilities and recovery controls, never Consumer Onboarding or torrent-management controls.
 
 ### Daemon Control Seam
 - `DaemonControl` interface unifies session operations with lifecycle management (init/destroy).
@@ -71,10 +69,10 @@ _Avoid_: WebUI setup wizard
 - `FileQueueStore` uses atomic file replacement for durability; lives in app-private storage.
 - Recovery records are never exposed through WebUI responses, notifications, or logs.
 
-### Password Settings Sheet
-- Material 3 `ModalBottomSheet` opened from MainActivity toolbar.
-- Shows masked current password, new password input, change button.
-- Calls `AuthManager.setPassword()` directly (equivalent to API endpoint).
+### Password Reset
+- The local Android recovery action that restores the WebUI Password to `start123` without requiring the current Password or accepting a replacement.
+- Physical access to the Android app is sufficient authority for this recovery action.
+_Avoid_: Password change
 
 ## LAN (Local Area Network)
 
@@ -85,9 +83,13 @@ _Avoid_: WebUI setup wizard
 - Acceptable for household privacy, not suitable for public Internet.
 
 ### Network Boundaries
-- WebUI binds to `0.0.0.0:8080` (all interfaces).
-- Accessible from any device on the same LAN.
-- VPN split tunneling is external deployment configuration (not app logic).
+- WebUI is accessible from devices on the same LAN and is not publicly exposed by default.
+- VPN split tunneling is external deployment configuration, not app logic.
+
+### WebUI Port
+- The Android-owned TCP port on which the WebUI accepts LAN connections.
+- It is configured and displayed only in Android Fallback Control, not in Consumer Onboarding or WebUI settings.
+_Avoid_: WebUI setting, onboarding setting
 
 ### Emulator Acceptance
 - A fully automated end-to-end validation run on an Android Virtual Device (AVD).
@@ -163,6 +165,11 @@ _Avoid_: WebUI setup wizard
 - The most recently chosen Approved Destination, used as the default for adding a new torrent.
 - It does not change the destination of an existing torrent.
 
+### Recommended Destination
+- The real canonical `<primary storage volume>/Download/Torrents` path proposed during Consumer Onboarding.
+- It becomes an Approved Destination only after user confirmation and backend validation.
+_Avoid_: Default destination, storage alias
+
 ### Legacy Destination
 - The real app-private download path retained by an existing torrent after an upgrade to the path-based destination model.
 - It remains available only to preserve or move that torrent's data; no new torrent may select it.
@@ -222,6 +229,6 @@ _Avoid_: WebUI setup wizard
 ## Out of Scope (Documented Elsewhere)
 
 - **VPN split tunneling:** External deployment configuration, not app logic. See ADR-005.
-- **SAF permissions:** Stage 4 feature, represented as named destinations in WebUI. See ADR-004.
+- **SAF document destinations:** Not part of the path-based destination model; Approved Destinations use canonical filesystem paths. See ADR 0015 and ADR 0023.
 - **Session persistence:** Stage 3 feature, not implemented in Stage 1-2. See ADR-008.
 - **HTTPS/TLS:** Milestone 5+ concern, not implemented in Stage 2.
