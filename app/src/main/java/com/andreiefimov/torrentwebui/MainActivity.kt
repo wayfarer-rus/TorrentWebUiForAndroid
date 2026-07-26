@@ -159,7 +159,8 @@ class MainActivity : ComponentActivity() {
  *
  * Shows daemon health and provides Start/Stop downloads controls.
  * The WebUI is the sole primary control surface for queue management, magnet addition,
- * pause/resume/remove per-torrent controls, and password changes.
+ * pause/resume/remove per-torrent controls, and password changes. Android exposes only the
+ * fixed local Password Reset recovery action.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -250,6 +251,10 @@ fun AndroidFallbackScreen(viewModel: TorrentViewModel, authManager: AuthManager)
                     }
                 }
             }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            PasswordRecoveryCard(authManager)
 
             Spacer(modifier = Modifier.height(16.dp))
 
@@ -367,7 +372,7 @@ fun AndroidFallbackScreen(viewModel: TorrentViewModel, authManager: AuthManager)
                 Text(
                     text = "The WebUI (accessible via LAN browser) is the primary control surface.\n\n" +
                            "Use the WebUI to add magnets, manage the queue, and pause/resume/remove torrents.\n\n" +
-                           "Android provides onboarding, daemon health, and emergency Start/Stop only.",
+                           "Android provides permission setup, daemon health, recovery, and emergency Start/Stop only.",
                     modifier = Modifier.padding(16.dp),
                     style = MaterialTheme.typography.bodyMedium
                 )
@@ -375,6 +380,62 @@ fun AndroidFallbackScreen(viewModel: TorrentViewModel, authManager: AuthManager)
 
 
         }
+    }
+}
+
+@Composable
+internal fun PasswordRecoveryCard(authManager: AuthManager) {
+    val controller = remember(authManager) { PasswordResetController(authManager) }
+    var state by remember { mutableStateOf(controller.state) }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.secondaryContainer
+        )
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text("Password Recovery", style = MaterialTheme.typography.titleSmall)
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                "Use this only when the current WebUI Password is unknown.",
+                style = MaterialTheme.typography.bodySmall
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            OutlinedButton(
+                onClick = { state = controller.requestConfirmation() },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Reset WebUI Password")
+            }
+            state.message?.let { message ->
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(message, style = MaterialTheme.typography.bodySmall)
+            }
+        }
+    }
+
+    if (state.confirmationRequired) {
+        AlertDialog(
+            onDismissRequest = { state = controller.cancel() },
+            title = { Text("Reset WebUI Password?") },
+            text = {
+                Text(
+                    "This replaces the current Password with start123. " +
+                        "Open browsers must authenticate again."
+                )
+            },
+            confirmButton = {
+                Button(onClick = { state = controller.confirm() }) {
+                    Text("Reset Password")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { state = controller.cancel() }) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
 }
 

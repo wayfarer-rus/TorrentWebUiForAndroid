@@ -433,3 +433,17 @@ The daemon remains the sole production lifecycle owner. `TorrentServer` now conf
 | Focused emulator teardown | PASS — the lifecycle test stopped the daemon and cleared port preferences; post-run inspection found no daemon service and no listener on device ports `8080` or `18081`. |
 
 The daemon-owned `WebUiPortCoordinator` now validates `1024–65535`, synchronously persists only after a candidate binds, and promotes without touching `DaemonControl`. Android displays configured/effective ports and concise operation errors without LAN-address discovery. Cold-start bind failure keeps the configured port and reports no effective listener.
+
+## Milestone 6: Consumer Onboarding — Ticket 03
+
+**Status:** PASS for focused JVM authentication validation and Compose Android UI-test compilation. No current-tree emulator or physical-device result is claimed.
+
+| Validation | Result |
+|---|---|
+| `PasswordResetControllerTest` red/green cycles | PASS — cancellation preserves authentication, confirmation is required, confirmed reset restores `start123`, and old browser credentials become invalid. |
+| `PasswordResetAuthenticationTest` Ktor application boundary | PASS — the old HTTP Basic credential changes from HTTP 200 to 401 on the next request, while `start123` immediately authenticates with HTTP 200. |
+| `PasswordResetUiTest` | COMPILED, NOT RUN — Compose semantics assertions cover confirmation visibility, cancellation, successful reset, no editable password fields, and absence of torrent controls in the recovery surface. |
+| `./gradlew :app:testDebugUnitTest :app:assembleDebug :app:compileDebugAndroidTestKotlin --console=plain` | PASS — 180 JVM tests, 0 failures/errors/skips; debug APK assembled; Compose/persistence Android tests compiled. |
+| `PasswordResetPersistenceTest` | COMPILED, NOT RUN — verifies that existing and reconstructed `DefaultAuthManager` instances observe the reset. The visible API 36 AVD did not become ADB-ready within the bounded attempt, so the blocking boot wait was aborted and no emulator pass is claimed. |
+
+Android renders one confirmed `Reset WebUI Password` recovery action and no current/replacement password fields. `PasswordResetController` writes only the canonical default through the same `DefaultAuthManager` read by Ktor on every authentication check; it has no daemon, WebUI-server, or native-session lifecycle dependency and performs no sensitive logging.

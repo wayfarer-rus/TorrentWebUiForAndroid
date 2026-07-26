@@ -92,6 +92,7 @@ scripts/
 - **`DaemonControl`** unifies lifecycle and small typed torrent operations. `TorrentAddRequest` carries a canonical destination and initial pause policy; move/rollback/verification remain narrow JNI calls.
 - **`TorrentSession`** is the sole Kotlin JNI entry point while native code owns libtorrent objects.
 - **`QueueStore`**, **`DestinationCatalog`**, and **`MoveJournal`** are the durable authority consumed by both Android fallback state and authenticated WebUI/API responses.
+- **`DefaultAuthManager`** is the single durable WebUI Password authority shared by Ktor authentication, WebUI password changes, and Android-local recovery. **`PasswordResetController`** owns only confirmation state and the fixed reset to `start123`; it accepts no password input and has no daemon, server, or native-session lifecycle access.
 - Recovery validates queue/journal records and storage availability before native work. Corrupt journals fail closed; unavailable destinations enter native recovery paused from the first instant.
 
 ## Queue Persistence (M3)
@@ -125,7 +126,7 @@ scripts/
 - **`MainActivity`** remains a deliberately minimal fallback: daemon health, Android permission recovery, configured/effective WebUI Port, and Start/Stop downloads controls.
 - Port changes are sent to the existing foreground daemon by intent; the ViewModel only observes Android-local status and never initializes, pauses, or destroys the native session.
 - Android does not discover or display a LAN address. No queue list, magnet input, destination selection, or per-torrent controls are present (those are WebUI-only).
-- Password changes remain a WebUI control surface until the separate M6 local-reset ticket is implemented (`POST /api/settings/password`).
+- Normal password changes remain an authenticated WebUI control (`POST /api/settings/password`). Android exposes only a confirmed local recovery action that restores `start123`; the next HTTP Basic check reads the shared manager, rejects previous credentials, and prompts browser reauthentication.
 
 ## JNI Resume Data Methods (M3)
 

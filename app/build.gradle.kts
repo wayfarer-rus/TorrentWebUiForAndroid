@@ -107,6 +107,9 @@ dependencies {
 
     testImplementation(libs.junit)
     testImplementation(libs.ktor.server.test.host)
+    androidTestImplementation(platform(libs.androidx.compose.bom))
+    androidTestImplementation("androidx.compose.ui:ui-test-junit4")
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation("com.squareup.okhttp3:okhttp:4.12.0")

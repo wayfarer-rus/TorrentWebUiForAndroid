@@ -59,7 +59,7 @@ object TorrentServer {
 
     /** Auth manager — injected for testability. */
     private var authManager: AuthManager = object : AuthManager {
-        @Volatile private var password: String = "start123"
+        @Volatile private var password: String = WebUiCredentials.DEFAULT_PASSWORD
         override fun getPassword(): String = password
         override fun setPassword(newPassword: String) { password = newPassword }
     }
@@ -945,7 +945,7 @@ object TorrentServer {
     /** Resets test configuration to production defaults. Call after each test. */
     internal fun resetToDefaults() {
         this.authManager = object : AuthManager {
-            @Volatile private var password: String = "start123"
+            @Volatile private var password: String = WebUiCredentials.DEFAULT_PASSWORD
             override fun getPassword(): String = password
             override fun setPassword(newPassword: String) { password = newPassword }
         }

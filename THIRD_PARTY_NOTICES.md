@@ -7,6 +7,7 @@ Track every third-party dependency used in this project.
 | libtorrent-rasterbar | v2.0.10 (74bc93a37) | https://github.com/arvidn/libtorrent | Boost Software License 1.0 (BSD-style) | Native torrent engine | Bundled (git submodule) | Core torrent protocol implementation |
 | Boost | 1.86.0 | https://archives.boost.io/release/1.86.0/source/boost_1_86_0.tar.gz | Boost Software License 1.0 | Required by libtorrent | Bundled (headers via bootstrap-deps.sh) | SHA-256 pinned in scripts/bootstrap-deps.sh; not tracked in git |
 | AndroidX Compose BOM | 2025.03.01 | https://developer.android.com/jetpack/compose | Apache 2.0 | UI framework | Bundled (Gradle AAR) | Jetpack Compose UI |
+| AndroidX Compose UI Test | Compose BOM 2025.03.01 | https://developer.android.com/develop/ui/compose/testing | Apache 2.0 | Compose semantics testing | Test-only | Android Password Reset confirmation and control-absence tests |
 | AndroidX Lifecycle | 2.8.7 | https://developer.android.com/jetpack/androidx/releases/lifecycle | Apache 2.0 | ViewModel, lifecycle management | Bundled (Gradle AAR) | ViewModel for session lifecycle |
 | AndroidX Activity Compose | 1.10.1 | https://developer.android.com/jetpack/androidx/releases/activity | Apache 2.0 | Compose-Activity integration | Bundled (Gradle AAR) | ComponentActivity + setContent |
 | Kotlin | 2.1.20 | https://kotlinlang.org | Apache 2.0 | Programming language | Toolchain | Android development language |
