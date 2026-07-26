@@ -42,6 +42,21 @@ class OnboardingPersistenceTest {
     }
 
     @Test
+    fun deferredEligibleOnboardingCompletesDurablyAcrossReconstructionAndRecoveryLoss() = runBlocking {
+        val first = coordinator(hasDestination = true)
+        val deferred = first.deferPassword() as PasswordDeferralResult.Updated
+        assertTrue(deferred.status.completed)
+
+        val reconstructed = coordinator(
+            hasDestination = false,
+            readiness = OnboardingReadiness.ServiceUnavailable
+        ).status()
+
+        assertTrue(reconstructed.completed)
+        assertEquals(PasswordDecision.Deferred, reconstructed.passwordDecision)
+    }
+
+    @Test
     fun establishedQueueMigratesOnlyWhenMarkerIsAbsent() = runBlocking {
         val migrated = coordinator(hasQueue = true).status()
 
@@ -56,13 +71,14 @@ class OnboardingPersistenceTest {
     private fun coordinator(
         hasQueue: Boolean = false,
         hasDestination: Boolean = false,
-        hasNonDefaultPassword: Boolean = false
+        hasNonDefaultPassword: Boolean = false,
+        readiness: OnboardingReadiness = OnboardingReadiness.Ready
     ) = OnboardingCoordinator(
         store = SharedPreferencesOnboardingStateStore(context),
         hasDurableQueue = { hasQueue },
         hasApprovedDestination = { hasDestination },
         hasNonDefaultPassword = { hasNonDefaultPassword },
-        readiness = { OnboardingReadiness.Ready }
+        readiness = { readiness }
     )
 
     private fun clearState() {

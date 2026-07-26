@@ -76,6 +76,85 @@ class OnboardingApiTest {
     }
 
     @Test
+    fun `recommended destination proposal and confirmation update resumable status`() = testApplication {
+        var destinationPresent = false
+        val operations = object : RecommendedDestinationOperations {
+            override fun proposal() = RecommendedDestinationResult.Success(
+                "/storage/primary/Download/Torrents"
+            )
+
+            override suspend fun confirm(): RecommendedDestinationResult {
+                destinationPresent = true
+                return proposal()
+            }
+        }
+        configure(
+            onboarding = incompleteCoordinator(hasDestination = { destinationPresent }),
+            recommendedDestinationOperations = operations
+        )
+
+        val proposal = client.get("/api/onboarding/recommended-destination") {
+            header(HttpHeaders.Authorization, basic(WebUiCredentials.DEFAULT_PASSWORD))
+        }
+        assertEquals(HttpStatusCode.OK, proposal.status)
+        assertTrue(proposal.bodyAsText().contains("/storage/primary/Download/Torrents"))
+
+        val confirmed = client.post("/api/onboarding/recommended-destination") {
+            header(HttpHeaders.Authorization, basic(WebUiCredentials.DEFAULT_PASSWORD))
+        }
+        assertEquals(HttpStatusCode.OK, confirmed.status)
+
+        val status = client.get("/api/onboarding/status") {
+            header(HttpHeaders.Authorization, basic(WebUiCredentials.DEFAULT_PASSWORD))
+        }
+        assertTrue(Json.decodeFromString<OnboardingStatus>(status.bodyAsText()).hasApprovedDestination)
+    }
+
+    @Test
+    fun `password deferral completes eligible onboarding without changing password`() = testApplication {
+        val auth = InMemoryAuthManager("unchanged-password")
+        configure(
+            onboarding = incompleteCoordinator(hasDestination = { true }),
+            authManager = auth
+        )
+
+        val response = client.post("/api/onboarding/password/defer") {
+            header(HttpHeaders.Authorization, basic("unchanged-password"))
+        }
+
+        assertEquals(HttpStatusCode.OK, response.status)
+        val status = Json.decodeFromString<OnboardingStatus>(response.bodyAsText())
+        assertTrue(status.completed)
+        assertEquals(PasswordDecision.Deferred, status.passwordDecision)
+        assertEquals("unchanged-password", auth.getPassword())
+    }
+
+    @Test
+    fun `recommended destination confirmation is rejected until readiness is ready`() = testApplication {
+        var confirmationCalls = 0
+        val operations = object : RecommendedDestinationOperations {
+            override fun proposal() = RecommendedDestinationResult.Success("/storage/primary/Download/Torrents")
+            override suspend fun confirm(): RecommendedDestinationResult {
+                confirmationCalls += 1
+                return proposal()
+            }
+        }
+        configure(
+            onboarding = incompleteCoordinator(
+                readiness = OnboardingReadiness.ServiceUnavailable
+            ),
+            recommendedDestinationOperations = operations
+        )
+
+        val response = client.post("/api/onboarding/recommended-destination") {
+            header(HttpHeaders.Authorization, basic(WebUiCredentials.DEFAULT_PASSWORD))
+        }
+
+        assertEquals(HttpStatusCode.Conflict, response.status)
+        assertEquals(0, confirmationCalls)
+    }
+
+    @Test
     fun `completed onboarding does not apply the onboarding mutation rejection`() = testApplication {
         configure(OnboardingCoordinator.completedForTest())
 
@@ -88,19 +167,23 @@ class OnboardingApiTest {
     }
 
     private fun io.ktor.server.testing.ApplicationTestBuilder.configure(
-        onboarding: OnboardingCoordinator
+        onboarding: OnboardingCoordinator,
+        recommendedDestinationOperations: RecommendedDestinationOperations? = null,
+        authManager: AuthManager = InMemoryAuthManager()
     ) {
         TorrentServer.configureForTest(
-            authManager = InMemoryAuthManager(),
+            authManager = authManager,
             daemonControl = RecoveryBlockedDaemonControl,
             onboardingCoordinator = onboarding,
+            recommendedDestinationOperations = recommendedDestinationOperations,
             assetReader = { path -> if (path == "www/index.html") "<html>WebUI</html>" else null }
         )
         application { TorrentServer.configureApplication(this) }
     }
 
     private fun incompleteCoordinator(
-        readiness: OnboardingReadiness = OnboardingReadiness.Ready
+        readiness: OnboardingReadiness = OnboardingReadiness.Ready,
+        hasDestination: () -> Boolean = { false }
     ) = OnboardingCoordinator(
         store = object : OnboardingStateStore {
             private var record: OnboardingRecord? = OnboardingRecord(false, PasswordDecision.Pending)
@@ -111,7 +194,7 @@ class OnboardingApiTest {
             }
         },
         hasDurableQueue = { false },
-        hasApprovedDestination = { false },
+        hasApprovedDestination = { hasDestination() },
         hasNonDefaultPassword = { false },
         readiness = { readiness }
     )

@@ -43,6 +43,13 @@ data class OnboardingStatus(
     val readiness: OnboardingReadiness
 )
 
+internal sealed interface PasswordDeferralResult {
+    data class Updated(val status: OnboardingStatus) : PasswordDeferralResult
+    data object AlreadyCompleted : PasswordDeferralResult
+    data object DecisionAlreadyRecorded : PasswordDeferralResult
+    data object PersistenceFailed : PasswordDeferralResult
+}
+
 internal interface OnboardingStateStore {
     /** Null means this installation has never been initialized for M6. */
     fun read(): OnboardingRecord?
@@ -93,14 +100,53 @@ internal class OnboardingCoordinator(
 
     suspend fun status(): OnboardingStatus = lock.withLock {
         val destinationPresent = hasApprovedDestination()
-        val record = store.read() ?: initialize(destinationPresent)
-        OnboardingStatus(
-            completed = record.completed,
-            passwordDecision = record.passwordDecision,
-            hasApprovedDestination = destinationPresent,
-            readiness = readiness()
-        )
+        val currentReadiness = readiness()
+        var record = store.read() ?: initialize(destinationPresent)
+        if (record.isEligibleForCompletion(destinationPresent, currentReadiness)) {
+            val completed = record.copy(completed = true)
+            if (store.write(completed)) record = completed
+        }
+        record.toStatus(destinationPresent, currentReadiness)
     }
+
+    suspend fun deferPassword(): PasswordDeferralResult = lock.withLock {
+        val destinationPresent = hasApprovedDestination()
+        val currentReadiness = readiness()
+        var record = store.read() ?: initialize(destinationPresent)
+        if (record.completed) return@withLock PasswordDeferralResult.AlreadyCompleted
+        if (record.passwordDecision == PasswordDecision.Changed) {
+            return@withLock PasswordDeferralResult.DecisionAlreadyRecorded
+        }
+        if (record.passwordDecision == PasswordDecision.Pending) {
+            val deferred = record.copy(passwordDecision = PasswordDecision.Deferred)
+            if (!store.write(deferred)) return@withLock PasswordDeferralResult.PersistenceFailed
+            record = deferred
+        }
+        if (record.isEligibleForCompletion(destinationPresent, currentReadiness)) {
+            val completed = record.copy(completed = true)
+            if (!store.write(completed)) return@withLock PasswordDeferralResult.PersistenceFailed
+            record = completed
+        }
+        PasswordDeferralResult.Updated(record.toStatus(destinationPresent, currentReadiness))
+    }
+
+    private fun OnboardingRecord.isEligibleForCompletion(
+        destinationPresent: Boolean,
+        currentReadiness: OnboardingReadiness
+    ): Boolean = !completed &&
+        currentReadiness == OnboardingReadiness.Ready &&
+        destinationPresent &&
+        passwordDecision != PasswordDecision.Pending
+
+    private fun OnboardingRecord.toStatus(
+        destinationPresent: Boolean,
+        currentReadiness: OnboardingReadiness
+    ) = OnboardingStatus(
+        completed = completed,
+        passwordDecision = passwordDecision,
+        hasApprovedDestination = destinationPresent,
+        readiness = currentReadiness
+    )
 
     private suspend fun initialize(destinationPresent: Boolean): OnboardingRecord {
         val established = destinationPresent || hasDurableQueue() || hasNonDefaultPassword()

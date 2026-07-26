@@ -463,3 +463,20 @@ Android renders one confirmed `Reset WebUI Password` recovery action and no curr
 | `npm run test:e2e:m4:static` | PASS. |
 
 The daemon initializes the durable onboarding marker before Ktor binds. The authenticated status exposes only completion, Password Decision, Approved Destination presence, and Onboarding Readiness; technical health remains outside this response. Incomplete installations render only Consumer Onboarding, while normal torrent REST/WebSocket access is gated and onboarding-required storage, Password, and Android recovery surfaces remain available.
+
+## Milestone 6: Consumer Onboarding — Ticket 05
+
+**Status:** PASS for current-tree JVM/Ktor, browser, static-regression, and Android-test compilation. No current-tree emulator or physical-device result is claimed.
+
+| Validation | Result |
+|---|---|
+| `RecommendedDestinationServiceTest` red/green cycles | PASS — primary-volume proposal without creation, recursive creation, existing-directory reuse, canonicalization/confinement failures, validation failure, atomic catalog/Latest Selected persistence failure, partial rollback, and retention when emptiness cannot be proven. |
+| `OnboardingCoordinatorTest` completion cycles | PASS — Password deferral is durably written before completion; readiness/destination prerequisites, retry after unavailable readiness, persistence failure, and completed-state rejection are covered. |
+| `OnboardingApiTest` authenticated Ktor boundary | PASS — proposal/confirmation, readiness rejection, resumable destination status, Password deferral, immediate eligible completion, unchanged Password, and existing onboarding gates. |
+| `npm run test:e2e:m6:onboarding` | PASS — 4 Playwright tests, including the canonical Recommended Destination → **Set it later** happy path, no rendered default Password, immediate unlock, refresh persistence, and recovery non-regression. |
+| `./gradlew :app:testDebugUnitTest :app:assembleDebug :app:compileDebugAndroidTestKotlin --console=plain` | PASS — 206 JVM tests, 0 failures/errors/skips; debug APK assembled; Android tests compiled. |
+| `OnboardingPersistenceTest` | COMPILED, NOT RUN — Android SharedPreferences coverage now includes eligible deferral completion and reconstruction after readiness/destination loss. |
+| `npm run check` | PASS — 0 errors and 39 warnings in the Svelte page (37 pre-existing; 2 event-directive warnings added for the two onboarding actions). |
+| `npm run test:e2e:m4:static` | PASS. |
+
+The proposal is derived from Android's primary shared-storage root and canonicalized without filesystem mutation. Confirmation alone creates and validates missing directories, then uses the catalog's single atomic entry/Latest Selected write. **Set it later** never reads or changes the Password; it persists `Deferred` before durable completion. Once complete, the normal WebUI remains unlocked through later readiness or destination loss.

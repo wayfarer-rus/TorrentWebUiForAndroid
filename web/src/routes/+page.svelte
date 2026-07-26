@@ -38,6 +38,10 @@
 	let onboardingStatus = $state<OnboardingStatus | null>(null);
 	let onboardingLoading = $state(true);
 	let onboardingError = $state('');
+	let recommendedPath = $state<string | null>(null);
+	let recommendedLoading = $state(false);
+	let onboardingActionLoading = $state(false);
+	let onboardingActionError = $state('');
 	let onboardingPoll: ReturnType<typeof setTimeout> | null = null;
 	let onboardingRequest: AbortController | null = null;
 	let normalUiStarted = false;
@@ -109,6 +113,8 @@
 				startNormalUi();
 			} else if (status.readiness !== 'Ready') {
 				scheduleOnboardingPoll();
+			} else if (!status.hasApprovedDestination) {
+				void loadRecommendedDestination();
 			}
 		} catch (error) {
 			onboardingError = request.signal.aborted
@@ -118,6 +124,56 @@
 			clearTimeout(timeout);
 			if (onboardingRequest === request) onboardingRequest = null;
 			onboardingLoading = false;
+		}
+	}
+
+	async function loadRecommendedDestination() {
+		if (recommendedLoading || recommendedPath) return;
+		recommendedLoading = true;
+		onboardingActionError = '';
+		try {
+			const response = await fetchJson<{ path: string }>('/api/onboarding/recommended-destination');
+			recommendedPath = response.path;
+		} catch (error) {
+			onboardingActionError = error instanceof Error
+				? error.message
+				: 'Unable to prepare the recommended download folder.';
+		} finally {
+			recommendedLoading = false;
+		}
+	}
+
+	async function confirmRecommendedDestination() {
+		onboardingActionLoading = true;
+		onboardingActionError = '';
+		try {
+			await fetchJson('/api/onboarding/recommended-destination', { method: 'POST' });
+			recommendedPath = null;
+			await loadOnboardingStatus();
+		} catch (error) {
+			onboardingActionError = error instanceof Error
+				? error.message
+				: 'Unable to use the recommended download folder.';
+		} finally {
+			onboardingActionLoading = false;
+		}
+	}
+
+	async function deferOnboardingPassword() {
+		onboardingActionLoading = true;
+		onboardingActionError = '';
+		try {
+			const status = await fetchJson<OnboardingStatus>('/api/onboarding/password/defer', {
+				method: 'POST'
+			});
+			onboardingStatus = status;
+			if (status.completed) startNormalUi();
+		} catch (error) {
+			onboardingActionError = error instanceof Error
+				? error.message
+				: 'Unable to save the Password choice.';
+		} finally {
+			onboardingActionLoading = false;
 		}
 	}
 
@@ -611,13 +667,27 @@
 			<p>The download service is not ready. Use the Android app to recover or restart it.</p>
 		{:else if !onboardingStatus.hasApprovedDestination}
 			<h2>Choose a download folder</h2>
-			<p>Downloads are ready. Continue by choosing where completed files will be stored.</p>
+			<p>Use the recommended folder for completed and in-progress downloads.</p>
+			{#if recommendedLoading}
+				<p>Preparing the recommended path…</p>
+			{:else if recommendedPath}
+				<code>{recommendedPath}</code>
+				<button on:click={confirmRecommendedDestination} disabled={onboardingActionLoading}>
+					{onboardingActionLoading ? 'Creating folder…' : 'Use this folder'}
+				</button>
+			{/if}
 		{:else if onboardingStatus.passwordDecision === 'pending'}
 			<h2>Password choice</h2>
-			<p>Choose whether to update the WebUI Password or set it later.</p>
+			<p>You can keep the current Password for now or choose another one.</p>
+			<button on:click={deferOnboardingPassword} disabled={onboardingActionLoading}>
+				{onboardingActionLoading ? 'Finishing setup…' : 'Set it later'}
+			</button>
 		{:else}
 			<h2>Finishing setup</h2>
 			<p>Your saved onboarding progress is being completed.</p>
+		{/if}
+		{#if onboardingActionError}
+			<p class="error">{onboardingActionError}</p>
 		{/if}
 	</main>
 {:else if onboardingError}

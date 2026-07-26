@@ -102,6 +102,72 @@ class OnboardingCoordinatorTest {
     }
 
     @Test
+    fun `password deferral is persisted before eligible completion`() = runTest {
+        val store = RecordingOnboardingStateStore(
+            OnboardingRecord(false, PasswordDecision.Pending)
+        )
+        val coordinator = coordinator(store = store, hasDestination = true)
+
+        val result = coordinator.deferPassword()
+
+        assertTrue(result is PasswordDeferralResult.Updated)
+        assertEquals(
+            listOf(
+                OnboardingRecord(false, PasswordDecision.Deferred),
+                OnboardingRecord(true, PasswordDecision.Deferred)
+            ),
+            store.writes
+        )
+        assertTrue((result as PasswordDeferralResult.Updated).status.completed)
+    }
+
+    @Test
+    fun `deferred decision completes later when readiness becomes ready`() = runTest {
+        var readiness = OnboardingReadiness.ServiceUnavailable
+        val store = RecordingOnboardingStateStore(
+            OnboardingRecord(false, PasswordDecision.Pending)
+        )
+        val coordinator = OnboardingCoordinator(
+            store = store,
+            hasDurableQueue = { false },
+            hasApprovedDestination = { true },
+            hasNonDefaultPassword = { false },
+            readiness = { readiness }
+        )
+
+        val deferred = coordinator.deferPassword() as PasswordDeferralResult.Updated
+        assertFalse(deferred.status.completed)
+        assertEquals(PasswordDecision.Deferred, deferred.status.passwordDecision)
+
+        readiness = OnboardingReadiness.Ready
+        assertTrue(coordinator.status().completed)
+    }
+
+    @Test
+    fun `deferral persistence failure leaves password decision pending`() = runTest {
+        val store = RecordingOnboardingStateStore(
+            initial = OnboardingRecord(false, PasswordDecision.Pending),
+            writeSucceeds = false
+        )
+        val result = coordinator(store = store, hasDestination = true).deferPassword()
+
+        assertEquals(PasswordDeferralResult.PersistenceFailed, result)
+        assertEquals(OnboardingRecord(false, PasswordDecision.Pending), store.record)
+    }
+
+    @Test
+    fun `completed onboarding rejects password deferral`() = runTest {
+        val store = RecordingOnboardingStateStore(
+            OnboardingRecord(true, PasswordDecision.Deferred)
+        )
+
+        val result = coordinator(store = store, hasDestination = true).deferPassword()
+
+        assertEquals(PasswordDeferralResult.AlreadyCompleted, result)
+        assertEquals(0, store.writeCount)
+    }
+
+    @Test
     fun `readiness mapping exposes only consumer states`() {
         assertEquals(
             OnboardingReadiness.ActionNeededOnAndroid,
@@ -137,12 +203,16 @@ class OnboardingCoordinatorTest {
     ) : OnboardingStateStore {
         var record = initial
         var writeCount = 0
+        val writes = mutableListOf<OnboardingRecord>()
 
         override fun read(): OnboardingRecord? = record
 
         override fun write(record: OnboardingRecord): Boolean {
             writeCount += 1
-            if (writeSucceeds) this.record = record
+            if (writeSucceeds) {
+                writes += record
+                this.record = record
+            }
             return writeSucceeds
         }
     }

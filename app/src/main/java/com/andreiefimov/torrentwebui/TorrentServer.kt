@@ -70,6 +70,7 @@ object TorrentServer {
 
     /** Durable Consumer Onboarding authority — injected for authenticated boundary tests. */
     private var onboardingCoordinator: OnboardingCoordinator = OnboardingCoordinator.completedForTest()
+    private var recommendedDestinationOperations: RecommendedDestinationOperations? = null
 
     /** Applies the completion gate once to every normal torrent route. */
     private val onboardingTorrentGate = createRouteScopedPlugin("OnboardingTorrentGate") {
@@ -131,6 +132,14 @@ object TorrentServer {
                     this.daemonControl.storagePermissionState,
                     this.daemonControl.getDiagnostics().sessionStarted
                 )
+            }
+        )
+        recommendedDestinationOperations = RecommendedDestinationService(
+            volumes = { StorageVolumeService.listVolumes(appContext) },
+            fileSystem = RealDestinationFileSystem,
+            validate = { DirectoryValidationService.validate(appContext, it) },
+            approve = { canonicalPath ->
+                this.destinationCatalog?.addDestination(canonicalPath) == true
             }
         )
     }
@@ -296,16 +305,58 @@ object TorrentServer {
                     // ---- REST API: Consumer Onboarding ----
                     route("/api/onboarding") {
                         get("/status") {
-                            val status = try {
-                                onboardingCoordinator.status()
-                            } catch (_: Exception) {
-                                call.respond(
-                                    HttpStatusCode.ServiceUnavailable,
-                                    ErrorResponse("onboarding_state_unavailable")
-                                )
-                                return@get
-                            }
+                            val status = call.currentOnboardingStatus() ?: return@get
                             call.respond(status)
+                        }
+
+                        get("/recommended-destination") {
+                            call.requireReadyIncompleteOnboarding() ?: return@get
+                            when (val result = recommendedDestinationOperations?.proposal()) {
+                                is RecommendedDestinationResult.Success ->
+                                    call.respond(RecommendedDestinationResponse(result.path))
+                                is RecommendedDestinationResult.Failure -> call.respond(
+                                    HttpStatusCode.ServiceUnavailable,
+                                    ErrorResponse(result.reason)
+                                )
+                                null -> call.respond(
+                                    HttpStatusCode.ServiceUnavailable,
+                                    ErrorResponse("recommended_destination_unavailable")
+                                )
+                            }
+                        }
+
+                        post("/recommended-destination") {
+                            call.requireReadyIncompleteOnboarding() ?: return@post
+                            when (val result = recommendedDestinationOperations?.confirm()) {
+                                is RecommendedDestinationResult.Success ->
+                                    call.respond(AddDestinationResponse("ok", result.path))
+                                is RecommendedDestinationResult.Failure -> call.respond(
+                                    HttpStatusCode.InternalServerError,
+                                    ErrorResponse(result.reason)
+                                )
+                                null -> call.respond(
+                                    HttpStatusCode.ServiceUnavailable,
+                                    ErrorResponse("recommended_destination_unavailable")
+                                )
+                            }
+                        }
+
+                        post("/password/defer") {
+                            when (val result = onboardingCoordinator.deferPassword()) {
+                                is PasswordDeferralResult.Updated -> call.respond(result.status)
+                                PasswordDeferralResult.AlreadyCompleted -> call.respond(
+                                    HttpStatusCode.Conflict,
+                                    ErrorResponse("onboarding_already_completed")
+                                )
+                                PasswordDeferralResult.DecisionAlreadyRecorded -> call.respond(
+                                    HttpStatusCode.Conflict,
+                                    ErrorResponse("password_decision_already_recorded")
+                                )
+                                PasswordDeferralResult.PersistenceFailed -> call.respond(
+                                    HttpStatusCode.InternalServerError,
+                                    ErrorResponse("password_decision_not_saved")
+                                )
+                            }
                         }
                     }
 
@@ -971,17 +1022,32 @@ object TorrentServer {
             .replace("\t", "\\t")
     }
 
+    private suspend fun ApplicationCall.currentOnboardingStatus(): OnboardingStatus? = try {
+        onboardingCoordinator.status()
+    } catch (_: Exception) {
+        respond(
+            HttpStatusCode.ServiceUnavailable,
+            ErrorResponse("onboarding_state_unavailable")
+        )
+        null
+    }
+
+    private suspend fun ApplicationCall.requireReadyIncompleteOnboarding(): OnboardingStatus? {
+        val status = currentOnboardingStatus() ?: return null
+        if (status.completed) {
+            respond(HttpStatusCode.Conflict, ErrorResponse("onboarding_already_completed"))
+            return null
+        }
+        if (status.readiness != OnboardingReadiness.Ready) {
+            respond(HttpStatusCode.Conflict, ErrorResponse("onboarding_not_ready"))
+            return null
+        }
+        return status
+    }
+
     /** Rejects normal torrent mutations until durable Consumer Onboarding is complete. */
     private suspend fun ApplicationCall.requireCompletedOnboarding(): Boolean {
-        val status = try {
-            onboardingCoordinator.status()
-        } catch (_: Exception) {
-            respond(
-                HttpStatusCode.ServiceUnavailable,
-                ErrorResponse("onboarding_state_unavailable")
-            )
-            return false
-        }
+        val status = currentOnboardingStatus() ?: return false
         if (!status.completed) {
             respond(HttpStatusCode.Conflict, ErrorResponse("onboarding_incomplete"))
             return false
@@ -1021,12 +1087,14 @@ object TorrentServer {
         authManager: AuthManager,
         daemonControl: DaemonControl,
         assetReader: (String) -> String? = { null },
-        onboardingCoordinator: OnboardingCoordinator = OnboardingCoordinator.completedForTest()
+        onboardingCoordinator: OnboardingCoordinator = OnboardingCoordinator.completedForTest(),
+        recommendedDestinationOperations: RecommendedDestinationOperations? = null
     ) {
         this.authManager = authManager
         this.daemonControl = daemonControl
         this.assetReader = assetReader
         this.onboardingCoordinator = onboardingCoordinator
+        this.recommendedDestinationOperations = recommendedDestinationOperations
     }
 
     /** Resets test configuration to production defaults. Call after each test. */
@@ -1039,6 +1107,7 @@ object TorrentServer {
         this.daemonControl = TorrentSession
         this.assetReader = ::readAssetFromAssets
         this.onboardingCoordinator = OnboardingCoordinator.completedForTest()
+        this.recommendedDestinationOperations = null
     }
 
     /** Reads a file from Android assets. Returns null if the file doesn't exist. */
@@ -1153,6 +1222,9 @@ data class HealthResponse(val status: String)
 /** Error response with human-readable message. */
 @Serializable
 data class ErrorResponse(val error: String)
+
+@Serializable
+data class RecommendedDestinationResponse(val path: String)
 
 /** Request body for POST /api/settings/password */
 @Serializable

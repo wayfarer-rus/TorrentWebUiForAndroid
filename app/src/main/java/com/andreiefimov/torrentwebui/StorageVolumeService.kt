@@ -38,27 +38,27 @@ object StorageVolumeService {
             val storageManager = context.getSystemService(Context.STORAGE_SERVICE)
                 as? android.os.storage.StorageManager
 
+            val primaryPath = primaryStorageRoot()?.canonicalPath
             val volumeFiles: List<File> = if (storageManager != null && sdkInt >= android.os.Build.VERSION_CODES.N) {
                 discoverVolumeRoots(storageManager)
             } else {
-                // Fallback: primary external storage.
-                val primary = context.getExternalFilesDir(null)?.parentFile?.parentFile
-                listOfNotNull(primary)
+                listOfNotNull(primaryStorageRoot())
             }
 
             volumeFiles.filter { it.isDirectory && it.canRead() }.map { file ->
+                val canonicalPath = file.canonicalPath
                 StorageVolume(
-                    path = file.absolutePath,
+                    path = canonicalPath,
                     description = "",
                     isRemovable = false,
-                    isPrimary = file.absolutePath == context.getExternalFilesDir(null)?.parentFile?.parentFile?.absolutePath,
+                    isPrimary = canonicalPath == primaryPath,
                     isMounted = true
                 )
             }
         } catch (_: Exception) {
-            // Fallback: use the primary external storage directory.
-            val primary = context.getExternalFilesDir(null)?.parentFile?.parentFile
-            if (primary != null) listOf(StorageVolume(primary.absolutePath, isPrimary = true))
+            // Fallback: use Android's reported primary shared-storage root.
+            val primary = primaryStorageRoot()
+            if (primary != null) listOf(StorageVolume(primary.canonicalPath, isPrimary = true))
             else emptyList()
         }
     }
@@ -77,6 +77,13 @@ object StorageVolumeService {
     }
 
     // ---- Internal helpers ----
+
+    @Suppress("DEPRECATION")
+    private fun primaryStorageRoot(): File? = try {
+        android.os.Environment.getExternalStorageDirectory()
+    } catch (_: Exception) {
+        null
+    }
 
     /**
      * Discovers volume roots using reflection to avoid compile-time dependency on StorageVolume API.

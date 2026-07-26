@@ -181,7 +181,8 @@ _Avoid_: WebUI setting, onboarding setting
 
 ### Recommended Destination
 - The real canonical `<primary storage volume>/Download/Torrents` path proposed during Consumer Onboarding.
-- It becomes an Approved Destination only after user confirmation and backend validation.
+- Deriving and displaying the proposal does not create the directory.
+- It becomes an Approved Destination and Latest Selected Destination only after one confirmed backend operation creates any missing directories, validates the canonical result, and durably records it.
 _Avoid_: Default destination, storage alias
 
 ### Legacy Destination
