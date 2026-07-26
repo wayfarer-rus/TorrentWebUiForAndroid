@@ -24,8 +24,23 @@
 	type ProgressAlert = { type: 'alert'; alertType: string; message?: string };
 	type MoveStatus = { phase: string; sourcePath?: string | null; targetPath?: string | null };
 	type InterruptedMove = { torrentId: number; phase: string; targetPath?: string | null };
+	type OnboardingStatus = {
+		completed: boolean;
+		passwordDecision: 'pending' | 'deferred' | 'changed';
+		hasApprovedDestination: boolean;
+		readiness: 'Ready' | 'Action needed on Android' | 'Service unavailable';
+	};
+
+	const ONBOARDING_POLL_INTERVAL_MS = 2000;
+	const ONBOARDING_REQUEST_TIMEOUT_MS = 5000;
 
 	// --- State (Svelte 5 runes) ---
+	let onboardingStatus = $state<OnboardingStatus | null>(null);
+	let onboardingLoading = $state(true);
+	let onboardingError = $state('');
+	let onboardingPoll: ReturnType<typeof setTimeout> | null = null;
+	let onboardingRequest: AbortController | null = null;
+	let normalUiStarted = false;
 	let magnetUri = $state('');
 	let addError = $state('');
 	let wsConnected = $state(false);
@@ -64,6 +79,46 @@
 			throw new Error(body.error || `HTTP ${response.status}`);
 		}
 		return response.json();
+	}
+
+	function startNormalUi() {
+		if (normalUiStarted) return;
+		normalUiStarted = true;
+		connectWebSocket();
+		void loadTorrents();
+		void loadStorageState().then(loadInterruptedMoves);
+	}
+
+	function scheduleOnboardingPoll() {
+		if (onboardingPoll) clearTimeout(onboardingPoll);
+		onboardingPoll = setTimeout(() => void loadOnboardingStatus(), ONBOARDING_POLL_INTERVAL_MS);
+	}
+
+	async function loadOnboardingStatus() {
+		if (onboardingRequest) onboardingRequest.abort();
+		onboardingRequest = new AbortController();
+		const request = onboardingRequest;
+		const timeout = setTimeout(() => request.abort(), ONBOARDING_REQUEST_TIMEOUT_MS);
+		onboardingError = '';
+		try {
+			const status = await fetchJson<OnboardingStatus>('/api/onboarding/status', {
+				signal: request.signal
+			});
+			onboardingStatus = status;
+			if (status.completed) {
+				startNormalUi();
+			} else if (status.readiness !== 'Ready') {
+				scheduleOnboardingPoll();
+			}
+		} catch (error) {
+			onboardingError = request.signal.aborted
+				? 'The onboarding status request timed out. Try again.'
+				: error instanceof Error ? error.message : 'Unable to load onboarding status.';
+		} finally {
+			clearTimeout(timeout);
+			if (onboardingRequest === request) onboardingRequest = null;
+			onboardingLoading = false;
+		}
 	}
 
 	async function loadTorrents() {
@@ -526,12 +581,12 @@
 	}
 
 	onMount(() => {
-		connectWebSocket();
-		void loadTorrents();
-		void loadStorageState().then(loadInterruptedMoves);
+		void loadOnboardingStatus();
 	});
 
 	onDestroy(() => {
+		if (onboardingPoll) clearTimeout(onboardingPoll);
+		if (onboardingRequest) onboardingRequest.abort();
 		if (ws) ws.close();
 	});
 </script>
@@ -540,6 +595,38 @@
 	<title>Torrent WebUI</title>
 </svelte:head>
 
+{#if onboardingLoading && !onboardingStatus}
+	<main class="onboarding-shell" aria-busy="true">
+		<h1>Consumer Onboarding</h1>
+		<p>Checking whether downloads are ready…</p>
+	</main>
+{:else if onboardingStatus && !onboardingStatus.completed}
+	<main class="onboarding-shell">
+		<h1>Consumer Onboarding</h1>
+		{#if onboardingStatus.readiness === 'Action needed on Android'}
+			<h2>Action needed on Android</h2>
+			<p>Open the Android app and complete the requested device action.</p>
+		{:else if onboardingStatus.readiness === 'Service unavailable'}
+			<h2>Service unavailable</h2>
+			<p>The download service is not ready. Use the Android app to recover or restart it.</p>
+		{:else if !onboardingStatus.hasApprovedDestination}
+			<h2>Choose a download folder</h2>
+			<p>Downloads are ready. Continue by choosing where completed files will be stored.</p>
+		{:else if onboardingStatus.passwordDecision === 'pending'}
+			<h2>Password choice</h2>
+			<p>Choose whether to update the WebUI Password or set it later.</p>
+		{:else}
+			<h2>Finishing setup</h2>
+			<p>Your saved onboarding progress is being completed.</p>
+		{/if}
+	</main>
+{:else if onboardingError}
+	<main class="onboarding-shell">
+		<h1>Consumer Onboarding</h1>
+		<p class="error">{onboardingError}</p>
+		<a href="/">Try again</a>
+	</main>
+{:else}
 <div class="container">
 	<header>
 		<h1>Torrent WebUI</h1>
@@ -862,8 +949,35 @@
 		</div>
 	</div>
 {/if}
+{/if}
 
 <style>
+.onboarding-shell {
+	max-width: 640px;
+	margin: 4rem auto;
+	padding: 2rem;
+	background: var(--surface);
+	border: 1px solid var(--border);
+	border-radius: 12px;
+}
+
+.onboarding-shell h1 {
+	margin-bottom: 1.5rem;
+}
+
+.onboarding-shell h2 {
+	margin-bottom: 0.75rem;
+}
+
+.onboarding-shell p {
+	line-height: 1.5;
+}
+
+.onboarding-shell a {
+	display: inline-block;
+	margin-top: 1rem;
+}
+
 .modal-overlay {
 	position: fixed;
 	top: 0;

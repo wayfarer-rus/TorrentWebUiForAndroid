@@ -6,6 +6,8 @@ import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
 import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.application.Application
+import io.ktor.server.application.ApplicationCall
+import io.ktor.server.application.createRouteScopedPlugin
 import io.ktor.server.application.install
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.netty.Netty
@@ -21,7 +23,9 @@ import io.ktor.server.routing.route
 import io.ktor.server.routing.routing
 import io.ktor.server.websocket.WebSockets
 import io.ktor.server.websocket.webSocket
+import io.ktor.websocket.CloseReason
 import io.ktor.websocket.Frame
+import io.ktor.websocket.close
 import io.ktor.websocket.readText
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -64,6 +68,16 @@ object TorrentServer {
         override fun setPassword(newPassword: String) { password = newPassword }
     }
 
+    /** Durable Consumer Onboarding authority — injected for authenticated boundary tests. */
+    private var onboardingCoordinator: OnboardingCoordinator = OnboardingCoordinator.completedForTest()
+
+    /** Applies the completion gate once to every normal torrent route. */
+    private val onboardingTorrentGate = createRouteScopedPlugin("OnboardingTorrentGate") {
+        onCall { call ->
+            call.requireCompletedOnboarding()
+        }
+    }
+
     /**
      * Daemon control seam — injected for testability. Defaults to the production [TorrentSession].
      *
@@ -101,6 +115,29 @@ object TorrentServer {
     internal fun prepare(context: Context, authManager: AuthManager? = null) {
         appContext = context.applicationContext
         this.authManager = authManager ?: DefaultAuthManager(appContext)
+        onboardingCoordinator = OnboardingCoordinator(
+            store = SharedPreferencesOnboardingStateStore(appContext),
+            hasDurableQueue = {
+                this.queueStore?.loadQueueIntent()?.isNotEmpty() == true
+            },
+            hasApprovedDestination = {
+                this.destinationCatalog?.listDestinations()?.isNotEmpty() == true
+            },
+            hasNonDefaultPassword = {
+                this.authManager.getPassword() != WebUiCredentials.DEFAULT_PASSWORD
+            },
+            readiness = {
+                mapOnboardingReadiness(
+                    this.daemonControl.storagePermissionState,
+                    this.daemonControl.getDiagnostics().sessionStarted
+                )
+            }
+        )
+    }
+
+    /** Initializes the durable first-M6 marker before Ktor accepts any request. */
+    internal suspend fun initializeOnboarding() {
+        onboardingCoordinator.status()
     }
 
     /** Creates one Ktor engine; lifecycle ownership remains in [WebUiServerController]. */
@@ -171,6 +208,16 @@ object TorrentServer {
                 // WebSocket: live torrent progress plus alerts fanned out by AlertDispatcher.
                 // AlertDispatcher remains the sole native-alert consumer; every frame is one JSON value.
                 webSocket("/ws/progress") {
+                    val onboarding = try {
+                        onboardingCoordinator.status()
+                    } catch (_: Exception) {
+                        close(CloseReason(CloseReason.Codes.INTERNAL_ERROR, "onboarding_state_unavailable"))
+                        return@webSocket
+                    }
+                    if (!onboarding.completed) {
+                        close(CloseReason(CloseReason.Codes.VIOLATED_POLICY, "onboarding_incomplete"))
+                        return@webSocket
+                    }
                     Log.i(TAG, "Authenticated WebSocket client connected")
 
                     val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
@@ -244,6 +291,22 @@ object TorrentServer {
                         val uri = call.request.local.uri
                         Log.i(TAG, "=== FALLBACK ROUTE MATCHED === URI: $uri")
                         call.respondText("Fallback: $uri", ContentType.Text.Plain)
+                    }
+
+                    // ---- REST API: Consumer Onboarding ----
+                    route("/api/onboarding") {
+                        get("/status") {
+                            val status = try {
+                                onboardingCoordinator.status()
+                            } catch (_: Exception) {
+                                call.respond(
+                                    HttpStatusCode.ServiceUnavailable,
+                                    ErrorResponse("onboarding_state_unavailable")
+                                )
+                                return@get
+                            }
+                            call.respond(status)
+                        }
                     }
 
                     // ---- REST API: storage (Milestone 4) ----
@@ -352,7 +415,9 @@ object TorrentServer {
 
                         // GET /api/storage/permission — returns current storage permission state.
                         get("/permission") {
-                            TorrentServer.daemonControl.refreshStoragePermissionState(appContext)
+                            if (::appContext.isInitialized) {
+                                TorrentServer.daemonControl.refreshStoragePermissionState(appContext)
+                            }
                             val state = TorrentServer.daemonControl.storagePermissionState
                             call.respond(StoragePermissionResponse(state.name))
                         }
@@ -380,6 +445,8 @@ object TorrentServer {
 
                     // ---- REST API: torrent management ----
                     route("/api/torrents") {
+                        install(onboardingTorrentGate)
+
                         // POST /api/torrents/magnet — add a new torrent by magnet URI.
                         post("/magnet") {
                             val body = try {
@@ -904,6 +971,24 @@ object TorrentServer {
             .replace("\t", "\\t")
     }
 
+    /** Rejects normal torrent mutations until durable Consumer Onboarding is complete. */
+    private suspend fun ApplicationCall.requireCompletedOnboarding(): Boolean {
+        val status = try {
+            onboardingCoordinator.status()
+        } catch (_: Exception) {
+            respond(
+                HttpStatusCode.ServiceUnavailable,
+                ErrorResponse("onboarding_state_unavailable")
+            )
+            return false
+        }
+        if (!status.completed) {
+            respond(HttpStatusCode.Conflict, ErrorResponse("onboarding_incomplete"))
+            return false
+        }
+        return true
+    }
+
     /**
      * Detects the MIME content type based on file extension.
      */
@@ -935,11 +1020,13 @@ object TorrentServer {
     internal fun configureForTest(
         authManager: AuthManager,
         daemonControl: DaemonControl,
-        assetReader: (String) -> String? = { null }
+        assetReader: (String) -> String? = { null },
+        onboardingCoordinator: OnboardingCoordinator = OnboardingCoordinator.completedForTest()
     ) {
         this.authManager = authManager
         this.daemonControl = daemonControl
         this.assetReader = assetReader
+        this.onboardingCoordinator = onboardingCoordinator
     }
 
     /** Resets test configuration to production defaults. Call after each test. */
@@ -951,6 +1038,7 @@ object TorrentServer {
         }
         this.daemonControl = TorrentSession
         this.assetReader = ::readAssetFromAssets
+        this.onboardingCoordinator = OnboardingCoordinator.completedForTest()
     }
 
     /** Reads a file from Android assets. Returns null if the file doesn't exist. */

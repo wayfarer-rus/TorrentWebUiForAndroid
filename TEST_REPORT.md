@@ -447,3 +447,19 @@ The daemon-owned `WebUiPortCoordinator` now validates `1024–65535`, synchronou
 | `PasswordResetPersistenceTest` | COMPILED, NOT RUN — verifies that existing and reconstructed `DefaultAuthManager` instances observe the reset. The visible API 36 AVD did not become ADB-ready within the bounded attempt, so the blocking boot wait was aborted and no emulator pass is claimed. |
 
 Android renders one confirmed `Reset WebUI Password` recovery action and no current/replacement password fields. `PasswordResetController` writes only the canonical default through the same `DefaultAuthManager` read by Ktor on every authentication check; it has no daemon, WebUI-server, or native-session lifecycle dependency and performs no sensitive logging.
+
+## Milestone 6: Consumer Onboarding — Ticket 04
+
+**Status:** PASS for current-tree JVM/Ktor, browser, static-regression, and Android-test compilation. No current-tree emulator or physical-device result is claimed.
+
+| Validation | Result |
+|---|---|
+| `OnboardingCoordinatorTest` red/green cycles | PASS — unused and established first-M6 classification, queue/destination/non-default-Password migration evidence, incomplete-marker precedence, durable completion, failed marker persistence, and consumer-only readiness mapping. |
+| `OnboardingApiTest` authenticated Ktor boundary | PASS — status authentication/shape, allowed storage recovery status, `409 onboarding_incomplete` across normal torrent reads and every mutation, and completed-installation bypass of the onboarding gate. |
+| `npm run test:e2e:m6:onboarding` | PASS — 3 Playwright tests cover hidden normal controls, bounded 5-second requests, 2-second readiness polling, automatic advancement, refresh/resume, and completed-installation normal UI startup. |
+| `./gradlew :app:testDebugUnitTest :app:assembleDebug :app:compileDebugAndroidTestKotlin --console=plain` | PASS — 190 JVM tests, 0 failures/errors/skips; debug APK assembled; Android tests compiled. |
+| `OnboardingPersistenceTest` | COMPILED, NOT RUN — Android SharedPreferences coverage verifies reconstructed incomplete-marker precedence and established-queue migration. |
+| `npm run check` | PASS — 0 errors and 37 existing warnings in the Svelte page. |
+| `npm run test:e2e:m4:static` | PASS. |
+
+The daemon initializes the durable onboarding marker before Ktor binds. The authenticated status exposes only completion, Password Decision, Approved Destination presence, and Onboarding Readiness; technical health remains outside this response. Incomplete installations render only Consumer Onboarding, while normal torrent REST/WebSocket access is gated and onboarding-required storage, Password, and Android recovery surfaces remain available.

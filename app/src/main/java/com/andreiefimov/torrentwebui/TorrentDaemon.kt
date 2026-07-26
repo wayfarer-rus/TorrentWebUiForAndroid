@@ -348,6 +348,13 @@ class TorrentDaemon : Service() {
             return
         }
         TorrentServer.prepare(applicationContext)
+        try {
+            runBlocking(Dispatchers.IO) { TorrentServer.initializeOnboarding() }
+        } catch (_: Exception) {
+            recordRecoverableError("WebUI setup state could not be initialized. Restart the app to retry.")
+            android.util.Log.e(TAG, "WebUI setup state initialization failed")
+            return
+        }
         val status = webUiPortCoordinator.startConfigured()
         currentWebUiPortStatus.set(status)
         if (status.effectivePort == null) {

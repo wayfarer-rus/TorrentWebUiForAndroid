@@ -47,7 +47,21 @@ _Avoid_: Android onboarding, permission onboarding
 
 ### Onboarding Readiness
 - The non-technical Consumer Onboarding state reported as **Ready**, **Action needed on Android**, or **Service unavailable**.
+- It exists only while the WebUI is reachable and never describes pre-bootstrap or WebUI bind failures.
 _Avoid_: Daemon health, diagnostics
+
+### Onboarding Completion
+- The durable fact that Consumer Onboarding has been completed for an installation.
+- Once established, later permission, storage, destination, or daemon failures never make the installation first-use again.
+_Avoid_: Current readiness, browser-local completion
+
+### Password Decision
+- The durable Consumer Onboarding choice: **pending**, **changed**, or **deferred**.
+- **Pending** is unresolved; **changed** and **deferred** can satisfy the Password step.
+
+### Onboarding Marker
+- The durable evidence that first-use migration has already classified an installation.
+- An existing incomplete marker always wins over queue, destination, or Password evidence discovered later, preserving interrupted setup progress.
 
 ## Android UI
 

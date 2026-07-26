@@ -93,6 +93,7 @@ scripts/
 - **`TorrentSession`** is the sole Kotlin JNI entry point while native code owns libtorrent objects.
 - **`QueueStore`**, **`DestinationCatalog`**, and **`MoveJournal`** are the durable authority consumed by both Android fallback state and authenticated WebUI/API responses.
 - **`DefaultAuthManager`** is the single durable WebUI Password authority shared by Ktor authentication, WebUI password changes, and Android-local recovery. **`PasswordResetController`** owns only confirmation state and the fixed reset to `start123`; it accepts no password input and has no daemon, server, or native-session lifecycle access.
+- **`OnboardingCoordinator`** owns the durable first-M6 marker, one-time established-installation migration, Password Decision, and consumer-only Onboarding Readiness projection. The daemon initializes this state before Ktor binds so later queue, destination, or Password changes cannot be mistaken for pre-existing migration evidence.
 - Recovery validates queue/journal records and storage availability before native work. Corrupt journals fail closed; unavailable destinations enter native recovery paused from the first instant.
 
 ## Queue Persistence (M3)
@@ -116,6 +117,7 @@ scripts/
 
 ## Authenticated WebUI/API (M3/M4)
 
+- Authenticated **`GET /api/onboarding/status`** returns only durable completion, Password Decision, Approved Destination presence, and consumer-level Onboarding Readiness. Before completion, normal torrent REST reads/mutations are rejected with `409 onboarding_incomplete`, authenticated WebSockets close with a policy violation, and storage/Password/Android recovery operations remain available.
 - **`GET /api/daemon/health`** returns non-sensitive daemon lifecycle/recovery state; **`POST /api/daemon/stop`** performs shared safe stop.
 - Authenticated storage routes expose permission state, validated volume roots/canonical directories, approved destinations, latest selection, per-torrent destination availability, and move status/retry/cancel.
 - Torrent REST and WebSocket snapshots resolve canonical destinations from the durable queue, not transient native paths.
