@@ -62,8 +62,11 @@ export function createAndroidUi({ adb, serial, packageName }) {
 		return waitForNode(/<node[^>]*checkable="true"[^>]*clickable="true"[^>]*>/, 'All Files Access switch');
 	}
 
-	async function setAllFilesAccess(enabled) {
-		let node = await openAllFilesSettings();
+	async function setCurrentAllFilesAccess(enabled) {
+		let node = await waitForNode(
+			/<node[^>]*checkable="true"[^>]*clickable="true"[^>]*>/,
+			'open All Files Access switch'
+		);
 		assert.match(node, /enabled="true"/, 'All Files Access switch is disabled.');
 		const checked = /checked="true"/.test(node);
 		if (checked !== enabled) {
@@ -76,6 +79,11 @@ export function createAndroidUi({ adb, serial, packageName }) {
 		}
 		assert.equal(/checked="true"/.test(node), enabled);
 		run('shell', 'input', 'keyevent', 'KEYCODE_BACK');
+	}
+
+	async function setAllFilesAccess(enabled) {
+		await openAllFilesSettings();
+		await setCurrentAllFilesAccess(enabled);
 	}
 
 	async function launchApp() {
@@ -149,7 +157,8 @@ export function createAndroidUi({ adb, serial, packageName }) {
 	}
 
 	return {
-		run, hierarchy, tapText, setAllFilesAccess, launchApp,
+		run, hierarchy, waitForNode, tapText, grantNotificationIfRequested,
+		setCurrentAllFilesAccess, setAllFilesAccess, launchApp,
 		enterRuntimeRevokedApp, restoreAfterRuntimeRevocation, assertStartupDenialAndRestore
 	};
 }

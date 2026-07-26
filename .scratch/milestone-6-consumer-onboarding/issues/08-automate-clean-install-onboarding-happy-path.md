@@ -4,14 +4,14 @@
 
 **Blocked by:** 05 — Complete the recommended onboarding path.
 
-**Status:** ready-for-agent
+**Status:** implemented
 
-- [ ] The scenario starts from cleared application data without shell-granting Android permissions.
-- [ ] The browser authenticates, observes Onboarding Readiness, confirms the backend-derived Recommended Destination, chooses **Set it later**, and reaches the normal WebUI.
-- [ ] Timing begins at the first actionable Android Startup Bootstrap screen and ends at the authenticated normal WebUI.
-- [ ] Normal setup completes in under three minutes, excluding tool installation and fixture provisioning.
-- [ ] Rendered onboarding and recurring post-onboarding content never contain `start123`.
-- [ ] The approved path exactly matches the ADB-observed canonical filesystem path.
-- [ ] Completion survives browser refresh, daemon restart, and reopening MainActivity.
-- [ ] Teardown stops the daemon/server and removes test data, durable queue/onboarding state, recovery records, credentials, fixtures, virtual storage, and forwarding.
-- [ ] The scenario records emulator-only evidence and makes no physical-device LAN claim.
+- [x] The scenario starts from cleared application data without shell-granting Android permissions.
+- [x] The browser authenticates, observes Onboarding Readiness, confirms the backend-derived Recommended Destination, chooses **Set it later**, and reaches the normal WebUI.
+- [x] Timing begins at the first actionable Android Startup Bootstrap screen and ends at the authenticated normal WebUI.
+- [x] Normal setup completes in under three minutes, excluding tool installation and fixture provisioning.
+- [x] Rendered onboarding and recurring post-onboarding content never contain `start123`.
+- [x] The approved path exactly matches the ADB-observed canonical filesystem path.
+- [x] Completion survives browser refresh, daemon restart, and reopening MainActivity.
+- [x] Teardown stops the daemon/server and removes test data, durable queue/onboarding state, recovery records, credentials, fixtures, virtual storage, and forwarding.
+- [x] The scenario records emulator-only evidence and makes no physical-device LAN claim.

@@ -10,6 +10,8 @@
     "copy-assets": "npm run build && mv build/_app build/app-build && sed -i '' 's|/_app/|/app-build/|g' build/index.html && rm -rf ../app/src/main/assets/www && mkdir -p ../app/src/main/assets/www && cp -r build/* ../app/src/main/assets/www/",
     "test:e2e:m4:static": "node --check e2e/m4-official-torrents.mjs && node --check e2e/m4-live.mjs && node --check e2e/m4-runner.mjs && node --test e2e/m4-private-state.test.mjs e2e/m4-official-torrents.test.mjs",
     "test:e2e:m6:onboarding": "npm run build && playwright test --config=playwright.m6.config.mjs",
+    "test:e2e:m6:clean-install:policy": "node --check e2e/m6-clean-install-runner.mjs && node --test e2e/m6-clean-install-policy.test.mjs",
+    "e2e:m6:clean-install": "npm run copy-assets && cd .. && ./gradlew :app:assembleDebug --console=plain && cd web && node e2e/m6-clean-install-runner.mjs",
     "e2e:m4:runner": "node e2e/m4-runner.mjs",
     "e2e:m4:live": "npm run copy-assets && cd .. && ./gradlew :app:installDebug --console=plain && cd web && node e2e/m4-runner.mjs",
     "e2e:m4:official-live": "M4_OFFICIAL_TORRENT_SMOKE=true npm run e2e:m4:live"

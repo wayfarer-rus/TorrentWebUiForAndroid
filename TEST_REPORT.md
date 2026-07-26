@@ -512,3 +512,22 @@ Consumer Onboarding now renders the same Directory Browser snippet used by the n
 | `npm run test:e2e:m4:static` | PASS. |
 
 `AuthManager` writes now return synchronous durable success. The onboarding endpoint accepts only a new Password, applies the shared minimum-length policy, persists it before recording **changed**, and never logs it. Successful change reloads the full page for HTTP Basic reauthentication; durable backend progress survives an interrupted handoff. The normal settings endpoint still requires the current and new values.
+
+## Milestone 6: Consumer Onboarding — Ticket 08
+
+**Status:** PASS on the isolated `emulator_skill` AVD. This is emulator-only evidence; no physical-device or separate-LAN-browser claim is made.
+
+| Validation | Result |
+|---|---|
+| Environment | PASS — visible cold boot of `emulator_skill`, Android API 36, `arm64-v8a`; the runner refused physical/non-isolated devices. |
+| `npm run e2e:m6:clean-install` | PASS — rebuilt/copied packaged Svelte assets, assembled and installed the real debug APK, uninstalled/cleared prior application state, and completed the owned scenario. No shell permission grant/app-op command was used. |
+| Visible Android Startup Bootstrap | PASS — the runner observed the first actionable permission screen, selected notification permission and All Files Access through UI-hierarchy bounds, then observed storage **Ready**, `Session started=yes`, JNI/libtorrent-backed readiness, and Ktor on default device port `8080`. |
+| Authenticated Chromium journey | PASS — HTTP Basic authentication loaded the packaged WebUI; readiness was **Ready**; the backend-derived recommendation was confirmed; **Set it later** reached the normal WebUI. Rendered onboarding and recurring normal content did not contain the default Password. |
+| Timing | PASS — 12,965 ms from the first actionable Android bootstrap screen to authenticated normal WebUI, below the 180,000 ms limit. Build/install and fixture preparation were excluded. |
+| Canonical storage evidence | PASS — authenticated WebUI path and `adb shell readlink -f` both returned `/storage/emulated/0/Download/Torrents`. |
+| Durable completion | PASS — normal WebUI remained available after browser refresh and after authenticated daemon stop, MainActivity reopen, explicit Android **Start downloads**, JNI/session restart, Ktor restart, and browser reload. |
+| Teardown audit | PASS — daemon process stopped; port `8080` listener absent; ADB forwarding absent; Recommended Destination fixture absent; queue/catalog/onboarding/auth/recovery private state absent; virtual storage disabled. The emulator was then shut down and ADB reported no connected device. |
+| `npm run test:e2e:m6:clean-install:policy` | PASS — 7 tests cover the strict three-minute budget, rendered default-Password prohibition, exact canonical comparison, exclusive ADB-forward ownership, all-app-process sensitive log auditing, forbidden shell permission grants, and complete fail-closed teardown evidence. |
+| Current-tree regression suite | PASS — 218 JVM tests; debug APK assembly; Android-test compilation; 7 Playwright onboarding tests; Svelte check with 0 errors/42 warnings; M4 static regression. |
+
+The host-owned runner records only explicit emulator diagnostics, never claims physical LAN coverage, and tears down in `finally` even on failure. Its only shared-storage fixture is the empty Recommended Destination created by the product; cleanup uses `rmdir` and refuses pre-existing content.

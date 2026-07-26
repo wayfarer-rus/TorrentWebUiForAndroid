@@ -167,6 +167,12 @@ scripts/
 - All Files Access loss keeps an authenticated permission-blocked WebUI available while native storage work is stopped. Restoration never auto-resumes storage-safety-paused torrents.
 - Automated M4 acceptance uses a real API 36 AVD, JNI/libtorrent, Ktor, authenticated browser traffic over owned ADB forwarding, deterministic fixtures, and teardown verification. Physical-device deployment validation remains optional and unperformed.
 
+## Milestone 6 Consumer Onboarding Acceptance
+
+- `m6-clean-install-runner.mjs` owns the bounded clean-install happy path across the visible Android permission UI, daemon/JNI startup, default-port Ktor listener, packaged WebUI, Chromium HTTP Basic authentication, Recommended Destination creation, and Password deferral.
+- The runner refuses physical devices and non-isolated AVDs, forbids shell permission grants, starts timing at the first actionable Android bootstrap screen, compares the backend path with ADB canonical filesystem evidence, and fail-closes every teardown audit.
+- Completion is rechecked after browser refresh and an explicit daemon stop/restart through reopened MainActivity. Teardown stops the daemon/server and removes the created folder, application state, recovery records, credential state, virtual storage, and ADB forwarding.
+
 ## Known Limitations
 
 - **No encryption/HTTPS tracker support.** OpenSSL disabled.
