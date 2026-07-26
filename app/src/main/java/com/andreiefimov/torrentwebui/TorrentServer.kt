@@ -58,7 +58,6 @@ object TorrentServer {
         encodeDefaults = true
     }
 
-    private var server: Any? = null
     private lateinit var appContext: Context
 
     /** Auth manager — injected for testability. */
@@ -101,29 +100,31 @@ object TorrentServer {
     internal var queueBindings: QueueRuntimeBindings? = null
     internal var durableOperations: DurableTorrentOperations? = null
 
-    /**
-     * Starts the Ktor server on [PORT] bound to 0.0.0.0.
-     * Must be called before [stop]. Safe to call multiple times (idempotent).
-     *
-     * @param authManager optional auth manager; defaults to [DefaultAuthManager] backed by SharedPreferences.
-     */
-    fun start(context: Context, authManager: AuthManager? = null) {
-        if (isRunning()) {
-            Log.i(TAG, "Server already running on port $PORT")
-            return
-        }
-
+    /** Prepares shared WebUI dependencies before the daemon starts a server engine. */
+    internal fun prepare(context: Context, authManager: AuthManager? = null) {
         appContext = context.applicationContext
         this.authManager = authManager ?: DefaultAuthManager(appContext)
-        Log.i(TAG, "Starting Ktor server on http://0.0.0.0:$PORT")
+    }
 
+    /** Creates one Ktor engine; lifecycle ownership remains in [WebUiServerController]. */
+    internal fun createEngine(port: Int): WebUiServerEngine {
         // Use a lambda instead of top-level module function — Ktor's module function
         // discovery uses reflection and fails on Android (dex transformation).
-        val eng = embeddedServer(Netty, PORT, "0.0.0.0", listOf()) { configureApplication(this) }
-        eng.start(wait = false)
-        server = eng
+        val engine = embeddedServer(Netty, port, "0.0.0.0", listOf()) {
+            configureApplication(this)
+        }
+        return object : WebUiServerEngine {
+            override fun start() {
+                Log.i(TAG, "Starting Ktor server on http://0.0.0.0:$port")
+                engine.start(wait = false)
+                Log.i(TAG, "Ktor server started successfully")
+            }
 
-        Log.i(TAG, "Ktor server started successfully")
+            override fun stop() {
+                engine.stop()
+                Log.i(TAG, "Ktor server stopped")
+            }
+        }
     }
 
     /**
@@ -926,18 +927,6 @@ object TorrentServer {
             else -> ContentType.Application.OctetStream
         }
     }
-
-    /** Stops the Ktor server. Safe to call if not running. */
-    fun stop() {
-        @Suppress("UNCHECKED_CAST")
-        val s = server as? io.ktor.server.engine.EmbeddedServer<Any, Any>
-        s?.stop()
-        server = null
-        Log.i(TAG, "Ktor server stopped")
-    }
-
-    /** Returns true if the server is currently running. */
-    fun isRunning(): Boolean = server != null
 
     /** Asset reader function — overridable for unit tests. */
     internal var assetReader: (String) -> String? = ::readAssetFromAssets

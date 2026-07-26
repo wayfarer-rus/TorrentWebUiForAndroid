@@ -220,6 +220,7 @@ class TorrentDaemon : Service() {
     private var daemonControl: DaemonControl? = null
     private var queueStore: QueueStore? = null
     private var notificationManager: NotificationManager? = null
+    private val webUiServerController = WebUiServerController(TorrentServer::createEngine)
 
     /** Current daemon lifecycle state. */
     private val currentState = AtomicReference(DaemonState.Stopped)
@@ -272,7 +273,7 @@ class TorrentDaemon : Service() {
                         recordRecoverableError("Storage safety transition did not complete; retry after restarting the app.")
                         return@launch
                     }
-                    leavePermissionBlockedMode()
+                    if (!leavePermissionBlockedMode()) return@launch
                     startDaemonIfInactive(userInitiated)
                 }
                 return
@@ -281,7 +282,7 @@ class TorrentDaemon : Service() {
                 recordRecoverableError("Storage safety transition did not complete; retry after restarting the app.")
                 return
             }
-            if (permissionBlockedMode) leavePermissionBlockedMode()
+            if (permissionBlockedMode && !leavePermissionBlockedMode()) return
         }
         val decision = synchronized(lifecycleLock) {
             startCoalescer.onStart(currentState.get(), userInitiated)
@@ -293,8 +294,21 @@ class TorrentDaemon : Service() {
         }
     }
 
-    private fun leavePermissionBlockedMode() {
-        TorrentServer.stop()
+    private fun startWebUiServer() {
+        if (webUiServerController.isRunning) {
+            android.util.Log.i(TAG, "WebUI server already running on port ${TorrentServer.PORT}")
+            return
+        }
+        TorrentServer.prepare(applicationContext)
+        webUiServerController.start(TorrentServer.PORT)
+    }
+
+    private fun leavePermissionBlockedMode(): Boolean {
+        if (!stopWebUiServer()) {
+            permissionTransitionFailed = true
+            recordRecoverableError("WebUI shutdown did not complete; retry after restarting the app.")
+            return false
+        }
         val blockedControl = daemonControl
         if (blockedControl === PermissionBlockedDaemonControl) blockedControl.destroy()
         permissionBlockedMode = false
@@ -302,6 +316,15 @@ class TorrentDaemon : Service() {
         daemonControl = null
         currentState.set(DaemonState.Stopped)
         currentDaemonState = DaemonState.Stopped
+        return true
+    }
+
+    private fun stopWebUiServer(): Boolean {
+        repeat(2) { attempt ->
+            if (webUiServerController.stop() == WebUiServerStopResult.Stopped) return true
+            android.util.Log.w(TAG, "WebUI server shutdown requires retry ${attempt + 1}")
+        }
+        return false
     }
 
     private fun startPermissionBlockedMode() {
@@ -348,7 +371,6 @@ class TorrentDaemon : Service() {
             }
             daemonControl = null
             AlertDispatcher.stop()
-            TorrentServer.stop()
             val mayPublish = synchronized(lifecycleLock) {
                 permissionTransitionGuard.isCurrent(generation) &&
                     !StoragePermissionChecker.isGranted(applicationContext)
@@ -363,7 +385,12 @@ class TorrentDaemon : Service() {
             TorrentServer.durableOperations = null
             TorrentServer.moveJournal = MoveJournal(applicationContext)
             TorrentServer.moveService = null
-            TorrentServer.start(applicationContext)
+            if (!stopWebUiServer()) {
+                permissionTransitionFailed = true
+                recordRecoverableError("WebUI storage-safety transition did not complete; restart the app before continuing.")
+                return@launch
+            }
+            startWebUiServer()
             android.util.Log.w(TAG, "Authenticated WebUI running in storage-permission-required mode")
         }
         synchronized(lifecycleLock) { permissionTransitionJob = transition }
@@ -497,8 +524,8 @@ class TorrentDaemon : Service() {
         // move completion/failure cannot be consumed without advancing the journal.
         AlertDispatcher.start()
 
-        // Start the Ktor WebUI server
-        TorrentServer.start(applicationContext)
+        // Start the Ktor WebUI server without coupling it to native-session ownership.
+        startWebUiServer()
 
         // Start as foreground service with notification (MUST be called within 5 seconds of startForegroundService)
         val notification = buildNotification()
@@ -529,7 +556,7 @@ class TorrentDaemon : Service() {
         currentState.set(DaemonState.RecoveryBlocked)
         currentDaemonState = DaemonState.RecoveryBlocked
         recordRecoverableError("Durable move recovery is blocked. Preserve state and use explicit acceptance teardown or operator recovery.")
-        TorrentServer.start(applicationContext)
+        startWebUiServer()
         startForeground(NOTIFICATION_ID, buildNotification())
         android.util.Log.e(TAG, "Move journal validation blocked native recovery")
     }
@@ -552,6 +579,15 @@ class TorrentDaemon : Service() {
         checkpointJob?.cancel()
 
         val control = daemonControl ?: run {
+            if (!stopWebUiServer()) {
+                recordRecoverableError("WebUI shutdown did not complete; retry Stop downloads.")
+                synchronized(lifecycleLock) {
+                    startCoalescer.takePendingAfterStop(stopSucceeded = false)
+                    currentState.set(DaemonState.RecoveryBlocked)
+                    currentDaemonState = DaemonState.RecoveryBlocked
+                }
+                return
+            }
             val pendingStart = synchronized(lifecycleLock) {
                 cleanupAndStop()
                 startCoalescer.takePendingAfterStop(stopSucceeded = true)
@@ -612,7 +648,15 @@ class TorrentDaemon : Service() {
                 return@launch
             }
             this@TorrentDaemon.daemonControl = null
-            TorrentServer.stop()
+            if (!stopWebUiServer()) {
+                recordRecoverableError("Torrent engine stopped, but WebUI shutdown requires another Stop downloads request.")
+                synchronized(lifecycleLock) {
+                    startCoalescer.takePendingAfterStop(stopSucceeded = false)
+                    currentState.set(DaemonState.RecoveryBlocked)
+                    currentDaemonState = DaemonState.RecoveryBlocked
+                }
+                return@launch
+            }
 
             val pendingStart = synchronized(lifecycleLock) {
                 cleanupAndStop()
@@ -1113,7 +1157,9 @@ class TorrentDaemon : Service() {
         recoveryJob?.cancel()
         moveEventJobs.cancel()
         daemonScope.coroutineContext[Job]?.cancel()
-        TorrentServer.stop()
+        if (!stopWebUiServer()) {
+            android.util.Log.e(TAG, "WebUI server shutdown remained incomplete during service destruction")
+        }
         daemonControl?.destroy()
         TorrentServer.queueBindings?.clear()
     }

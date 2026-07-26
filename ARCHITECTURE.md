@@ -36,6 +36,7 @@ app/
     java/.../
       MainActivity.kt       # Minimal permission/service-health fallback UI
       TorrentDaemon.kt      # Foreground owner of native session, Ktor, and recovery
+      WebUiServerController.kt # Swappable active/candidate Ktor lifecycle seam
       TorrentServer.kt      # Authenticated WebUI/API using the shared backend model
       TorrentSession.kt     # Sole Kotlin JNI entry point (implements DaemonControl)
       TorrentViewModel.kt   # Android fallback state; does not own the native lifecycle
@@ -84,6 +85,8 @@ scripts/
 ## Daemon and Storage Control Seam (M3/M4)
 
 - **`TorrentDaemon`** is the production lifecycle owner for the native session, alert dispatcher, durable recovery, and Ktor server; Activity/ViewModel cleanup never destroys daemon-owned native state.
+- **`WebUiServerController`** is daemon-owned and isolates Ktor engine lifecycle from native-session ownership. It can bind one candidate beside the active server, then promote or discard it without restarting or destroying libtorrent; shutdown is idempotent after success, and failed engine stops retain ownership for retry.
+- **`TorrentServer`** configures authenticated WebUI/API routes and creates Ktor engines but does not own their lifecycle.
 - **`DaemonControl`** unifies lifecycle and small typed torrent operations. `TorrentAddRequest` carries a canonical destination and initial pause policy; move/rollback/verification remain narrow JNI calls.
 - **`TorrentSession`** is the sole Kotlin JNI entry point while native code owns libtorrent objects.
 - **`QueueStore`**, **`DestinationCatalog`**, and **`MoveJournal`** are the durable authority consumed by both Android fallback state and authenticated WebUI/API responses.
