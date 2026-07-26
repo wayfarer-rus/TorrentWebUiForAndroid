@@ -250,13 +250,23 @@
 		if (browsedPath) validatePath(browsedPath);
 	}
 
-	function approveValidatedPath() {
-		const canonicalPath = pathValidation?.canonicalPath;
-		if (canonicalPath) approveDestination(canonicalPath);
+	async function toggleDirectoryBrowser() {
+		showBrowser = !showBrowser;
+		pathValidation = null;
+		onboardingActionError = '';
+		if (showBrowser && volumes.length === 0) await loadStorageState();
 	}
 
-	async function approveDestination(canonicalPath: string) {
-		storageError = '';
+	async function approveDestination(
+		canonicalPath: string,
+		surface: 'normal' | 'onboarding' = 'normal'
+	) {
+		if (surface === 'onboarding') {
+			onboardingActionLoading = true;
+			onboardingActionError = '';
+		} else {
+			storageError = '';
+		}
 		try {
 			const approved = await fetchJson(
 				`/api/storage/destinations/${encodeURIComponent(canonicalPath)}`,
@@ -264,9 +274,15 @@
 			);
 			pathValidation = null;
 			pastedPath = '';
-			await loadStorageState(approved.path);
-		} catch (e) {
-			storageError = e instanceof Error ? e.message : 'Unable to approve this folder';
+			showBrowser = false;
+			if (surface === 'onboarding') await loadOnboardingStatus();
+			else await loadStorageState(approved.path);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : 'Unable to approve this folder.';
+			if (surface === 'onboarding') onboardingActionError = message;
+			else storageError = message;
+		} finally {
+			if (surface === 'onboarding') onboardingActionLoading = false;
 		}
 	}
 
@@ -651,6 +667,75 @@
 	<title>Torrent WebUI</title>
 </svelte:head>
 
+{#snippet directoryBrowser(onApproved: (path: string) => Promise<void>)}
+	<button class="secondary-button" on:click={toggleDirectoryBrowser}>
+		{showBrowser ? 'Hide folder browser' : 'Choose another folder'}
+	</button>
+
+	{#if showBrowser}
+		<div class="folder-browser">
+			{#if storageLoading}
+				<p>Loading available folders…</p>
+			{:else if !storageReady}
+				<p class="storage-guidance">Storage access needs attention in the Android app.</p>
+			{:else}
+				<h3>Storage roots</h3>
+				<div class="path-buttons">
+					{#each volumes as volume}
+						<button class="path-button" on:click={() => browseDirectory(volume.path)}>
+							{#if volume.description}<span>{volume.description}</span>{/if}
+							<code>{volume.path}</code>
+						</button>
+					{/each}
+				</div>
+
+				{#if browsedPath}
+					<div class="browser-current">
+						<p>Current folder</p>
+						<code>{browsedPath}</code>
+						<button on:click={validateBrowsedPath} disabled={validatingPath}>Check this folder</button>
+					</div>
+					<h3>Child folders</h3>
+					{#if children.length === 0}
+						<p class="empty compact">No selectable child folders returned by the device.</p>
+					{:else}
+						<div class="path-buttons">
+							{#each children as childPath}
+								<button class="path-button" on:click={() => browseDirectory(childPath)}>
+									<code>{childPath}</code>
+								</button>
+							{/each}
+						</div>
+					{/if}
+				{/if}
+
+				<div class="paste-path">
+					<label for="destination-path">Or paste an absolute path</label>
+					<div class="input-row">
+						<input id="destination-path" type="text" bind:value={pastedPath} placeholder="/storage/…" />
+						<button on:click={() => validatePath(pastedPath.trim())} disabled={validatingPath}>Check folder</button>
+					</div>
+				</div>
+			{/if}
+		</div>
+	{/if}
+
+	{#if pathValidation}
+		<div class:validation-success={pathValidation.isValid} class:validation-error={!pathValidation.isValid} class="validation-result">
+			{#if pathValidation.isValid && pathValidation.canonicalPath}
+				<p>Verified canonical path</p>
+				<code>{pathValidation.canonicalPath}</code>
+				<button on:click={() => onApproved(pathValidation?.canonicalPath || '')} disabled={onboardingActionLoading}>
+					Use this folder
+				</button>
+			{:else}
+				<p>{pathValidation.rejectionReason || 'This folder cannot be used.'}</p>
+			{/if}
+		</div>
+	{/if}
+
+{/snippet}
+
 {#if onboardingLoading && !onboardingStatus}
 	<main class="onboarding-shell" aria-busy="true">
 		<h1>Consumer Onboarding</h1>
@@ -671,10 +756,14 @@
 			{#if recommendedLoading}
 				<p>Preparing the recommended path…</p>
 			{:else if recommendedPath}
-				<code>{recommendedPath}</code>
-				<button on:click={confirmRecommendedDestination} disabled={onboardingActionLoading}>
-					{onboardingActionLoading ? 'Creating folder…' : 'Use this folder'}
-				</button>
+				{#if !showBrowser}
+					<code>{recommendedPath}</code>
+					<button on:click={confirmRecommendedDestination} disabled={onboardingActionLoading}>
+						{onboardingActionLoading ? 'Creating folder…' : 'Use this folder'}
+					</button>
+				{/if}
+				{@render directoryBrowser((path) => approveDestination(path, 'onboarding'))}
+				{#if storageError}<p class="error">{storageError}</p>{/if}
 			{/if}
 		{:else if onboardingStatus.passwordDecision === 'pending'}
 			<h2>Password choice</h2>
@@ -741,65 +830,7 @@
 				<p class="empty compact">Choose and approve a folder before adding a torrent.</p>
 			{/if}
 
-			<button class="secondary-button" on:click={() => { showBrowser = !showBrowser; pathValidation = null; }}>
-				{showBrowser ? 'Hide folder browser' : 'Choose another folder'}
-			</button>
-
-			{#if showBrowser}
-				<div class="folder-browser">
-					<h3>Storage roots</h3>
-					<div class="path-buttons">
-						{#each volumes as volume}
-							<button class="path-button" on:click={() => browseDirectory(volume.path)}>
-								{#if volume.description}<span>{volume.description}</span>{/if}
-								<code>{volume.path}</code>
-							</button>
-						{/each}
-					</div>
-
-					{#if browsedPath}
-						<div class="browser-current">
-							<p>Current folder</p>
-							<code>{browsedPath}</code>
-							<button on:click={validateBrowsedPath} disabled={validatingPath}>
-								Check this folder
-							</button>
-						</div>
-						<h3>Child folders</h3>
-						{#if children.length === 0}
-							<p class="empty compact">No selectable child folders returned by the device.</p>
-						{:else}
-							<div class="path-buttons">
-								{#each children as childPath}
-									<button class="path-button" on:click={() => browseDirectory(childPath)}>
-										<code>{childPath}</code>
-									</button>
-								{/each}
-							</div>
-						{/if}
-					{/if}
-
-					<div class="paste-path">
-						<label for="destination-path">Or paste an absolute path</label>
-						<div class="input-row">
-							<input id="destination-path" type="text" bind:value={pastedPath} placeholder="/storage/…" />
-							<button on:click={() => validatePath(pastedPath.trim())} disabled={validatingPath}>Check folder</button>
-						</div>
-					</div>
-				</div>
-			{/if}
-
-			{#if pathValidation}
-				<div class:validation-success={pathValidation.isValid} class:validation-error={!pathValidation.isValid} class="validation-result">
-					{#if pathValidation.isValid && pathValidation.canonicalPath}
-						<p>Verified canonical path</p>
-						<code>{pathValidation.canonicalPath}</code>
-						<button on:click={approveValidatedPath}>Use this folder</button>
-					{:else}
-						<p>{pathValidation.rejectionReason || 'This folder cannot be used.'}</p>
-					{/if}
-				</div>
-			{/if}
+			{@render directoryBrowser(approveDestination)}
 		{/if}
 		{#if selectedDestination}
 			<p class="selected-path">Downloads will be saved to <code>{selectedDestination}</code></p>

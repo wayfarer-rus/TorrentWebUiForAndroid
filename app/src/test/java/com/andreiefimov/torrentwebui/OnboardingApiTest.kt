@@ -4,6 +4,7 @@ import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.request
+import io.ktor.client.request.setBody
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
@@ -111,6 +112,89 @@ class OnboardingApiTest {
     }
 
     @Test
+    fun `unavailable alternate destination cannot be browsed and keeps onboarding incomplete`() = testApplication {
+        val storage = object : StorageApiOperations {
+            override fun volumes() = listOf(StorageVolume("/storage/USB", isRemovable = true))
+            override fun children(parentPath: String) =
+                DirectoryChildrenResult.Unavailable("This storage volume is no longer available.")
+            override fun validate(path: String) =
+                DirectoryValidationResult.rejected(path, "This folder cannot be used.")
+            override suspend fun approve(path: String) =
+                DestinationApprovalResult.Rejected("This folder cannot be used.")
+        }
+        configure(
+            onboarding = incompleteCoordinator(),
+            storageApiOperations = storage
+        )
+
+        val response = client.get("/api/storage/children/${encode("/storage/USB")}") {
+            header(HttpHeaders.Authorization, basic(WebUiCredentials.DEFAULT_PASSWORD))
+        }
+
+        assertEquals(HttpStatusCode.Conflict, response.status)
+        assertTrue(response.bodyAsText().contains("no longer available"))
+        val status = client.get("/api/onboarding/status") {
+            header(HttpHeaders.Authorization, basic(WebUiCredentials.DEFAULT_PASSWORD))
+        }
+        assertFalse(Json.decodeFromString<OnboardingStatus>(status.bodyAsText()).completed)
+    }
+
+    @Test
+    fun `alternate destination APIs preserve backend volume metadata and canonical approval`() = testApplication {
+        var approvalInput: String? = null
+        val storage = object : StorageApiOperations {
+            override fun volumes() = listOf(
+                StorageVolume("/storage/primary", isPrimary = true),
+                StorageVolume("/storage/USB", isRemovable = true)
+            )
+            override fun children(parentPath: String) = DirectoryChildrenResult.Available(
+                listOf("$parentPath/Movies")
+            )
+            override fun validate(path: String) = when (path) {
+                "/storage/USB/Alias" -> DirectoryValidationResult.valid(path, "/storage/USB/Movies")
+                else -> DirectoryValidationResult.rejected(path, "This folder cannot be used.")
+            }
+            override suspend fun approve(path: String): DestinationApprovalResult {
+                approvalInput = path
+                return DestinationApprovalResult.Approved("/storage/USB/Movies")
+            }
+        }
+        configure(incompleteCoordinator(), storageApiOperations = storage)
+        val authorization = basic(WebUiCredentials.DEFAULT_PASSWORD)
+
+        val volumes = client.get("/api/storage/volumes") {
+            header(HttpHeaders.Authorization, authorization)
+        }
+        assertEquals(HttpStatusCode.OK, volumes.status)
+        assertTrue(volumes.bodyAsText().contains("/storage/primary"))
+        assertTrue(volumes.bodyAsText().contains("/storage/USB"))
+        assertTrue(volumes.bodyAsText().contains("isRemovable\":true"))
+
+        val validation = client.post("/api/storage/validate") {
+            header(HttpHeaders.Authorization, authorization)
+            header(HttpHeaders.ContentType, "application/json")
+            setBody("{\"path\":\"/storage/USB/Alias\"}")
+        }
+        assertEquals(HttpStatusCode.OK, validation.status)
+        assertTrue(validation.bodyAsText().contains("/storage/USB/Movies"))
+
+        val rejected = client.post("/api/storage/validate") {
+            header(HttpHeaders.Authorization, authorization)
+            header(HttpHeaders.ContentType, "application/json")
+            setBody("{\"path\":\"content://documents/tree/USB\"}")
+        }
+        assertTrue(rejected.bodyAsText().contains("cannot be used"))
+        assertFalse(rejected.bodyAsText().contains("\"isValid\":true"))
+
+        val approved = client.post("/api/storage/destinations/${encode("/storage/USB/Movies")}") {
+            header(HttpHeaders.Authorization, authorization)
+        }
+        assertEquals(HttpStatusCode.OK, approved.status)
+        assertEquals("/storage/USB/Movies", approvalInput)
+        assertTrue(approved.bodyAsText().contains("/storage/USB/Movies"))
+    }
+
+    @Test
     fun `password deferral completes eligible onboarding without changing password`() = testApplication {
         val auth = InMemoryAuthManager("unchanged-password")
         configure(
@@ -169,6 +253,7 @@ class OnboardingApiTest {
     private fun io.ktor.server.testing.ApplicationTestBuilder.configure(
         onboarding: OnboardingCoordinator,
         recommendedDestinationOperations: RecommendedDestinationOperations? = null,
+        storageApiOperations: StorageApiOperations? = null,
         authManager: AuthManager = InMemoryAuthManager()
     ) {
         TorrentServer.configureForTest(
@@ -176,6 +261,7 @@ class OnboardingApiTest {
             daemonControl = RecoveryBlockedDaemonControl,
             onboardingCoordinator = onboarding,
             recommendedDestinationOperations = recommendedDestinationOperations,
+            storageApiOperations = storageApiOperations,
             assetReader = { path -> if (path == "www/index.html") "<html>WebUI</html>" else null }
         )
         application { TorrentServer.configureApplication(this) }
@@ -198,6 +284,8 @@ class OnboardingApiTest {
         hasNonDefaultPassword = { false },
         readiness = { readiness }
     )
+
+    private fun encode(path: String): String = java.net.URLEncoder.encode(path, Charsets.UTF_8)
 
     private fun basic(password: String): String {
         val encoded = Base64.getEncoder().encodeToString("browser:$password".toByteArray())

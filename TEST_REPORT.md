@@ -480,3 +480,18 @@ The daemon initializes the durable onboarding marker before Ktor binds. The auth
 | `npm run test:e2e:m4:static` | PASS. |
 
 The proposal is derived from Android's primary shared-storage root and canonicalized without filesystem mutation. Confirmation alone creates and validates missing directories, then uses the catalog's single atomic entry/Latest Selected write. **Set it later** never reads or changes the Password; it persists `Deferred` before durable completion. Once complete, the normal WebUI remains unlocked through later readiness or destination loss.
+
+## Milestone 6: Consumer Onboarding — Ticket 06
+
+**Status:** PASS for current-tree JVM/Ktor, browser, static-regression, and Android-test compilation. No current-tree emulator or physical-device result is claimed.
+
+| Validation | Result |
+|---|---|
+| `OnboardingApiTest` authenticated storage boundary | PASS — mounted primary/removable metadata, canonical pasted-path validation, SAF rejection, canonical approval, disconnected browse rejection, consumer-readable error, and incomplete-state retention. |
+| `npm run test:e2e:m6:onboarding` | PASS — 5 Playwright tests. Alternate selection navigates primary and removable roots/children, reports removable disconnection, discards unconfirmed selection on refresh, rejects a document URI, approves only the backend-returned canonical pasted path, and advances to Password choice. |
+| `AlternateOnboardingDestinationTest` | COMPILED, NOT RUN — Android coverage uses production storage operations for primary-volume discovery, real canonical validation, atomic catalog/Latest Selected persistence, SAF rejection, and unavailable-volume browsing. A separate removable-volume assertion explicitly skips when no removable volume is attached rather than passing vacuously. |
+| `./gradlew :app:testDebugUnitTest :app:assembleDebug :app:compileDebugAndroidTestKotlin --console=plain` | PASS — 208 JVM tests, 0 failures/errors/skips; debug APK assembled; Android tests compiled. |
+| `npm run check` | PASS — 0 errors and 39 existing warnings in the Svelte page. |
+| `npm run test:e2e:m4:static` | PASS. |
+
+Consumer Onboarding now renders the same Directory Browser snippet used by the normal WebUI. `AndroidStorageApiOperations` remains the sole browse/validate/approve authority: it reports mounted Android roots with removable metadata, rejects unavailable or out-of-volume parents, revalidates every confirmation, and persists only the returned canonical path. Browser-only browsing and validation state is intentionally discarded on interruption.

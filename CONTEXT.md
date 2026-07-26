@@ -174,6 +174,7 @@ _Avoid_: WebUI setting, onboarding setting
 ### Approved Destination
 - A user-approved storage folder that has Android All Files Access and a verified, usable device filesystem path.
 - Each torrent references one Approved Destination. Every verified selection persists in the reusable destination catalog and is removable only when no torrent references it. Its canonical, real, copyable filesystem path is its sole identity everywhere; generic SAF selections are not Approved Destinations.
+- Alternate selection browses only mounted backend-reported Storage Volumes and backend-returned readable children. A pasted or browsed path becomes approved only after backend canonicalization, volume confinement, directory/writability validation, and durable catalog persistence; unconfirmed browser state is disposable.
 
 ### Latest Selected Destination
 - The most recently chosen Approved Destination, used as the default for adding a new torrent.

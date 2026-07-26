@@ -38,28 +38,15 @@ object StorageVolumeService {
             val storageManager = context.getSystemService(Context.STORAGE_SERVICE)
                 as? android.os.storage.StorageManager
 
-            val primaryPath = primaryStorageRoot()?.canonicalPath
-            val volumeFiles: List<File> = if (storageManager != null && sdkInt >= android.os.Build.VERSION_CODES.N) {
-                discoverVolumeRoots(storageManager)
+            val discovered = if (storageManager != null && sdkInt >= android.os.Build.VERSION_CODES.R) {
+                discoverVolumes(context, storageManager)
             } else {
-                listOfNotNull(primaryStorageRoot())
+                emptyList()
             }
-
-            volumeFiles.filter { it.isDirectory && it.canRead() }.map { file ->
-                val canonicalPath = file.canonicalPath
-                StorageVolume(
-                    path = canonicalPath,
-                    description = "",
-                    isRemovable = false,
-                    isPrimary = canonicalPath == primaryPath,
-                    isMounted = true
-                )
-            }
+            if (discovered.isNotEmpty()) discovered else listOfNotNull(primaryVolume())
         } catch (_: Exception) {
             // Fallback: use Android's reported primary shared-storage root.
-            val primary = primaryStorageRoot()
-            if (primary != null) listOf(StorageVolume(primary.canonicalPath, isPrimary = true))
-            else emptyList()
+            listOfNotNull(primaryVolume())
         }
     }
 
@@ -85,24 +72,32 @@ object StorageVolumeService {
         null
     }
 
-    /**
-     * Discovers volume roots using reflection to avoid compile-time dependency on StorageVolume API.
-     * Works on Android N+ where StorageManager.getStorageVolumes() exists.
-     */
-    private fun discoverVolumeRoots(storageManager: android.os.storage.StorageManager): List<File> {
-        return try {
-            val getVolumesMethod = storageManager.javaClass.getMethod("getStorageVolumes")
-            @Suppress("UNCHECKED_CAST")
-            val volumes = getVolumesMethod.invoke(storageManager) as? List<Any> ?: emptyList()
+    private fun primaryVolume(): StorageVolume? {
+        val root = primaryStorageRoot() ?: return null
+        if (!root.isDirectory || !root.canRead()) return null
+        return StorageVolume(path = root.canonicalPath, isPrimary = true, isMounted = true)
+    }
 
-            volumes.mapNotNull { vol ->
-                try {
-                    val getDirMethod = vol.javaClass.getMethod("getDirectory")
-                    getDirMethod.invoke(vol) as? File
-                } catch (_: Exception) { null }
-            }.filterNotNull()
+    /** Discovers mounted, readable volume roots and their Android-reported metadata. */
+    private fun discoverVolumes(
+        context: Context,
+        storageManager: android.os.storage.StorageManager
+    ): List<StorageVolume> = storageManager.storageVolumes.mapNotNull { volume ->
+        try {
+            if (volume.state != android.os.Environment.MEDIA_MOUNTED &&
+                volume.state != android.os.Environment.MEDIA_MOUNTED_READ_ONLY
+            ) return@mapNotNull null
+            val directory = volume.directory ?: return@mapNotNull null
+            if (!directory.isDirectory || !directory.canRead()) return@mapNotNull null
+            StorageVolume(
+                path = directory.canonicalPath,
+                description = volume.getDescription(context),
+                isRemovable = volume.isRemovable,
+                isPrimary = volume.isPrimary,
+                isMounted = true
+            )
         } catch (_: Exception) {
-            emptyList()
+            null
         }
     }
 }

@@ -71,6 +71,7 @@ object TorrentServer {
     /** Durable Consumer Onboarding authority — injected for authenticated boundary tests. */
     private var onboardingCoordinator: OnboardingCoordinator = OnboardingCoordinator.completedForTest()
     private var recommendedDestinationOperations: RecommendedDestinationOperations? = null
+    private var storageApiOperations: StorageApiOperations? = null
 
     /** Applies the completion gate once to every normal torrent route. */
     private val onboardingTorrentGate = createRouteScopedPlugin("OnboardingTorrentGate") {
@@ -142,6 +143,9 @@ object TorrentServer {
                 this.destinationCatalog?.addDestination(canonicalPath) == true
             }
         )
+        storageApiOperations = AndroidStorageApiOperations(appContext) {
+            this.destinationCatalog
+        }
     }
 
     /** Initializes the durable first-M6 marker before Ktor accepts any request. */
@@ -364,8 +368,13 @@ object TorrentServer {
                     route("/api/storage") {
                         // GET /api/storage/volumes — returns reported storage volume roots.
                         get("/volumes") {
-                            val volumes = StorageVolumeService.listVolumes(appContext)
-                            call.respond(volumes.map { VolumeResponse(it.path, it.description, it.isRemovable) })
+                            val operations = storageApiOperations ?: run {
+                                call.respond(HttpStatusCode.ServiceUnavailable, ErrorResponse("Storage service unavailable"))
+                                return@get
+                            }
+                            call.respond(operations.volumes().map {
+                                VolumeResponse(it.path, it.description, it.isRemovable)
+                            })
                         }
 
                         // GET /api/storage/children/{path} — lists validated child directories.
@@ -374,8 +383,17 @@ object TorrentServer {
                                 call.respond(HttpStatusCode.BadRequest, ErrorResponse("Missing path parameter"))
                                 return@get
                             }
-                            val children = DirectoryValidationService.listValidChildren(appContext, parentPath)
-                            call.respond(children)
+                            val operations = storageApiOperations ?: run {
+                                call.respond(HttpStatusCode.ServiceUnavailable, ErrorResponse("Storage service unavailable"))
+                                return@get
+                            }
+                            when (val result = operations.children(parentPath)) {
+                                is DirectoryChildrenResult.Available -> call.respond(result.paths)
+                                is DirectoryChildrenResult.Unavailable -> call.respond(
+                                    HttpStatusCode.Conflict,
+                                    ErrorResponse(result.reason)
+                                )
+                            }
                         }
 
                         // POST /api/storage/validate — validates a pasted absolute path.
@@ -386,7 +404,11 @@ object TorrentServer {
                                 call.respond(HttpStatusCode.BadRequest, ErrorResponse("Invalid request body"))
                                 return@post
                             }
-                            val result = DirectoryValidationService.validate(appContext, body.path)
+                            val operations = storageApiOperations ?: run {
+                                call.respond(HttpStatusCode.ServiceUnavailable, ErrorResponse("Storage service unavailable"))
+                                return@post
+                            }
+                            val result = operations.validate(body.path)
                             call.respond(ValidateResponse(
                                 path = result.path,
                                 canonicalPath = result.canonicalPath,
@@ -409,21 +431,22 @@ object TorrentServer {
                                 call.respond(HttpStatusCode.BadRequest, ErrorResponse("Missing path parameter"))
                                 return@post
                             }
-                            val catalog = TorrentServer.destinationCatalog
-                                ?: run { call.respond(HttpStatusCode.ServiceUnavailable, ErrorResponse("Storage service unavailable")); return@post }
-
-                            // Validate first.
-                            val validation = DirectoryValidationService.validate(appContext, destPath)
-                            if (!validation.isValid) {
-                                call.respond(HttpStatusCode.BadRequest, ErrorResponse(validation.rejectionReason ?: "Invalid path"))
+                            val operations = storageApiOperations ?: run {
+                                call.respond(HttpStatusCode.ServiceUnavailable, ErrorResponse("Storage service unavailable"))
                                 return@post
                             }
-
-                            val added = catalog.addDestination(validation.canonicalPath!!)
-                            if (added) {
-                                call.respond(AddDestinationResponse(status = "ok", path = validation.canonicalPath))
-                            } else {
-                                call.respond(HttpStatusCode.InternalServerError, ErrorResponse("Failed to add destination"))
+                            when (val result = operations.approve(destPath)) {
+                                is DestinationApprovalResult.Approved -> call.respond(
+                                    AddDestinationResponse(status = "ok", path = result.canonicalPath)
+                                )
+                                is DestinationApprovalResult.Rejected -> call.respond(
+                                    HttpStatusCode.BadRequest,
+                                    ErrorResponse(result.reason)
+                                )
+                                DestinationApprovalResult.PersistenceFailed -> call.respond(
+                                    HttpStatusCode.InternalServerError,
+                                    ErrorResponse("Failed to add destination")
+                                )
                             }
                         }
 
@@ -1088,13 +1111,15 @@ object TorrentServer {
         daemonControl: DaemonControl,
         assetReader: (String) -> String? = { null },
         onboardingCoordinator: OnboardingCoordinator = OnboardingCoordinator.completedForTest(),
-        recommendedDestinationOperations: RecommendedDestinationOperations? = null
+        recommendedDestinationOperations: RecommendedDestinationOperations? = null,
+        storageApiOperations: StorageApiOperations? = null
     ) {
         this.authManager = authManager
         this.daemonControl = daemonControl
         this.assetReader = assetReader
         this.onboardingCoordinator = onboardingCoordinator
         this.recommendedDestinationOperations = recommendedDestinationOperations
+        this.storageApiOperations = storageApiOperations
     }
 
     /** Resets test configuration to production defaults. Call after each test. */
@@ -1108,6 +1133,7 @@ object TorrentServer {
         this.assetReader = ::readAssetFromAssets
         this.onboardingCoordinator = OnboardingCoordinator.completedForTest()
         this.recommendedDestinationOperations = null
+        this.storageApiOperations = null
     }
 
     /** Reads a file from Android assets. Returns null if the file doesn't exist. */

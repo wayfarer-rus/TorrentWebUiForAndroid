@@ -94,6 +94,108 @@ test('recommended destination and Set it later complete onboarding durably', asy
 	await expect(page.getByRole('heading', { name: 'Consumer Onboarding' })).toHaveCount(0);
 });
 
+test('alternate onboarding browser navigates primary and removable canonical paths', async ({ page }) => {
+	const state = {
+		completed: false,
+		passwordDecision: 'pending',
+		hasApprovedDestination: false,
+		readiness: 'Ready'
+	};
+	let approvedPath = null;
+	let validationInput = null;
+	let removableConnected = false;
+
+	await page.route('**/api/onboarding/status', (route) => route.fulfill({
+		contentType: 'application/json', body: JSON.stringify(state)
+	}));
+	await page.route('**/api/onboarding/recommended-destination', (route) => route.fulfill({
+		contentType: 'application/json',
+		body: JSON.stringify({ path: '/storage/primary/Download/Torrents' })
+	}));
+	await page.route('**/api/storage/permission', (route) => route.fulfill({
+		contentType: 'application/json', body: JSON.stringify({ state: 'Ready' })
+	}));
+	await page.route('**/api/storage/volumes', (route) => route.fulfill({
+		contentType: 'application/json',
+		body: JSON.stringify([
+			{ path: '/storage/primary', isRemovable: false },
+			{ path: '/storage/USB', isRemovable: true }
+		])
+	}));
+	await page.route('**/api/storage/catalog', (route) => route.fulfill({
+		contentType: 'application/json', body: '[]'
+	}));
+	await page.route('**/api/storage/latest-selected', (route) => route.fulfill({
+		contentType: 'application/json', body: JSON.stringify({ path: null })
+	}));
+	await page.route('**/api/storage/children/**', (route) => {
+		const parent = decodeURIComponent(new URL(route.request().url()).pathname.split('/').pop());
+		if (parent === '/storage/USB' && !removableConnected) {
+			return route.fulfill({
+				status: 409,
+				contentType: 'application/json',
+				body: JSON.stringify({ error: 'This storage volume is no longer available.' })
+			});
+		}
+		const children = parent === '/storage/primary'
+			? ['/storage/primary/Movies']
+			: parent === '/storage/USB' ? ['/storage/USB/Movies'] : [];
+		return route.fulfill({ contentType: 'application/json', body: JSON.stringify(children) });
+	});
+	await page.route('**/api/storage/validate', (route) => {
+		validationInput = route.request().postDataJSON().path;
+		return route.fulfill({
+			contentType: 'application/json',
+			body: JSON.stringify({
+				path: validationInput,
+				canonicalPath: '/storage/USB/Movies',
+				isValid: true
+			})
+		});
+	});
+	await page.route('**/api/storage/destinations/**', (route) => {
+		approvedPath = decodeURIComponent(new URL(route.request().url()).pathname.split('/').pop());
+		state.hasApprovedDestination = true;
+		return route.fulfill({
+			contentType: 'application/json',
+			body: JSON.stringify({ status: 'ok', path: approvedPath })
+		});
+	});
+
+	await page.goto('/');
+	await page.getByRole('button', { name: 'Choose another folder' }).click();
+	await expect(page.getByText('/storage/primary', { exact: true })).toBeVisible();
+	await expect(page.getByText('/storage/USB', { exact: true })).toBeVisible();
+
+	await page.getByRole('button', { name: '/storage/primary' }).click();
+	await expect(page.getByRole('button', { name: '/storage/primary/Movies' })).toBeVisible();
+	await page.getByRole('button', { name: '/storage/USB' }).click();
+	await expect(page.getByText('This storage volume is no longer available.')).toBeVisible();
+	await expect(page.getByRole('heading', { name: 'Password choice' })).toHaveCount(0);
+
+	removableConnected = true;
+	await page.getByRole('button', { name: '/storage/USB' }).click();
+	await page.getByRole('button', { name: '/storage/USB/Movies' }).click();
+	await page.getByRole('button', { name: 'Check this folder' }).click();
+	await expect(page.getByText('Verified canonical path')).toBeVisible();
+
+	await page.reload();
+	await expect(page.getByText('Verified canonical path')).toHaveCount(0);
+	await expect(page.getByRole('heading', { name: 'Password choice' })).toHaveCount(0);
+	await page.getByRole('button', { name: 'Choose another folder' }).click();
+	await page.getByLabel('Or paste an absolute path').fill('content://documents/tree/USB');
+	await page.getByRole('button', { name: 'Check folder' }).click();
+	await expect(page.getByText('Enter an absolute filesystem path.')).toBeVisible();
+	await page.getByLabel('Or paste an absolute path').fill('/storage/USB/Alias');
+	await page.getByRole('button', { name: 'Check folder' }).click();
+	await expect(page.getByText('/storage/USB/Movies', { exact: true })).toBeVisible();
+	await page.getByRole('button', { name: 'Use this folder' }).click();
+
+	await expect.poll(() => validationInput).toBe('/storage/USB/Alias');
+	await expect.poll(() => approvedPath).toBe('/storage/USB/Movies');
+	await expect(page.getByRole('heading', { name: 'Password choice' })).toBeVisible();
+});
+
 test('onboarding status requests time out instead of hanging', async ({ page }) => {
 	await page.addInitScript(() => {
 		const realFetch = window.fetch.bind(window);
