@@ -69,8 +69,13 @@ class TorrentDaemon : Service() {
         /** Keeps only the authenticated WebUI alive after runtime storage revocation. */
         const val ACTION_PERMISSION_BLOCKED = "com.andreiefimov.torrentwebui.PERMISSION_BLOCKED"
 
+        /** Applies a device-local WebUI port change without touching the native session. */
+        const val ACTION_CONFIGURE_WEB_UI_PORT =
+            "com.andreiefimov.torrentwebui.CONFIGURE_WEB_UI_PORT"
+
         /** Intent extra: whether this is a force stop (vs ordinary stop). */
         const val EXTRA_FORCE_STOP = "force_stop"
+        private const val EXTRA_WEB_UI_PORT_INPUT = "web_ui_port_input"
 
         /** Checkpoint interval for native resume data (30 seconds). */
         const val CHECKPOINT_INTERVAL_MS = 30_000L
@@ -107,6 +112,32 @@ class TorrentDaemon : Service() {
                 action = ACTION_STOP
             }
             context.startService(intent)
+        }
+
+        /** Requests a port change only while an existing daemon/recovery owner is alive. */
+        fun configureWebUiPort(context: Context, input: String) {
+            val state = currentDaemonState ?: DaemonState.Stopped
+            if (state == DaemonState.Stopped || state == DaemonState.Stopping) {
+                val unavailable = getWebUiPortStatus(context).copy(
+                    operationError = "Start downloads before changing the WebUI port."
+                )
+                currentWebUiPortStatus.set(unavailable)
+                return
+            }
+            try {
+                // The Android fallback screen is foreground and the daemon already owns an active
+                // foreground service; do not create a new startForegroundService deadline.
+                context.startService(Intent(context, TorrentDaemon::class.java).apply {
+                    action = ACTION_CONFIGURE_WEB_UI_PORT
+                    putExtra(EXTRA_WEB_UI_PORT_INPUT, input)
+                })
+            } catch (_: Exception) {
+                currentWebUiPortStatus.set(
+                    getWebUiPortStatus(context).copy(
+                        operationError = "Android could not apply the WebUI port change."
+                    )
+                )
+            }
         }
 
         /** Test helper that records force-stop intent before requesting service shutdown. */
@@ -178,7 +209,14 @@ class TorrentDaemon : Service() {
             )
         }
 
+        /** Returns Android-only configured/effective WebUI port state without LAN discovery. */
+        internal fun getWebUiPortStatus(context: Context): WebUiPortStatus {
+            val configured = SharedPreferencesWebUiPortStore(context).read()
+            return currentWebUiPortStatus.get().copy(configuredPort = configured)
+        }
+
         private val lastRecoverableError = AtomicReference<String?>(null)
+        private val currentWebUiPortStatus = AtomicReference(WebUiPortStatus())
 
         internal var daemonControlFactory: () -> DaemonControl = { DaemonControlFactory.create() }
 
@@ -221,6 +259,7 @@ class TorrentDaemon : Service() {
     private var queueStore: QueueStore? = null
     private var notificationManager: NotificationManager? = null
     private val webUiServerController = WebUiServerController(TorrentServer::createEngine)
+    private lateinit var webUiPortCoordinator: WebUiPortCoordinator
 
     /** Current daemon lifecycle state. */
     private val currentState = AtomicReference(DaemonState.Stopped)
@@ -233,6 +272,7 @@ class TorrentDaemon : Service() {
     /** Jobs owned by the service lifecycle. */
     private var checkpointJob: Job? = null
     private var recoveryJob: Job? = null
+    private var webUiCleanupJob: Job? = null
     private val moveEventJobs = OwnedJobSlot()
     private var permissionTransitionJob: Job? = null
     private val permissionTransitionGuard = PermissionTransitionGuard()
@@ -242,6 +282,11 @@ class TorrentDaemon : Service() {
     override fun onCreate() {
         super.onCreate()
         notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        webUiPortCoordinator = WebUiPortCoordinator(
+            webUiServerController,
+            SharedPreferencesWebUiPortStore(applicationContext)
+        )
+        currentWebUiPortStatus.set(webUiPortCoordinator.status)
         createNotificationChannel()
     }
 
@@ -251,6 +296,9 @@ class TorrentDaemon : Service() {
             ACTION_START -> startDaemonIfInactive(userInitiated = false)
             ACTION_USER_START -> startDaemonIfInactive(userInitiated = true)
             ACTION_PERMISSION_BLOCKED -> startPermissionBlockedMode()
+            ACTION_CONFIGURE_WEB_UI_PORT -> configureWebUiPort(
+                intent.getStringExtra(EXTRA_WEB_UI_PORT_INPUT).orEmpty()
+            )
             ACTION_STOP -> stopDaemon(intent.getBooleanExtra(EXTRA_FORCE_STOP, false))
         }
         return serviceRestartMode(hasIntent = true)
@@ -296,11 +344,33 @@ class TorrentDaemon : Service() {
 
     private fun startWebUiServer() {
         if (webUiServerController.isRunning) {
-            android.util.Log.i(TAG, "WebUI server already running on port ${TorrentServer.PORT}")
+            currentWebUiPortStatus.set(webUiPortCoordinator.status)
             return
         }
         TorrentServer.prepare(applicationContext)
-        webUiServerController.start(TorrentServer.PORT)
+        val status = webUiPortCoordinator.startConfigured()
+        currentWebUiPortStatus.set(status)
+        if (status.effectivePort == null) {
+            android.util.Log.e(TAG, status.operationError ?: "WebUI server failed to start")
+        }
+    }
+
+    private fun configureWebUiPort(input: String) {
+        val status = webUiPortCoordinator.apply(input)
+        currentWebUiPortStatus.set(status)
+        status.operationError?.let { android.util.Log.w(TAG, it) }
+        if (status.operationError == WebUiPort.OLD_SERVER_CLEANUP_ERROR &&
+            webUiCleanupJob?.isActive != true
+        ) {
+            webUiCleanupJob = daemonScope.launch {
+                while (true) {
+                    delay(500)
+                    val retried = webUiPortCoordinator.retryRetiredServers()
+                    currentWebUiPortStatus.set(retried)
+                    if (retried.operationError != WebUiPort.OLD_SERVER_CLEANUP_ERROR) return@launch
+                }
+            }
+        }
     }
 
     private fun leavePermissionBlockedMode(): Boolean {
@@ -320,10 +390,16 @@ class TorrentDaemon : Service() {
     }
 
     private fun stopWebUiServer(): Boolean {
+        webUiCleanupJob?.cancel()
+        webUiCleanupJob = null
         repeat(2) { attempt ->
-            if (webUiServerController.stop() == WebUiServerStopResult.Stopped) return true
+            if (webUiPortCoordinator.stop() == WebUiServerStopResult.Stopped) {
+                currentWebUiPortStatus.set(webUiPortCoordinator.status)
+                return true
+            }
             android.util.Log.w(TAG, "WebUI server shutdown requires retry ${attempt + 1}")
         }
+        currentWebUiPortStatus.set(webUiPortCoordinator.status)
         return false
     }
 

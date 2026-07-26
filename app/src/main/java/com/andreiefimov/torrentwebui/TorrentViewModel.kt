@@ -89,13 +89,17 @@ class TorrentViewModel(application: Application) : AndroidViewModel(application)
             ContextCompat.checkSelfPermission(app, android.Manifest.permission.POST_NOTIFICATIONS) ==
             PackageManager.PERMISSION_GRANTED
         val health = TorrentDaemon.getHealthStatus(app)
+        val portStatus = TorrentDaemon.getWebUiPortStatus(app)
         val mappedHealth = mapDaemonUiHealth(daemonControl.getDiagnostics(), health)
         _uiState.value = _uiState.value.copy(
             diagnostics = mappedHealth.diagnostics,
             sessionStarted = mappedHealth.sessionStarted,
             daemonLifecycleState = health.lifecycleState,
             storagePermissionState = daemonControl.storagePermissionState,
-            notificationPermissionGranted = notificationPermissionGranted
+            notificationPermissionGranted = notificationPermissionGranted,
+            configuredWebUiPort = portStatus.configuredPort,
+            effectiveWebUiPort = portStatus.effectivePort,
+            webUiPortError = portStatus.operationError
         )
     }
 
@@ -232,6 +236,12 @@ class TorrentViewModel(application: Application) : AndroidViewModel(application)
         daemonControl.removeTorrent(id, deleteFiles)
     }
 
+    /** Delegates Android-local port configuration without touching [daemonControl]. */
+    fun configureWebUiPort(input: String) {
+        TorrentDaemon.configureWebUiPort(getApplication(), input)
+        refreshDaemonHealth()
+    }
+
     override fun onCleared() {
         super.onCleared()
         pollingJob?.cancel()
@@ -258,5 +268,8 @@ data class TorrentUiState(
     val notificationPermissionGranted: Boolean = false,
     val addMagnetError: String? = null,
     val recentAlerts: List<AlertEvent> = emptyList(),
-    val storagePermissionState: StoragePermissionState = StoragePermissionState.Ready
+    val storagePermissionState: StoragePermissionState = StoragePermissionState.Ready,
+    val configuredWebUiPort: Int = WebUiPort.DEFAULT,
+    val effectiveWebUiPort: Int? = null,
+    val webUiPortError: String? = null
 )

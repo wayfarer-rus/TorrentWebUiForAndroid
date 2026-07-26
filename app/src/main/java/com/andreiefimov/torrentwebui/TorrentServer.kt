@@ -49,9 +49,6 @@ object TorrentServer {
 
     private const val TAG = "TorrentServer"
 
-    /** Port the Ktor server binds to. Configurable for dev flexibility. */
-    const val PORT: Int = 8080
-
     /** JSON serializer shared across all endpoints. */
     private val json = Json {
         ignoreUnknownKeys = true

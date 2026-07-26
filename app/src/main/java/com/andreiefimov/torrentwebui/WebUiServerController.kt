@@ -14,6 +14,9 @@ internal fun interface WebUiServerEngineFactory {
 /** Opaque capability for a server that has bound successfully but is not yet active. */
 internal class WebUiServerCandidate internal constructor()
 
+/** Outcome of making a bound candidate the active WebUI listener. */
+internal enum class WebUiServerPromotionResult { Promoted, PromotedCleanupRequired }
+
 /** Outcome of a controller-wide shutdown attempt. */
 internal enum class WebUiServerStopResult { Stopped, RetryRequired }
 
@@ -49,12 +52,22 @@ internal class WebUiServerController(
         token
     }
 
-    fun promote(candidate: WebUiServerCandidate) {
-        synchronized(lock) {
-            val selected = requirePending(candidate)
-            active?.stop()
-            active = selected.engine
-            pending = null
+    fun promote(candidate: WebUiServerCandidate): WebUiServerPromotionResult = synchronized(lock) {
+        val selected = requirePending(candidate)
+        val previous = active
+
+        // Promotion is the non-throwing commit point after durable port persistence. The candidate
+        // becomes authoritative before retiring the old listener, whose cleanup remains owned here.
+        active = selected.engine
+        pending = null
+        if (previous == null) return@synchronized WebUiServerPromotionResult.Promoted
+
+        try {
+            previous.stop()
+            WebUiServerPromotionResult.Promoted
+        } catch (_: Throwable) {
+            cleanupRequired += previous
+            WebUiServerPromotionResult.PromotedCleanupRequired
         }
     }
 
@@ -64,6 +77,11 @@ internal class WebUiServerController(
             selected.engine.stop()
             pending = null
         }
+    }
+
+    /** Retries only retired-listener cleanup without disturbing the active server. */
+    fun retryRetiredServers(): Boolean = synchronized(lock) {
+        retryRetiredServersLocked()
     }
 
     fun stop(): WebUiServerStopResult = synchronized(lock) {
@@ -85,17 +103,22 @@ internal class WebUiServerController(
                 retryRequired = true
             }
         }
+        if (!retryRetiredServersLocked()) retryRequired = true
+
+        if (retryRequired) WebUiServerStopResult.RetryRequired else WebUiServerStopResult.Stopped
+    }
+
+    private fun retryRetiredServersLocked(): Boolean {
         val retained = cleanupRequired.iterator()
         while (retained.hasNext()) {
             try {
                 retained.next().stop()
                 retained.remove()
             } catch (_: Throwable) {
-                retryRequired = true
+                // Retain ownership for the next daemon-owned retry.
             }
         }
-
-        if (retryRequired) WebUiServerStopResult.RetryRequired else WebUiServerStopResult.Stopped
+        return cleanupRequired.isEmpty()
     }
 
     private fun createStartedEngine(port: Int): WebUiServerEngine {

@@ -10,6 +10,8 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -24,6 +26,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -161,6 +165,10 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun AndroidFallbackScreen(viewModel: TorrentViewModel, authManager: AuthManager) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    var webUiPortInput by remember { mutableStateOf(state.configuredWebUiPort.toString()) }
+    LaunchedEffect(state.configuredWebUiPort) {
+        webUiPortInput = state.configuredWebUiPort.toString()
+    }
 
     Scaffold(
         topBar = {
@@ -173,6 +181,7 @@ fun AndroidFallbackScreen(viewModel: TorrentViewModel, authManager: AuthManager)
             modifier = Modifier
                 .padding(padding)
                 .fillMaxSize()
+                .verticalScroll(rememberScrollState())
                 .padding(16.dp)
         ) {
             val context = LocalContext.current
@@ -192,6 +201,52 @@ fun AndroidFallbackScreen(viewModel: TorrentViewModel, authManager: AuthManager)
                     DiagnosticRow("libtorrent", state.diagnostics.libtorrentVersion)
                     if (state.diagnostics.lastError != null) {
                         DiagnosticRow("Last error", state.diagnostics.lastError!!)
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.secondaryContainer
+                )
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text("WebUI Port", style = MaterialTheme.typography.titleSmall)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    DiagnosticRow("Configured", state.configuredWebUiPort.toString())
+                    DiagnosticRow("Effective", state.effectiveWebUiPort?.toString() ?: "Unavailable")
+                    Text(
+                        "After a successful change, reconnect browsers on the effective port.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = webUiPortInput,
+                        onValueChange = { webUiPortInput = it },
+                        label = { Text("Port") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Button(
+                        onClick = { viewModel.configureWebUiPort(webUiPortInput) },
+                        enabled = state.daemonLifecycleState != TorrentDaemon.DaemonState.Stopped.name &&
+                            state.daemonLifecycleState != TorrentDaemon.DaemonState.Stopping.name,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Apply WebUI Port")
+                    }
+                    state.webUiPortError?.let { error ->
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = error,
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall
+                        )
                     }
                 }
             }

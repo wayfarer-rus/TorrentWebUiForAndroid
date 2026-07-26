@@ -417,3 +417,19 @@ The test used real Android system dialogs and the emulator UI hierarchy (`uiauto
 | Full `npm run e2e:m4:live` attempt | NOT COMPLETED — on two cold-emulator attempts the notification permission dialog appeared after the harness's five-second Allow-button wait, so the runner timed out waiting for the subsequent All Files Access switch. The focused visible-UI lifecycle validation was completed instead; no full storage-matrix success is claimed. |
 
 The daemon remains the sole production lifecycle owner. `TorrentServer` now configures routes and creates engines, while the daemon-owned typed controller owns active/candidate promotion, discard, retryable failure cleanup, and shutdown independently of the native torrent session.
+
+## Milestone 6: Consumer Onboarding — Ticket 02
+
+**Status:** PASS for focused JVM/static validation on the committed Ticket 02 tree. The focused API 36 emulator run below passed before the final review fixes; it is retained as development evidence, not reused as final current-tree emulator acceptance. Ticket 10 owns the complete current-tree port lifecycle matrix. No physical-device/LAN-browser behavior is claimed.
+
+| Validation | Result |
+|---|---|
+| `WebUiPortCoordinatorTest` red/green cycles | PASS — default/range policy, invalid input, bind rollback, false-returning and throwing persistence rollback (including process-local value restoration), candidate-retirement retry, bind → persist → promote ordering, cold-start failure, process-style reconstruction, and failed old-listener cleanup ownership/retry. |
+| `./gradlew :app:testDebugUnitTest :app:assembleDebug --console=plain` | PASS — 176 tests, 0 failures/errors/skips; debug APK assembled. |
+| `./gradlew :app:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=com.andreiefimov.torrentwebui.WebUiPortPersistenceTest,com.andreiefimov.torrentwebui.WebUiPortLifecycleTest` | DEVELOPMENT PASS — 3 tests on the visible `emulator_skill` API 36/arm64-v8a AVD before final review fixes. Notification and All Files Access were granted through the visible Android UI. SharedPreferences reconstruction retained port `9090`; an active daemon switched from `8080` to `18081` with one session initialization and zero session destroys during the switch. Final persistence-failure restoration and retired-listener retry changes were subsequently covered by the 176-test JVM run, but the emulator command was not rerun on that final tree. |
+| Visible Android UI hierarchy inspection (`adb shell uiautomator dump`) | PASS — the running APK exposed `WebUI Port`, `Configured`, `Effective`, numeric `Port` input, and `Apply WebUI Port`; no URL or discovered LAN address was rendered. |
+| `npm run check` | PASS — 0 errors and 37 existing warnings in one Svelte file. |
+| `npm run test:e2e:m4:static` | PASS — 5 tests, 0 failures. |
+| Focused emulator teardown | PASS — the lifecycle test stopped the daemon and cleared port preferences; post-run inspection found no daemon service and no listener on device ports `8080` or `18081`. |
+
+The daemon-owned `WebUiPortCoordinator` now validates `1024–65535`, synchronously persists only after a candidate binds, and promotes without touching `DaemonControl`. Android displays configured/effective ports and concise operation errors without LAN-address discovery. Cold-start bind failure keeps the configured port and reports no effective listener.

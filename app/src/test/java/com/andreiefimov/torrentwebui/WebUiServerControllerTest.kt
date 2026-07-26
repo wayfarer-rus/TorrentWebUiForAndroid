@@ -121,7 +121,7 @@ class WebUiServerControllerTest {
     }
 
     @Test
-    fun `failed promotion retains old active server and bound candidate`() {
+    fun `promotion commits candidate and retains failed old server cleanup`() {
         val factory = RecordingWebUiServerEngineFactory(stopFailuresByPort = mapOf(8080 to 1))
         val controller = WebUiServerController(factory)
         controller.start(8080)
@@ -129,21 +129,15 @@ class WebUiServerControllerTest {
         val candidate = controller.bindCandidate(8081)
         val replacement = factory.engines.last()
 
-        try {
-            controller.promote(candidate)
-            org.junit.Assert.fail("Expected old server shutdown to fail")
-        } catch (_: IllegalStateException) {
-            // Both engines remain owned for rollback or retry.
-        }
+        assertEquals(WebUiServerPromotionResult.PromotedCleanupRequired, controller.promote(candidate))
 
         assertTrue(controller.isRunning)
         assertEquals(1, original.stopCount)
         assertEquals(0, replacement.stopCount)
 
-        controller.discard(candidate)
-        assertEquals(1, replacement.stopCount)
         controller.stop()
         assertEquals(2, original.stopCount)
+        assertEquals(1, replacement.stopCount)
     }
 
     @Test
