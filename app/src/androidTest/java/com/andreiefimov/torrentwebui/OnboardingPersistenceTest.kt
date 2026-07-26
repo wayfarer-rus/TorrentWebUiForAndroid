@@ -57,6 +57,26 @@ class OnboardingPersistenceTest {
     }
 
     @Test
+    fun changedPasswordAndDecisionSurviveReauthenticationInterruption() = runBlocking {
+        val firstAuth = DefaultAuthManager(context)
+        val changed = coordinator(hasDestination = true).changePassword(
+            "household-passphrase",
+            firstAuth::setPassword
+        ) as OnboardingPasswordChangeResult.Updated
+        assertTrue(changed.status.completed)
+
+        val reconstructedAuth = DefaultAuthManager(context)
+        val reconstructed = coordinator(
+            hasDestination = false,
+            readiness = OnboardingReadiness.ServiceUnavailable
+        ).status()
+
+        assertEquals("household-passphrase", reconstructedAuth.getPassword())
+        assertTrue(reconstructed.completed)
+        assertEquals(PasswordDecision.Changed, reconstructed.passwordDecision)
+    }
+
+    @Test
     fun establishedQueueMigratesOnlyWhenMarkerIsAbsent() = runBlocking {
         val migrated = coordinator(hasQueue = true).status()
 
@@ -84,6 +104,10 @@ class OnboardingPersistenceTest {
     private fun clearState() {
         context.getSharedPreferences(
             SharedPreferencesOnboardingStateStore.PREFERENCES_NAME,
+            Context.MODE_PRIVATE
+        ).edit().clear().commit()
+        context.getSharedPreferences(
+            DefaultAuthManager.PREFERENCES_NAME,
             Context.MODE_PRIVATE
         ).edit().clear().commit()
     }

@@ -195,6 +195,117 @@ class OnboardingApiTest {
     }
 
     @Test
+    fun `onboarding password change completes and invalidates stale credentials`() = testApplication {
+        val auth = InMemoryAuthManager("old-password")
+        configure(
+            onboarding = incompleteCoordinator(hasDestination = { true }),
+            authManager = auth
+        )
+
+        val changed = client.post("/api/onboarding/password") {
+            header(HttpHeaders.Authorization, basic("old-password"))
+            header(HttpHeaders.ContentType, "application/json")
+            setBody("{\"newPassword\":\"household passphrase\"}")
+        }
+
+        assertEquals(HttpStatusCode.OK, changed.status)
+        val status = Json.decodeFromString<OnboardingStatus>(changed.bodyAsText())
+        assertTrue(status.completed)
+        assertEquals(PasswordDecision.Changed, status.passwordDecision)
+        assertEquals("household passphrase", auth.getPassword())
+        assertEquals(HttpStatusCode.Unauthorized, client.get("/api/onboarding/status") {
+            header(HttpHeaders.Authorization, basic("old-password"))
+        }.status)
+        assertEquals(HttpStatusCode.OK, client.get("/api/onboarding/status") {
+            header(HttpHeaders.Authorization, basic("household passphrase"))
+        }.status)
+    }
+
+    @Test
+    fun `onboarding password endpoint rejects short extra-field and completed requests`() = testApplication {
+        val auth = InMemoryAuthManager("old-password")
+        configure(
+            onboarding = incompleteCoordinator(hasDestination = { true }),
+            authManager = auth
+        )
+
+        val short = client.post("/api/onboarding/password") {
+            header(HttpHeaders.Authorization, basic("old-password"))
+            header(HttpHeaders.ContentType, "application/json")
+            setBody("{\"newPassword\":\"abc\"}")
+        }
+        assertEquals(HttpStatusCode.BadRequest, short.status)
+        assertTrue(short.bodyAsText().contains("at least 4 characters"))
+
+        val extraField = client.post("/api/onboarding/password") {
+            header(HttpHeaders.Authorization, basic("old-password"))
+            header(HttpHeaders.ContentType, "application/json")
+            setBody("{\"currentPassword\":\"old-password\",\"newPassword\":\"valid-password\"}")
+        }
+        assertEquals(HttpStatusCode.BadRequest, extraField.status)
+        assertEquals("old-password", auth.getPassword())
+    }
+
+    @Test
+    fun `onboarding password persistence failure keeps prior credential and pending decision`() = testApplication {
+        val auth = InMemoryAuthManager("old-password", persistenceSucceeds = false)
+        configure(
+            onboarding = incompleteCoordinator(hasDestination = { true }),
+            authManager = auth
+        )
+
+        val response = client.post("/api/onboarding/password") {
+            header(HttpHeaders.Authorization, basic("old-password"))
+            header(HttpHeaders.ContentType, "application/json")
+            setBody("{\"newPassword\":\"valid-password\"}")
+        }
+
+        assertEquals(HttpStatusCode.InternalServerError, response.status)
+        assertEquals("old-password", auth.getPassword())
+        val status = client.get("/api/onboarding/status") {
+            header(HttpHeaders.Authorization, basic("old-password"))
+        }
+        assertEquals(PasswordDecision.Pending, Json.decodeFromString<OnboardingStatus>(status.bodyAsText()).passwordDecision)
+    }
+
+    @Test
+    fun `completed onboarding rejects onboarding password change`() = testApplication {
+        val auth = InMemoryAuthManager("old-password")
+        configure(OnboardingCoordinator.completedForTest(), authManager = auth)
+
+        val response = client.post("/api/onboarding/password") {
+            header(HttpHeaders.Authorization, basic("old-password"))
+            header(HttpHeaders.ContentType, "application/json")
+            setBody("{\"newPassword\":\"valid-password\"}")
+        }
+
+        assertEquals(HttpStatusCode.Conflict, response.status)
+        assertEquals("old-password", auth.getPassword())
+    }
+
+    @Test
+    fun `normal password endpoint still requires current and new passwords`() = testApplication {
+        val auth = InMemoryAuthManager("old-password")
+        configure(OnboardingCoordinator.completedForTest(), authManager = auth)
+
+        val missingCurrent = client.post("/api/settings/password") {
+            header(HttpHeaders.Authorization, basic("old-password"))
+            header(HttpHeaders.ContentType, "application/json")
+            setBody("{\"newPassword\":\"valid-password\"}")
+        }
+        assertEquals(HttpStatusCode.BadRequest, missingCurrent.status)
+        assertEquals("old-password", auth.getPassword())
+
+        val changed = client.post("/api/settings/password") {
+            header(HttpHeaders.Authorization, basic("old-password"))
+            header(HttpHeaders.ContentType, "application/json")
+            setBody("{\"currentPassword\":\"old-password\",\"newPassword\":\"valid-password\"}")
+        }
+        assertEquals(HttpStatusCode.OK, changed.status)
+        assertEquals("valid-password", auth.getPassword())
+    }
+
+    @Test
     fun `password deferral completes eligible onboarding without changing password`() = testApplication {
         val auth = InMemoryAuthManager("unchanged-password")
         configure(

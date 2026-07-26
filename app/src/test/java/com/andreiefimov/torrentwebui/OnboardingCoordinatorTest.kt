@@ -156,6 +156,76 @@ class OnboardingCoordinatorTest {
     }
 
     @Test
+    fun `password change persists credential before changed decision and completion`() = runTest {
+        val events = mutableListOf<String>()
+        val store = RecordingOnboardingStateStore(
+            initial = OnboardingRecord(false, PasswordDecision.Pending),
+            onWrite = { events += "state:${it.passwordDecision}:${it.completed}" }
+        )
+        val coordinator = coordinator(store = store, hasDestination = true)
+
+        val result = coordinator.changePassword("household-passphrase") {
+            events += "password"
+            true
+        }
+
+        assertTrue(result is OnboardingPasswordChangeResult.Updated)
+        assertEquals(
+            listOf("password", "state:Changed:false", "state:Changed:true"),
+            events
+        )
+        assertTrue((result as OnboardingPasswordChangeResult.Updated).status.completed)
+    }
+
+    @Test
+    fun `password persistence failure leaves onboarding pending`() = runTest {
+        val store = RecordingOnboardingStateStore(
+            OnboardingRecord(false, PasswordDecision.Pending)
+        )
+
+        val result = coordinator(store = store, hasDestination = true)
+            .changePassword("household-passphrase") { false }
+
+        assertEquals(OnboardingPasswordChangeResult.PasswordPersistenceFailed, result)
+        assertEquals(OnboardingRecord(false, PasswordDecision.Pending), store.record)
+        assertEquals(0, store.writeCount)
+    }
+
+    @Test
+    fun `onboarding state failure occurs only after password persistence`() = runTest {
+        var passwordPersisted = false
+        val store = RecordingOnboardingStateStore(
+            initial = OnboardingRecord(false, PasswordDecision.Pending),
+            writeSucceeds = false
+        )
+
+        val result = coordinator(store = store, hasDestination = true).changePassword("another-pass") {
+            passwordPersisted = true
+            true
+        }
+
+        assertTrue(passwordPersisted)
+        assertEquals(OnboardingPasswordChangeResult.StatePersistenceFailed, result)
+        assertEquals(OnboardingRecord(false, PasswordDecision.Pending), store.record)
+    }
+
+    @Test
+    fun `completed onboarding rejects onboarding password change`() = runTest {
+        var persistenceCalls = 0
+        val store = RecordingOnboardingStateStore(
+            OnboardingRecord(true, PasswordDecision.Deferred)
+        )
+
+        val result = coordinator(store = store, hasDestination = true).changePassword("another-pass") {
+            persistenceCalls += 1
+            true
+        }
+
+        assertEquals(OnboardingPasswordChangeResult.AlreadyCompleted, result)
+        assertEquals(0, persistenceCalls)
+    }
+
+    @Test
     fun `completed onboarding rejects password deferral`() = runTest {
         val store = RecordingOnboardingStateStore(
             OnboardingRecord(true, PasswordDecision.Deferred)
@@ -199,7 +269,8 @@ class OnboardingCoordinatorTest {
 
     private class RecordingOnboardingStateStore(
         initial: OnboardingRecord? = null,
-        private val writeSucceeds: Boolean = true
+        private val writeSucceeds: Boolean = true,
+        private val onWrite: (OnboardingRecord) -> Unit = {}
     ) : OnboardingStateStore {
         var record = initial
         var writeCount = 0
@@ -209,6 +280,7 @@ class OnboardingCoordinatorTest {
 
         override fun write(record: OnboardingRecord): Boolean {
             writeCount += 1
+            onWrite(record)
             if (writeSucceeds) {
                 writes += record
                 this.record = record

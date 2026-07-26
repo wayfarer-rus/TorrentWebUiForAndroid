@@ -28,9 +28,13 @@ internal class PasswordResetController(
     fun confirm(): PasswordResetUiState {
         if (!state.confirmationRequired) return state
 
-        authManager.setPassword(WebUiCredentials.DEFAULT_PASSWORD)
+        val saved = authManager.setPassword(WebUiCredentials.DEFAULT_PASSWORD)
         state = PasswordResetUiState(
-            message = "WebUI Password reset. Reauthenticate open browsers."
+            message = if (saved) {
+                "WebUI Password reset. Reauthenticate open browsers."
+            } else {
+                "WebUI Password reset could not be saved. Try again."
+            }
         )
         return state
     }

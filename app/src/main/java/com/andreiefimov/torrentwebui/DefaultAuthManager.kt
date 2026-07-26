@@ -19,7 +19,6 @@ class DefaultAuthManager(context: Context) : AuthManager {
     override fun getPassword(): String =
         prefs.getString(KEY_PASSWORD, WebUiCredentials.DEFAULT_PASSWORD)!!
 
-    override fun setPassword(newPassword: String) {
-        prefs.edit().putString(KEY_PASSWORD, newPassword).apply()
-    }
+    override fun setPassword(newPassword: String): Boolean =
+        prefs.edit().putString(KEY_PASSWORD, newPassword).commit()
 }

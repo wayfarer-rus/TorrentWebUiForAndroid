@@ -495,3 +495,20 @@ The proposal is derived from Android's primary shared-storage root and canonical
 | `npm run test:e2e:m4:static` | PASS. |
 
 Consumer Onboarding now renders the same Directory Browser snippet used by the normal WebUI. `AndroidStorageApiOperations` remains the sole browse/validate/approve authority: it reports mounted Android roots with removable metadata, rejects unavailable or out-of-volume parents, revalidates every confirmation, and persists only the returned canonical path. Browser-only browsing and validation state is intentionally discarded on interruption.
+
+## Milestone 6: Consumer Onboarding — Ticket 07
+
+**Status:** PASS for current-tree JVM/Ktor, browser, static-regression, and Android-test compilation. No current-tree emulator or physical-device result is claimed.
+
+| Validation | Result |
+|---|---|
+| `OnboardingCoordinatorTest` password-change cycles | PASS — credential persistence precedes **changed** and completion records; credential/state persistence failures remain incomplete; completed onboarding rejects the operation. |
+| `OnboardingApiTest` authenticated password boundary | PASS — exact `{newPassword}` shape, four-character minimum, completed-state rejection, persistence failure, unchanged normal `{currentPassword,newPassword}` contract, immediate stale-credential rejection, and new-credential authentication. |
+| `PasswordResetControllerTest` regression | PASS — synchronous persistence failure preserves the old credential and produces a recovery error rather than claiming reset success. |
+| `npm run test:e2e:m6:onboarding` | PASS — 7 Playwright tests. Password coverage includes the two final choices, no current/default Password rendering, client-side mismatch, backend short-value rejection, exact request shape, full-page reload, and browser closure/reopen during reauthentication. |
+| `OnboardingPersistenceTest` | COMPILED, NOT RUN — Android SharedPreferences coverage reconstructs both the changed Password and completed **changed** decision after readiness/destination loss. |
+| `./gradlew :app:testDebugUnitTest :app:assembleDebug :app:compileDebugAndroidTestKotlin --console=plain` | PASS — 218 JVM tests, 0 failures/errors/skips; debug APK assembled; Android tests compiled. |
+| `npm run check` | PASS — 0 errors and 42 warnings in the Svelte page (39 pre-existing; 3 event-directive warnings added for the new password-choice/form actions). |
+| `npm run test:e2e:m4:static` | PASS. |
+
+`AuthManager` writes now return synchronous durable success. The onboarding endpoint accepts only a new Password, applies the shared minimum-length policy, persists it before recording **changed**, and never logs it. Successful change reloads the full page for HTTP Basic reauthentication; durable backend progress survives an interrupted handoff. The normal settings endpoint still requires the current and new values.

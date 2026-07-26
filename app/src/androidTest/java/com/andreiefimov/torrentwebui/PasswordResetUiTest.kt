@@ -57,8 +57,9 @@ class PasswordResetUiTest {
 
         override fun getPassword(): String = password
 
-        override fun setPassword(newPassword: String) {
+        override fun setPassword(newPassword: String): Boolean {
             password = newPassword
+            return true
         }
     }
 }

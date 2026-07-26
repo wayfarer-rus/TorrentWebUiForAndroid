@@ -42,6 +42,9 @@
 	let recommendedLoading = $state(false);
 	let onboardingActionLoading = $state(false);
 	let onboardingActionError = $state('');
+	let showOnboardingPasswordChange = $state(false);
+	let onboardingNewPassword = $state('');
+	let onboardingPasswordConfirmation = $state('');
 	let onboardingPoll: ReturnType<typeof setTimeout> | null = null;
 	let onboardingRequest: AbortController | null = null;
 	let normalUiStarted = false;
@@ -154,6 +157,43 @@
 			onboardingActionError = error instanceof Error
 				? error.message
 				: 'Unable to use the recommended download folder.';
+		} finally {
+			onboardingActionLoading = false;
+		}
+	}
+
+	function chooseAnotherOnboardingPassword() {
+		showOnboardingPasswordChange = true;
+		onboardingNewPassword = '';
+		onboardingPasswordConfirmation = '';
+		onboardingActionError = '';
+	}
+
+	function cancelOnboardingPasswordChange() {
+		showOnboardingPasswordChange = false;
+		onboardingNewPassword = '';
+		onboardingPasswordConfirmation = '';
+		onboardingActionError = '';
+	}
+
+	async function changeOnboardingPassword() {
+		onboardingActionError = '';
+		if (onboardingNewPassword !== onboardingPasswordConfirmation) {
+			onboardingActionError = 'The Password confirmation does not match.';
+			return;
+		}
+		onboardingActionLoading = true;
+		try {
+			await fetchJson('/api/onboarding/password', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ newPassword: onboardingNewPassword })
+			});
+			window.location.reload();
+		} catch (error) {
+			onboardingActionError = error instanceof Error
+				? error.message
+				: 'Unable to save the new Password.';
 		} finally {
 			onboardingActionLoading = false;
 		}
@@ -767,10 +807,36 @@
 			{/if}
 		{:else if onboardingStatus.passwordDecision === 'pending'}
 			<h2>Password choice</h2>
-			<p>You can keep the current Password for now or choose another one.</p>
-			<button on:click={deferOnboardingPassword} disabled={onboardingActionLoading}>
-				{onboardingActionLoading ? 'Finishing setup…' : 'Set it later'}
-			</button>
+			{#if !showOnboardingPasswordChange}
+				<p>Choose another Password now or keep the current one for later.</p>
+				<button on:click={chooseAnotherOnboardingPassword} disabled={onboardingActionLoading}>
+					Choose another password
+				</button>
+				<button on:click={deferOnboardingPassword} disabled={onboardingActionLoading}>
+					{onboardingActionLoading ? 'Finishing setup…' : 'Set it later'}
+				</button>
+			{:else}
+				<label for="onboarding-new-password">New Password</label>
+				<input
+					id="onboarding-new-password"
+					type="password"
+					autocomplete="new-password"
+					bind:value={onboardingNewPassword}
+				/>
+				<label for="onboarding-confirm-password">Confirm Password</label>
+				<input
+					id="onboarding-confirm-password"
+					type="password"
+					autocomplete="new-password"
+					bind:value={onboardingPasswordConfirmation}
+				/>
+				<button on:click={changeOnboardingPassword} disabled={onboardingActionLoading}>
+					{onboardingActionLoading ? 'Saving Password…' : 'Change Password'}
+				</button>
+				<button class="secondary-button" on:click={cancelOnboardingPasswordChange} disabled={onboardingActionLoading}>
+					Back
+				</button>
+			{/if}
 		{:else}
 			<h2>Finishing setup</h2>
 			<p>Your saved onboarding progress is being completed.</p>

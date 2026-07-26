@@ -36,6 +36,18 @@ class PasswordResetControllerTest {
     }
 
     @Test
+    fun `failed reset persistence reports failure and keeps authentication`() {
+        val auth = InMemoryAuthManager("forgotten-password", persistenceSucceeds = false)
+        val controller = PasswordResetController(auth)
+        controller.requestConfirmation()
+
+        val failed = controller.confirm()
+
+        assertEquals("WebUI Password reset could not be saved. Try again.", failed.message)
+        assertEquals("forgotten-password", auth.getPassword())
+    }
+
+    @Test
     fun `confirm without a pending confirmation does not reset authentication`() {
         val auth = InMemoryAuthManager("forgotten-password")
         val controller = PasswordResetController(auth)

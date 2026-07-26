@@ -196,6 +196,110 @@ test('alternate onboarding browser navigates primary and removable canonical pat
 	await expect(page.getByRole('heading', { name: 'Password choice' })).toBeVisible();
 });
 
+test('password change rejects mismatch and short values then reloads for reauthentication', async ({ page }) => {
+	const state = {
+		completed: false,
+		passwordDecision: 'pending',
+		hasApprovedDestination: true,
+		readiness: 'Ready'
+	};
+	let passwordRequests = 0;
+	let statusRequests = 0;
+
+	await page.route('**/api/onboarding/status', (route) => {
+		statusRequests += 1;
+		return route.fulfill({ contentType: 'application/json', body: JSON.stringify(state) });
+	});
+	await page.route('**/api/onboarding/password', (route) => {
+		passwordRequests += 1;
+		const body = route.request().postDataJSON();
+		if (body.newPassword.length < 4) {
+			return route.fulfill({
+				status: 400,
+				contentType: 'application/json',
+				body: JSON.stringify({ error: 'New password must be at least 4 characters' })
+			});
+		}
+		expect(Object.keys(body)).toEqual(['newPassword']);
+		state.passwordDecision = 'changed';
+		state.completed = true;
+		return route.fulfill({ contentType: 'application/json', body: JSON.stringify(state) });
+	});
+	await page.route('**/api/torrents', (route) => route.fulfill({
+		contentType: 'application/json', body: '[]'
+	}));
+	await page.route('**/api/storage/**', (route) => route.fulfill({
+		contentType: 'application/json', body: route.request().url().endsWith('/permission')
+			? JSON.stringify({ state: 'Ready' })
+			: '[]'
+	}));
+
+	await page.goto('/');
+	await expect(page.getByRole('button', { name: 'Choose another password' })).toBeVisible();
+	await expect(page.getByRole('button', { name: 'Set it later' })).toBeVisible();
+	await expect(page.getByText('start123')).toHaveCount(0);
+	await page.getByRole('button', { name: 'Choose another password' }).click();
+	await expect(page.getByLabel('Current Password')).toHaveCount(0);
+
+	await page.getByLabel('New Password').fill('valid-password');
+	await page.getByLabel('Confirm Password').fill('different-password');
+	await page.getByRole('button', { name: 'Change Password' }).click();
+	await expect(page.getByText('The Password confirmation does not match.')).toBeVisible();
+	await expect.poll(() => passwordRequests).toBe(0);
+
+	await page.getByLabel('New Password').fill('abc');
+	await page.getByLabel('Confirm Password').fill('abc');
+	await page.getByRole('button', { name: 'Change Password' }).click();
+	await expect(page.getByText('New password must be at least 4 characters')).toBeVisible();
+	await expect(page.getByRole('heading', { name: 'Consumer Onboarding' })).toBeVisible();
+
+	await page.getByLabel('New Password').fill('household passphrase');
+	await page.getByLabel('Confirm Password').fill('household passphrase');
+	await page.getByRole('button', { name: 'Change Password' }).click();
+	await expect(page.getByRole('heading', { name: 'Add Torrent' })).toBeVisible();
+	await expect.poll(() => statusRequests).toBeGreaterThan(1);
+	await expect.poll(() => passwordRequests).toBe(2);
+});
+
+test('closing during password reauthentication retains completed backend progress', async ({ page, context }) => {
+	const state = {
+		completed: false,
+		passwordDecision: 'pending',
+		hasApprovedDestination: true,
+		readiness: 'Ready'
+	};
+	await context.route('**/api/onboarding/status', (route) => route.fulfill({
+		contentType: 'application/json', body: JSON.stringify(state)
+	}));
+	await context.route('**/api/onboarding/password', (route) => {
+		state.completed = true;
+		state.passwordDecision = 'changed';
+		return route.fulfill({ contentType: 'application/json', body: JSON.stringify(state) });
+	});
+	await context.route('**/api/torrents', (route) => route.fulfill({
+		contentType: 'application/json', body: '[]'
+	}));
+	await context.route('**/api/storage/**', (route) => route.fulfill({
+		contentType: 'application/json', body: route.request().url().endsWith('/permission')
+			? JSON.stringify({ state: 'Ready' })
+			: '[]'
+	}));
+
+	await page.goto('/');
+	await page.getByRole('button', { name: 'Choose another password' }).click();
+	await page.getByLabel('New Password').fill('household passphrase');
+	await page.getByLabel('Confirm Password').fill('household passphrase');
+	const reloadStarted = page.waitForRequest((request) => request.isNavigationRequest());
+	await page.getByRole('button', { name: 'Change Password' }).click();
+	await reloadStarted;
+	await page.close();
+
+	const reopened = await context.newPage();
+	await reopened.goto('/');
+	await expect(reopened.getByRole('heading', { name: 'Add Torrent' })).toBeVisible();
+	await expect(reopened.getByRole('heading', { name: 'Consumer Onboarding' })).toHaveCount(0);
+});
+
 test('onboarding status requests time out instead of hanging', async ({ page }) => {
 	await page.addInitScript(() => {
 		const realFetch = window.fetch.bind(window);

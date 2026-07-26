@@ -37,6 +37,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.collect
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 import com.andreiefimov.torrentwebui.events.AlertEvent
 import com.andreiefimov.torrentwebui.events.EventBus
 import io.ktor.server.auth.Authentication
@@ -65,7 +68,10 @@ object TorrentServer {
     private var authManager: AuthManager = object : AuthManager {
         @Volatile private var password: String = WebUiCredentials.DEFAULT_PASSWORD
         override fun getPassword(): String = password
-        override fun setPassword(newPassword: String) { password = newPassword }
+        override fun setPassword(newPassword: String): Boolean {
+            password = newPassword
+            return true
+        }
     }
 
     /** Durable Consumer Onboarding authority — injected for authenticated boundary tests. */
@@ -357,6 +363,56 @@ object TorrentServer {
                                     ErrorResponse("password_decision_already_recorded")
                                 )
                                 PasswordDeferralResult.PersistenceFailed -> call.respond(
+                                    HttpStatusCode.InternalServerError,
+                                    ErrorResponse("password_decision_not_saved")
+                                )
+                            }
+                        }
+
+                        post("/password") {
+                            val body = try {
+                                call.receive<JsonObject>()
+                            } catch (_: Exception) {
+                                call.respond(HttpStatusCode.BadRequest, ErrorResponse("Invalid request body"))
+                                return@post
+                            }
+                            if (body.keys != setOf("newPassword")) {
+                                call.respond(
+                                    HttpStatusCode.BadRequest,
+                                    ErrorResponse("Only newPassword is accepted")
+                                )
+                                return@post
+                            }
+                            val supplied = (body["newPassword"] as? JsonPrimitive)
+                                ?.takeIf { it.isString }
+                                ?.contentOrNull
+                            if (supplied == null) {
+                                call.respond(HttpStatusCode.BadRequest, ErrorResponse("Invalid new password"))
+                                return@post
+                            }
+                            WebUiCredentials.validationError(supplied)?.let { error ->
+                                call.respond(HttpStatusCode.BadRequest, ErrorResponse(error))
+                                return@post
+                            }
+                            val newPassword = WebUiCredentials.normalizedPassword(supplied)
+                            when (val result = onboardingCoordinator.changePassword(
+                                newPassword,
+                                authManager::setPassword
+                            )) {
+                                is OnboardingPasswordChangeResult.Updated -> call.respond(result.status)
+                                OnboardingPasswordChangeResult.AlreadyCompleted -> call.respond(
+                                    HttpStatusCode.Conflict,
+                                    ErrorResponse("onboarding_already_completed")
+                                )
+                                OnboardingPasswordChangeResult.DecisionAlreadyRecorded -> call.respond(
+                                    HttpStatusCode.Conflict,
+                                    ErrorResponse("password_decision_already_recorded")
+                                )
+                                OnboardingPasswordChangeResult.PasswordPersistenceFailed -> call.respond(
+                                    HttpStatusCode.InternalServerError,
+                                    ErrorResponse("password_not_saved")
+                                )
+                                OnboardingPasswordChangeResult.StatePersistenceFailed -> call.respond(
                                     HttpStatusCode.InternalServerError,
                                     ErrorResponse("password_decision_not_saved")
                                 )
@@ -941,17 +997,18 @@ object TorrentServer {
                             }
 
                             // Validate new password.
-                            val newPassword = body.newPassword.trim()
-                            if (newPassword.length < 4) {
+                            WebUiCredentials.validationError(body.newPassword)?.let { error ->
+                                call.respond(HttpStatusCode.BadRequest, ErrorResponse(error))
+                                return@post
+                            }
+                            val newPassword = WebUiCredentials.normalizedPassword(body.newPassword)
+                            if (!authManager.setPassword(newPassword)) {
                                 call.respond(
-                                    HttpStatusCode.BadRequest,
-                                    ErrorResponse("New password must be at least 4 characters")
+                                    HttpStatusCode.InternalServerError,
+                                    ErrorResponse("Password could not be saved")
                                 )
                                 return@post
                             }
-
-                            authManager.setPassword(newPassword)
-                            Log.i(TAG, "Password changed successfully")
                             call.respond(PasswordChangeResponse(status = "ok"))
                         }
                     }
@@ -1127,7 +1184,10 @@ object TorrentServer {
         this.authManager = object : AuthManager {
             @Volatile private var password: String = WebUiCredentials.DEFAULT_PASSWORD
             override fun getPassword(): String = password
-            override fun setPassword(newPassword: String) { password = newPassword }
+            override fun setPassword(newPassword: String): Boolean {
+                password = newPassword
+                return true
+            }
         }
         this.daemonControl = TorrentSession
         this.assetReader = ::readAssetFromAssets

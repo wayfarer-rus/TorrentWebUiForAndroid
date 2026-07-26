@@ -15,8 +15,8 @@ This file defines the domain vocabulary used across the Torrent WebUI project. C
 - Browser renders a native credential dialog.
 
 ### AuthManager
-- Interface that abstracts password storage and retrieval.
-- Methods: `getPassword()`, `setPassword(newPassword)`.
+- Interface that abstracts Password storage and retrieval.
+- Methods: `getPassword()`, `setPassword(newPassword)`; writes report synchronous durable success or failure before callers advance dependent state.
 - Production implementation: `DefaultAuthManager` (SharedPreferences-backed).
 - Test implementation: `InMemoryAuthManager`.
 
@@ -58,6 +58,7 @@ _Avoid_: Current readiness, browser-local completion
 ### Password Decision
 - The durable Consumer Onboarding choice: **pending**, **changed**, or **deferred**.
 - **Pending** is unresolved; **changed** and **deferred** can satisfy the Password step.
+- During onboarding, **changed** is recorded only after the new Password is durably stored. The authenticated request accepts only the new value; confirmation is browser-local, and success reloads the page for HTTP Basic reauthentication.
 
 ### Onboarding Marker
 - The durable evidence that first-use migration has already classified an installation.

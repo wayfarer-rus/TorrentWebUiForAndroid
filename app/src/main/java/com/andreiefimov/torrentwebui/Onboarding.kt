@@ -50,6 +50,14 @@ internal sealed interface PasswordDeferralResult {
     data object PersistenceFailed : PasswordDeferralResult
 }
 
+internal sealed interface OnboardingPasswordChangeResult {
+    data class Updated(val status: OnboardingStatus) : OnboardingPasswordChangeResult
+    data object AlreadyCompleted : OnboardingPasswordChangeResult
+    data object DecisionAlreadyRecorded : OnboardingPasswordChangeResult
+    data object PasswordPersistenceFailed : OnboardingPasswordChangeResult
+    data object StatePersistenceFailed : OnboardingPasswordChangeResult
+}
+
 internal interface OnboardingStateStore {
     /** Null means this installation has never been initialized for M6. */
     fun read(): OnboardingRecord?
@@ -128,6 +136,37 @@ internal class OnboardingCoordinator(
             record = completed
         }
         PasswordDeferralResult.Updated(record.toStatus(destinationPresent, currentReadiness))
+    }
+
+    suspend fun changePassword(
+        newPassword: String,
+        persistPassword: (String) -> Boolean
+    ): OnboardingPasswordChangeResult = lock.withLock {
+        val destinationPresent = hasApprovedDestination()
+        val currentReadiness = readiness()
+        var record = store.read() ?: initialize(destinationPresent)
+        if (record.completed) return@withLock OnboardingPasswordChangeResult.AlreadyCompleted
+        if (record.passwordDecision != PasswordDecision.Pending) {
+            return@withLock OnboardingPasswordChangeResult.DecisionAlreadyRecorded
+        }
+        if (!persistPassword(newPassword)) {
+            return@withLock OnboardingPasswordChangeResult.PasswordPersistenceFailed
+        }
+        val changed = record.copy(passwordDecision = PasswordDecision.Changed)
+        if (!store.write(changed)) {
+            return@withLock OnboardingPasswordChangeResult.StatePersistenceFailed
+        }
+        record = changed
+        if (record.isEligibleForCompletion(destinationPresent, currentReadiness)) {
+            val completed = record.copy(completed = true)
+            if (!store.write(completed)) {
+                return@withLock OnboardingPasswordChangeResult.StatePersistenceFailed
+            }
+            record = completed
+        }
+        OnboardingPasswordChangeResult.Updated(
+            record.toStatus(destinationPresent, currentReadiness)
+        )
     }
 
     private fun OnboardingRecord.isEligibleForCompletion(
