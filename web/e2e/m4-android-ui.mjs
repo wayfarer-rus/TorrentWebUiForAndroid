@@ -18,7 +18,9 @@ export function createAndroidUi({ adb, serial, packageName }) {
 	function run(...args) {
 		return execFileSync(adb, ['-s', serial, ...args], {
 			encoding: 'utf8',
-			stdio: ['ignore', 'pipe', 'pipe']
+			stdio: ['ignore', 'pipe', 'pipe'],
+			timeout: 30_000,
+			killSignal: 'SIGKILL'
 		}).trim();
 	}
 

@@ -39,6 +39,34 @@ test('incomplete onboarding hides normal controls, resumes, and advances after r
 	await expect(page.getByRole('heading', { name: 'Add Torrent' })).toHaveCount(0);
 });
 
+test('readiness holding state survives refresh and browser closure before advancing', async ({ page, context }) => {
+	const state = {
+		completed: false,
+		passwordDecision: 'pending',
+		hasApprovedDestination: false,
+		readiness: 'Service unavailable'
+	};
+	await context.route('**/api/onboarding/status', (route) => route.fulfill({
+		contentType: 'application/json', body: JSON.stringify(state)
+	}));
+	await context.route('**/api/onboarding/recommended-destination', (route) => route.fulfill({
+		contentType: 'application/json',
+		body: JSON.stringify({ path: '/storage/primary/Download/Torrents' })
+	}));
+
+	await page.goto('/');
+	await expect(page.getByRole('heading', { name: 'Service unavailable' })).toBeVisible();
+	await page.reload();
+	await expect(page.getByRole('heading', { name: 'Service unavailable' })).toBeVisible();
+	await page.close();
+
+	const reopened = await context.newPage();
+	await reopened.goto('/');
+	await expect(reopened.getByRole('heading', { name: 'Service unavailable' })).toBeVisible();
+	state.readiness = 'Ready';
+	await expect(reopened.getByRole('heading', { name: 'Choose a download folder' })).toBeVisible({ timeout: 4000 });
+});
+
 test('recommended destination and Set it later complete onboarding durably', async ({ page }) => {
 	const state = {
 		completed: false,
@@ -320,6 +348,30 @@ test('onboarding status requests time out instead of hanging', async ({ page }) 
 		timeout: 7000
 	});
 	await expect(page.getByRole('heading', { name: 'Add Torrent' })).toHaveCount(0);
+});
+
+test('completed onboarding keeps normal controls during a later daemon failure state', async ({ page }) => {
+	await page.route('**/api/onboarding/status', (route) => route.fulfill({
+		contentType: 'application/json',
+		body: JSON.stringify({
+			completed: true,
+			passwordDecision: 'changed',
+			hasApprovedDestination: false,
+			readiness: 'Service unavailable'
+		})
+	}));
+	await page.route('**/api/torrents', (route) => route.fulfill({
+		contentType: 'application/json', body: '[]'
+	}));
+	await page.route('**/api/storage/**', (route) => route.fulfill({
+		contentType: 'application/json', body: route.request().url().endsWith('/permission')
+			? JSON.stringify({ state: 'Ready' })
+			: '[]'
+	}));
+
+	await page.goto('/');
+	await expect(page.getByRole('heading', { name: 'Add Torrent' })).toBeVisible();
+	await expect(page.getByRole('heading', { name: 'Consumer Onboarding' })).toHaveCount(0);
 });
 
 test('completed onboarding starts the normal WebUI', async ({ page }) => {

@@ -531,3 +531,23 @@ Consumer Onboarding now renders the same Directory Browser snippet used by the n
 | Current-tree regression suite | PASS — 218 JVM tests; debug APK assembly; Android-test compilation; 7 Playwright onboarding tests; Svelte check with 0 errors/42 warnings; M4 static regression. |
 
 The host-owned runner records only explicit emulator diagnostics, never claims physical LAN coverage, and tears down in `finally` even on failure. Its only shared-storage fixture is the empty Recommended Destination created by the product; cleanup uses `rmdir` and refuses pre-existing content.
+
+## Milestone 6: Consumer Onboarding — Ticket 09
+
+**Status:** PASS on the isolated `emulator_skill` AVD and current-tree JVM/browser/static suites. This is emulator-only evidence; no physical-device or separate-LAN-browser claim is made.
+
+| Validation | Result |
+|---|---|
+| Environment | PASS — visible `emulator_skill`, Android API 36, `arm64-v8a`; the runner refused physical/non-isolated devices and used the real debug APK, packaged WebUI, Android permission UI, JNI/libtorrent session, Ktor, and authenticated Chromium. |
+| `npm run e2e:m6:interruption:migration` | PASS — the bounded real-APK runner completed the queue/destination/Password migration and incomplete-marker-precedence matrix, then proved full teardown. |
+| `npm run e2e:m6:interruption:journey` | PASS — a separate bounded real-APK run completed the interruption, alternate-destination, credential, recovery, sensitive-log, and teardown matrices on device port `8080`. |
+| Resume matrix | PASS — Android Startup Bootstrap resumed All Files Access after an application-process stop. In the authenticated WebUI, refresh, browser close/reopen, and application-process restart resumed the destination and Password steps; browser closure during Password reauthentication retained completed backend progress. Browser readiness polling, refresh, and close/reopen are covered by the 9-test Playwright suite because Ktor is not reachable until Android bootstrap can run the daemon. |
+| Alternate destination | PASS — the WebUI declined the recommendation path, validated and approved a different real canonical directory on an emulator-owned removable Storage Volume, and completed with that Approved Destination. |
+| First-M6 migration | PASS — separate real-APK fixtures proved durable queue, Approved Destination, and non-default Password evidence migrate only with no marker; removing queue evidence after initialization did not rerun migration, while an explicit incomplete marker with a destination remained at the Password decision. |
+| Credential recovery | PASS — **Choose another password** omitted the current-Password field and reloaded. After an application-process restart, protected API results remained stale `401` / changed `200` and normal WebUI progress remained complete. Visible Android Password Reset showed confirmation with no current/replacement input and produced changed `401` / `start123` `200`. |
+| Durable completion | PASS — permission loss retained the completed durable marker, exposed Android's visible revoked-storage recovery state, and restored the normal WebUI through the visible grant flow. Unmounting the selected removable Storage Volume, removing the last Approved Destination, and an explicit Android process crash/restart likewise did not reopen Consumer Onboarding; browser coverage separately proves completed onboarding remains normal for backend **Service unavailable**. |
+| Sensitive-data and teardown audit | PASS — app-process logs were checked for both credentials, complete Authorization header values, the exercised magnet/private tracker values, and routine fixture paths. Every scenario cleared owned private state; final teardown proved daemon/listener/forward/fixture/private-state absence and disabled virtual storage. |
+| `npm run test:e2e:m6:interruption:policy` | PASS — 5 tests cover complete scenario matrices, credential transitions, Password Reset presentation, all sensitive categories, bounded requests, syntax, and forbidden shell permission grants. |
+| Current-tree regression suite | PASS — 218 JVM tests with 0 failures/errors/skips; debug APK assembly and Android-test compilation; 9 Playwright onboarding tests; clean-install policy 7/7; Svelte check with 0 errors/42 warnings; M4 static regression 5/5. |
+
+The real-APK runner owns only uniquely named empty destination fixtures, fails if the fixture root or ADB host-forward already exists, and removes those resources in `finally`. Physical-device LAN onboarding remains for Ticket 12.

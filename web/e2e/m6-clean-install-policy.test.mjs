@@ -43,7 +43,7 @@ test('acceptance sources contain no shell permission grants', async () => {
 		new RegExp(['pm', 'grant'].join('\\s+'), 'i'),
 		new RegExp(['app', 'ops'].join('\\s*'), 'i')
 	];
-	for (const relative of ['./m6-clean-install-runner.mjs', './m4-android-ui.mjs']) {
+	for (const relative of ['./m6-clean-install-runner.mjs', './m6-real-apk-tools.mjs', './m4-android-ui.mjs']) {
 		const source = await readFile(fileURLToPath(new URL(relative, import.meta.url)), 'utf8');
 		assert(forbidden.every((pattern) => !pattern.test(source)), `${relative} grants permission from the shell`);
 	}

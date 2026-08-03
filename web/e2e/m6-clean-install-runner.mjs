@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from '@playwright/test';
 import { createAndroidUi } from './m4-android-ui.mjs';
+import { createAdbRunner, waitFor } from './m6-real-apk-tools.mjs';
 import {
 	assertCanonicalPathMatch,
 	assertHostForwardAvailable,
@@ -26,33 +26,7 @@ const baseUrl = `http://127.0.0.1:${hostPort}`;
 const defaultPassword = 'start123';
 const authorization = `Basic ${Buffer.from(`browser:${defaultPassword}`).toString('base64')}`;
 
-function adbRun(...args) {
-	const command = args.join(' ');
-	const forbidden = [
-		new RegExp(['pm', 'grant'].join('\\s+'), 'i'),
-		new RegExp(['app', 'ops'].join('\\s*'), 'i')
-	];
-	assert(forbidden.every((pattern) => !pattern.test(command)), 'Permission shell grants are forbidden.');
-	return execFileSync(adb, args, {
-		encoding: 'utf8',
-		stdio: ['ignore', 'pipe', 'pipe']
-	}).trim();
-}
-
-async function waitFor(check, description, timeoutMs = 30_000) {
-	const deadline = Date.now() + timeoutMs;
-	let lastError;
-	while (Date.now() < deadline) {
-		try {
-			const result = await check();
-			if (result) return result;
-		} catch (error) {
-			lastError = error;
-		}
-		await new Promise((resolveDelay) => setTimeout(resolveDelay, 250));
-	}
-	throw new Error(`Timed out waiting for ${description}`, { cause: lastError });
-}
+const adbRun = createAdbRunner(adb);
 
 assert(existsSync(apk), `Debug APK is missing: ${apk}`);
 const devices = adbRun('devices').split('\n').slice(1)

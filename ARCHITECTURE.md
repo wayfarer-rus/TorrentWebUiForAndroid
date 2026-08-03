@@ -172,6 +172,9 @@ scripts/
 - `m6-clean-install-runner.mjs` owns the bounded clean-install happy path across the visible Android permission UI, daemon/JNI startup, default-port Ktor listener, packaged WebUI, Chromium HTTP Basic authentication, Recommended Destination creation, and Password deferral.
 - The runner refuses physical devices and non-isolated AVDs, forbids shell permission grants, starts timing at the first actionable Android bootstrap screen, compares the backend path with ADB canonical filesystem evidence, and fail-closes every teardown audit.
 - Completion is rechecked after browser refresh and an explicit daemon stop/restart through reopened MainActivity. Teardown stops the daemon/server and removes the created folder, application state, recovery records, credential state, virtual storage, and ADB forwarding.
+- `m6-interruption-runner.mjs` extends the same real-APK boundary with separately bounded, cleanup-owned migration and journey scenarios. They cover first-M6 migration evidence, incomplete-marker precedence, Android Startup Bootstrap process interruption, refresh/browser/process interruption at each reachable WebUI step, alternate removable-volume destination approval, durable Password change and HTTP Basic handoff, and Android-local Password Reset.
+- Durable completion is then observed through permission loss/restoration, removable Storage Volume unmount, removal of the last Approved Destination, and explicit Android process crash/restart. Scenario evidence is accepted only when the required resume, migration, recovery, credential-status, sensitive-log, and teardown matrices are complete; the runner still makes no physical-LAN claim.
+- `m6-real-apk-tools.mjs` centralizes bounded polling and the shell-permission-grant guard used by both M6 real-APK runners so their safety policy cannot drift.
 
 ## Known Limitations
 
