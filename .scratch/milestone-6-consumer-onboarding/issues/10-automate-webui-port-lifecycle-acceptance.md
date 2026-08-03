@@ -4,13 +4,13 @@
 
 **Blocked by:** 02 — Configure the WebUI Port from Android; 08 — Automate the clean-install onboarding happy path.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Android shows the default configured and effective port after clean startup.
-- [ ] Applying a valid available port makes the authenticated WebUI reachable there and retires the old listener.
-- [ ] An active torrent session and durable transfer intent survive the WebUI server replacement.
-- [ ] Invalid input, occupied-port bind failure, and forced persistence failure preserve the previous reachable server and configured port.
-- [ ] A persisted unavailable port on cold start is reported on Android without silently replacing the configuration.
-- [ ] Browser and WebSocket clients reconnect successfully after a valid switch.
-- [ ] Teardown removes candidate and active listeners, restores port `8080`, and leaves no daemon, forwarding, credential, queue, or fixture state.
-- [ ] Existing daemon safe-stop, permission-blocked WebUI, authentication, and WebSocket regressions pass.
+- [x] Android shows the default configured and effective port after clean startup.
+- [x] Applying a valid available port makes the authenticated WebUI reachable there and retires the old listener.
+- [x] An active torrent session and durable transfer intent survive the WebUI server replacement.
+- [x] Invalid input, occupied-port bind failure, and forced persistence failure preserve the previous reachable server and configured port.
+- [x] A persisted unavailable port on cold start is reported on Android without silently replacing the configuration.
+- [x] Browser and WebSocket clients reconnect successfully after a valid switch.
+- [x] Teardown removes candidate and active listeners, restores port `8080`, and leaves no daemon, forwarding, credential, queue, or fixture state.
+- [x] Existing daemon safe-stop, permission-blocked WebUI, authentication, and WebSocket regressions pass.

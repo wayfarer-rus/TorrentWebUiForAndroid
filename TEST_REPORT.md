@@ -551,3 +551,23 @@ The host-owned runner records only explicit emulator diagnostics, never claims p
 | Current-tree regression suite | PASS — 218 JVM tests with 0 failures/errors/skips; debug APK assembly and Android-test compilation; 9 Playwright onboarding tests; clean-install policy 7/7; Svelte check with 0 errors/42 warnings; M4 static regression 5/5. |
 
 The real-APK runner owns only uniquely named empty destination fixtures, fails if the fixture root or ADB host-forward already exists, and removes those resources in `finally`. Physical-device LAN onboarding remains for Ticket 12.
+
+## Milestone 6: Consumer Onboarding — Ticket 10
+
+**Status:** PASS on the isolated `emulator_skill` AVD for the real-APK WebUI Port matrix. This is emulator-only evidence; no physical-device or separate-LAN-browser claim is made.
+
+| Validation | Result |
+|---|---|
+| Environment | PASS — visible `emulator_skill`, Android API 36, `arm64-v8a`; the runner refused physical/non-isolated devices and used the real debug APK, Android UI, JNI/libtorrent session, Ktor, authenticated Chromium, and device listeners. |
+| `node e2e/m6-port-lifecycle-runner.mjs` | PASS — the bounded runner completed all default, switch, rollback, cold-start, reconnection, security, and teardown scenarios. |
+| Default and valid switch | PASS — Android showed configured/effective `8080`; applying available port `18084` made the authenticated WebUI reachable there and retired `8080`. The previous browser WebSocket closed and a new authenticated browser/WebSocket received torrent snapshots on the promoted listener. |
+| Session and durable intent | PASS — app-process logs recorded exactly one real native-session initialization through the WebUI switch, while the restored paused transfer retained the same runtime ID and durable queue ID. The focused Android lifecycle test independently recorded one `DaemonControl.init` and zero destroys across promotion. |
+| Atomic rollback | PASS — invalid input, an owned Android listener occupying `18085`, and a forced SharedPreferences write failure for candidate `18086` all preserved configured/effective `18084` and durable configuration. After each failure, an authenticated queue read through the old server returned the same runtime and queue identities; candidate listeners were absent. |
+| Cold-start recovery | PASS — persisted port `18087` was occupied before daemon startup. Android reported configured `18087`, effective **Unavailable**, and the bind error without silently replacing the setting. The runner then restored `8080` and verified a normal default listener before safe stop. |
+| Authentication and WebSocket | PASS — unauthenticated WebUI requests returned `401` before and after the switch; authenticated browser and WebSocket clients reconnected successfully on the new listener. |
+| Sensitive-data and teardown audit | PASS — logs from every recorded app process, including cold-start failure, excluded the Password, complete encoded Authorization value, magnet, and destination path. Final teardown restored the default configuration and proved daemon/default/candidate/occupied listeners, ADB forwards, queue/catalog/onboarding/auth/port private state, and the owned fixture absent. |
+| `npm run test:e2e:m6:port:policy` | PASS — 4 tests cover observed scenario evidence, listener promotion, one native-session initialization, queue identity, fail-closed teardown, bounded requests, syntax, and forbidden shell permission grants. |
+| Focused Android instrumentation | PASS — 3 tests from `WebUiPortPersistenceTest` and `WebUiPortLifecycleTest` on the API 36 AVD; port persistence/range behavior passed and a switch recorded one session initialization with zero destroys. Permissions were prepared through the visible Android UI. |
+| Current-tree regression suite | PASS — 218 JVM tests with 0 failures/errors/skips, including daemon safe-stop/lifecycle, storage-permission, authentication, and WebSocket snapshots; debug APK assembly and Android-test compilation; 9 Playwright onboarding tests; M6 clean-install 7/7, interruption 5/5, and port 4/4 policy tests; Svelte check with 0 errors/42 warnings; M4 static regression 5/5. |
+
+The host runner uses only uniquely named empty fixtures, exclusive host forwards, owned `nc` listeners, and reversible app-private file permissions. It adds no production failure-injection API or LAN-address discovery.

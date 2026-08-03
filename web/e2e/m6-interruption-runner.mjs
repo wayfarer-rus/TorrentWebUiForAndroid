@@ -4,7 +4,13 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from '@playwright/test';
 import { createAndroidUi } from './m4-android-ui.mjs';
-import { createAdbRunner, waitFor } from './m6-real-apk-tools.mjs';
+import {
+	createAdbRunner,
+	seedRunAsFile,
+	shellSingleQuote,
+	tapVisibleAndroidAction,
+	waitFor
+} from './m6-real-apk-tools.mjs';
 import {
 	assertHostForwardAvailable,
 	assertNoDefaultPasswordInRenderedContent,
@@ -43,10 +49,6 @@ const adbRun = createAdbRunner(adb);
 
 function basicAuthorization(password) {
 	return `Basic ${Buffer.from(`browser:${password}`).toString('base64')}`;
-}
-
-function shellSingleQuote(value) {
-	return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 assert(existsSync(apk), `Debug APK is missing: ${apk}`);
@@ -106,24 +108,6 @@ function recordAppProcessIds() {
 	output.split(/\s+/).filter(Boolean).forEach((pid) => scenarioPids.add(pid));
 }
 
-async function tapVisibleAndroidAction(label, attempts = 8) {
-	for (let attempt = 0; attempt < attempts; attempt += 1) {
-		const hierarchy = await androidUi.hierarchy();
-		const node = hierarchy.match(new RegExp(`<node[^>]*text="${label}"[^>]*enabled="true"[^>]*>`))?.[0];
-		if (node) {
-			const bounds = node.match(/bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"/);
-			assert(bounds, `${label} UI node has no bounds.`);
-			const x = Math.floor((Number(bounds[1]) + Number(bounds[3])) / 2);
-			const y = Math.floor((Number(bounds[2]) + Number(bounds[4])) / 2);
-			androidUi.run('shell', 'input', 'tap', String(x), String(y));
-			return;
-		}
-		androidUi.run('shell', 'input', 'swipe', '540', '1900', '540', '650', '250');
-		await new Promise((resolveDelay) => setTimeout(resolveDelay, 250));
-	}
-	assert.fail(`${label} was not visible and enabled in the Android fallback UI.`);
-}
-
 async function observePermissionRecoveryState() {
 	for (let attempt = 0; attempt < 3; attempt += 1) {
 		androidUi.run('shell', 'input', 'keyevent', 'KEYCODE_HOME');
@@ -154,7 +138,7 @@ async function startApp(password) {
 		let started = false;
 		for (let attempt = 0; attempt < 3 && !started; attempt += 1) {
 			try {
-				await tapVisibleAndroidAction('Start downloads');
+				await tapVisibleAndroidAction(androidUi, 'Start downloads');
 			} catch (error) {
 				if (!listenerActive()) throw error;
 			}
@@ -227,15 +211,6 @@ function clearOwnedPrivateState() {
 		'rm -rf files/* shared_prefs/* databases/* no_backup/* cache/* code_cache/*; mkdir -p files shared_prefs'
 	);
 	assert(privateStateIsAbsent(), 'App-private M6 state remained after scenario cleanup.');
-}
-
-function seedPrivateFile(relativePath, content) {
-	const encoded = Buffer.from(content).toString('base64');
-	const parent = relativePath.split('/').slice(0, -1).join('/');
-	adbArgs(
-		'exec-out', 'run-as', packageName, 'sh', '-c',
-		`mkdir -p ${shellSingleQuote(parent)}; echo ${shellSingleQuote(encoded)} | base64 -d > ${shellSingleQuote(relativePath)}`
-	);
 }
 
 function onboardingPreferences({ completed = false, decision = 'Pending' } = {}) {
@@ -378,9 +353,23 @@ try {
 	const bootstrapPid = adbArgs('shell', `pidof '${packageName}' || true`);
 	assert(bootstrapPid, 'Android Startup Bootstrap process is not running.');
 	androidUi.run('shell', 'am', 'force-stop', packageName);
-	androidUi.run('shell', 'input', 'keyevent', 'KEYCODE_HOME');
-	androidUi.run('shell', 'am', 'start', '-n', activityName);
-	await androidUi.waitForNode(/<node[^>]*checkable="true"[^>]*checked="false"[^>]*>/, 'All Files Access after bootstrap process restart', 15_000);
+	let bootstrapResumed = false;
+	for (let attempt = 0; attempt < 3 && !bootstrapResumed; attempt += 1) {
+		androidUi.run('shell', 'input', 'keyevent', 'KEYCODE_HOME');
+		androidUi.run('shell', 'am', 'start', '-n', activityName);
+		try {
+			await androidUi.waitForNode(/<node[^>]*checkable="true"[^>]*checked="false"[^>]*>/, 'All Files Access after bootstrap process restart', 5_000);
+			bootstrapResumed = true;
+		} catch {
+			try {
+				await androidUi.waitForNode(/<node[^>]*text="Torrent Daemon"[^>]*>/, 'Android bootstrap recovery surface', 2_000);
+				await tapVisibleAndroidAction(androidUi, 'Grant All Files Access');
+				await androidUi.waitForNode(/<node[^>]*checkable="true"[^>]*checked="false"[^>]*>/, 'All Files Access from recovery surface', 5_000);
+				bootstrapResumed = true;
+			} catch { /* Relaunch the unresolved bootstrap flow. */ }
+		}
+	}
+	assert(bootstrapResumed, 'Android Startup Bootstrap did not resume All Files Access after process stop.');
 	try {
 		await androidUi.setCurrentAllFilesAccess(true);
 	} catch {
@@ -390,7 +379,7 @@ try {
 	}
 	androidUi.run('shell', 'am', 'start', '-n', activityName);
 	await androidUi.waitForNode(/<node[^>]*text="Torrent Daemon"[^>]*>/, 'Torrent Daemon screen');
-	await tapVisibleAndroidAction('Start downloads');
+	await tapVisibleAndroidAction(androidUi, 'Start downloads');
 	await waitFor(() => listenerActive(), 'initial Ktor listener', 30_000);
 	installOwnedForward();
 	await waitFor(async () => (await request('/health', defaultPassword)).ok, 'initial authenticated Ktor health');
@@ -417,21 +406,21 @@ try {
 	if (selectedScenario !== 'journey') {
 	await runMigrationEvidence(
 		'durableQueue',
-		() => seedPrivateFile('files/queue_intent.json', queueContent(migrationDestination)),
+		() => seedRunAsFile(adbArgs, packageName, 'files/queue_intent.json', queueContent(migrationDestination)),
 		defaultPassword,
 		false,
 		sensitiveValues
 	);
 	await runMigrationEvidence(
 		'approvedDestination',
-		() => seedPrivateFile('files/destination_catalog.txt', catalogContent(migrationDestination)),
+		() => seedRunAsFile(adbArgs, packageName, 'files/destination_catalog.txt', catalogContent(migrationDestination)),
 		defaultPassword,
 		true,
 		sensitiveValues
 	);
 	await runMigrationEvidence(
 		'nonDefaultPassword',
-		() => seedPrivateFile('shared_prefs/webui_auth.xml', authPreferences(migrationPassword)),
+		() => seedRunAsFile(adbArgs, packageName, 'shared_prefs/webui_auth.xml', authPreferences(migrationPassword)),
 		migrationPassword,
 		false,
 		sensitiveValues
@@ -439,8 +428,8 @@ try {
 
 	progress('migration:incomplete-marker-precedence');
 	clearOwnedPrivateState();
-	seedPrivateFile('files/destination_catalog.txt', catalogContent(migrationDestination));
-	seedPrivateFile('shared_prefs/consumer_onboarding.xml', onboardingPreferences());
+	seedRunAsFile(adbArgs, packageName, 'files/destination_catalog.txt', catalogContent(migrationDestination));
+	seedRunAsFile(adbArgs, packageName, 'shared_prefs/consumer_onboarding.xml', onboardingPreferences());
 	adbArgs('logcat', '-c');
 	await startApp(defaultPassword);
 	page = await openBrowser(defaultPassword);
@@ -537,7 +526,7 @@ try {
 
 	androidUi.run('shell', 'am', 'start', '--activity-reorder-to-front', '-n', activityName);
 	await androidUi.waitForNode(/<node[^>]*text="Torrent Daemon"[^>]*>/, 'Android Password Reset surface');
-	await tapVisibleAndroidAction('Reset WebUI Password');
+	await tapVisibleAndroidAction(androidUi, 'Reset WebUI Password');
 	const resetHierarchy = await androidUi.hierarchy();
 	assertPasswordResetDialog(resetHierarchy);
 	await androidUi.tapText('Reset Password');
@@ -555,7 +544,7 @@ try {
 	await observePermissionRecoveryState();
 	recoveryStates.push('permissionLoss');
 
-	await tapVisibleAndroidAction('Grant All Files Access');
+	await tapVisibleAndroidAction(androidUi, 'Grant All Files Access');
 	await androidUi.setCurrentAllFilesAccess(true);
 	await startApp(defaultPassword);
 	page = await openBrowser(defaultPassword);

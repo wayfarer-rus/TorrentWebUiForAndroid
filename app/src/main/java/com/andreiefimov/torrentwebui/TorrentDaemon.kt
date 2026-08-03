@@ -565,6 +565,7 @@ class TorrentDaemon : Service() {
         }
         this.daemonControl = control
         TorrentServer.daemonControl = control
+        android.util.Log.i(TAG, "Native torrent session initialized")
 
         this.queueStore = store
 

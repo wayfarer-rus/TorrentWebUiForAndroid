@@ -12,10 +12,12 @@
     "test:e2e:m6:onboarding": "npm run build && playwright test --config=playwright.m6.config.mjs",
     "test:e2e:m6:clean-install:policy": "node --check e2e/m6-clean-install-runner.mjs && node --test e2e/m6-clean-install-policy.test.mjs",
     "test:e2e:m6:interruption:policy": "node --check e2e/m6-interruption-runner.mjs && node --test e2e/m6-interruption-policy.test.mjs",
+    "test:e2e:m6:port:policy": "node --check e2e/m6-port-lifecycle-runner.mjs && node --test e2e/m6-port-lifecycle-policy.test.mjs",
     "e2e:m6:clean-install": "npm run copy-assets && cd .. && ./gradlew :app:assembleDebug --console=plain && cd web && node e2e/m6-clean-install-runner.mjs",
     "e2e:m6:interruption:migration": "M6_SCENARIO=migration node e2e/m6-interruption-runner.mjs",
     "e2e:m6:interruption:journey": "M6_SCENARIO=journey node e2e/m6-interruption-runner.mjs",
     "e2e:m6:interruption": "npm run copy-assets && cd .. && ./gradlew :app:assembleDebug --console=plain && cd web && npm run e2e:m6:interruption:migration && npm run e2e:m6:interruption:journey",
+    "e2e:m6:port": "npm run copy-assets && cd .. && ./gradlew :app:assembleDebug --console=plain && cd web && node e2e/m6-port-lifecycle-runner.mjs",
     "e2e:m4:runner": "node e2e/m4-runner.mjs",
     "e2e:m4:live": "npm run copy-assets && cd .. && ./gradlew :app:installDebug --console=plain && cd web && node e2e/m4-runner.mjs",
     "e2e:m4:official-live": "M4_OFFICIAL_TORRENT_SMOKE=true npm run e2e:m4:live"
