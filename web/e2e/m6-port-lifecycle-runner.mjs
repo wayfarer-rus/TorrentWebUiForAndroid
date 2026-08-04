@@ -21,6 +21,7 @@ import {
 	tapVisibleAndroidAction,
 	waitFor
 } from './m6-real-apk-tools.mjs';
+import { COMPLETED_ONBOARDING_RECORD } from './onboarding-private-state-fixture.mjs';
 
 const e2eDirectory = fileURLToPath(new URL('.', import.meta.url));
 const repositoryRoot = resolve(e2eDirectory, '../..');
@@ -129,10 +130,6 @@ async function stopDaemon(hostPort) {
 	);
 }
 
-function onboardingPreferences() {
-	return `<?xml version='1.0' encoding='utf-8' standalone='yes' ?>\n<map>\n<boolean name="initialized" value="true" />\n<boolean name="completed" value="true" />\n<string name="password_decision">Deferred</string>\n</map>\n`;
-}
-
 function portPreferences(port) {
 	return `<?xml version='1.0' encoding='utf-8' standalone='yes' ?>\n<map>\n<int name="configured_port" value="${port}" />\n</map>\n`;
 }
@@ -177,17 +174,27 @@ function privateStateIsAbsent() {
 }
 
 async function portHierarchy(configured, effective, errorPattern) {
-	return waitFor(async () => {
-		const hierarchy = await androidUi.hierarchy();
-		const status = new RegExp(
-			`text="Configured"[\\s\\S]*?text="${configured}"[\\s\\S]*?text="Effective"[\\s\\S]*?text="${effective}"`
+	const status = new RegExp(
+		`text="Configured"[\\s\\S]*?text="${configured}"[\\s\\S]*?text="Effective"[\\s\\S]*?text="${effective}"`
+	);
+	let statusObserved = false;
+	let errorObserved = !errorPattern;
+	let lastHierarchy = '';
+	try {
+		return await waitFor(async () => {
+			lastHierarchy = await androidUi.hierarchy();
+			statusObserved ||= status.test(lastHierarchy);
+			errorObserved ||= Boolean(errorPattern?.test(lastHierarchy));
+			if (statusObserved && errorObserved) return lastHierarchy;
+			androidUi.scrollBidirectionally(lastHierarchy);
+			return false;
+		}, `Android WebUI Port status ${configured}/${effective}`, 30_000);
+	} catch (error) {
+		throw new Error(
+			`Android WebUI Port evidence incomplete: status=${statusObserved} error=${errorObserved}; hierarchy=${lastHierarchy.slice(0, 1_000)}`,
+			{ cause: error }
 		);
-		if (status.test(hierarchy) && (!errorPattern || errorPattern.test(hierarchy))) return hierarchy;
-		if (hierarchy.includes(`text="Configured"`)) return false;
-		const [fromY, toY] = hierarchy.includes('text="Start downloads"') ? ['650', '1900'] : ['1900', '650'];
-		androidUi.run('shell', 'input', 'swipe', '540', fromY, '540', toY, '250');
-		return false;
-	}, `Android WebUI Port status ${configured}/${effective}`, 15_000);
+	}
 }
 
 async function applyPort(input) {
@@ -283,7 +290,7 @@ try {
 	assert.equal(adbArgs('shell', 'readlink', '-f', destination), destination);
 	seedRunAsFile(adbArgs, packageName, 'files/queue_intent.json', queueContent());
 	seedRunAsFile(adbArgs, packageName, 'files/destination_catalog.txt', catalogContent());
-	seedRunAsFile(adbArgs, packageName, 'shared_prefs/consumer_onboarding.xml', onboardingPreferences());
+	seedRunAsFile(adbArgs, packageName, 'shared_prefs/consumer_onboarding.xml', COMPLETED_ONBOARDING_RECORD);
 	adbArgs('logcat', '-c');
 	await startAppOnExpectedPort(defaultPort);
 	await waitFor(async () => (await request(defaultHostPort, '/health')).ok, 'scenario authenticated health');

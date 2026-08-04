@@ -571,3 +571,24 @@ The real-APK runner owns only uniquely named empty destination fixtures, fails i
 | Current-tree regression suite | PASS — 218 JVM tests with 0 failures/errors/skips, including daemon safe-stop/lifecycle, storage-permission, authentication, and WebSocket snapshots; debug APK assembly and Android-test compilation; 9 Playwright onboarding tests; M6 clean-install 7/7, interruption 5/5, and port 4/4 policy tests; Svelte check with 0 errors/42 warnings; M4 static regression 5/5. |
 
 The host runner uses only uniquely named empty fixtures, exclusive host forwards, owned `nc` listeners, and reversible app-private file permissions. It adds no production failure-injection API or LAN-address discovery.
+
+## Milestone 6: Consumer Onboarding — Ticket 11
+
+**Status:** PASS for the final integrated tree on the visible isolated `emulator_skill` AVD (Android API 36, `arm64-v8a`). This is emulator-only evidence over owned ADB forwarding; no physical-device or separate-LAN-browser result is claimed.
+
+| Validation | Result |
+|---|---|
+| `./gradlew testDebugUnitTest --rerun-tasks --console=plain` | PASS — forced fresh current-tree execution of 218 JVM tests, 0 failures/errors/skips. |
+| `./gradlew testDebugUnitTest assembleDebug compileDebugAndroidTestKotlin` | PASS — debug APK assembly and Android-test compilation succeeded. |
+| `npm run check` | PASS — 0 errors and 42 existing warnings in one Svelte file. |
+| `npm run test:e2e:m6:onboarding` | PASS — 9 authenticated browser tests. |
+| M6 policy suites | PASS — clean-install 7/7, interruption/credential 5/5, and WebUI Port 4/4. |
+| `npm run e2e:m6:clean-install` | PASS — real APK completed Recommended Destination plus Password deferral in 56.137 seconds; canonical path, refresh/restart durability, and all six teardown checks passed. `physicalLanClaim` was `false`. |
+| `npm run e2e:m6:interruption:migration` | PASS — durable queue, Approved Destination, non-default Password, and incomplete-marker-precedence migration cases passed with complete teardown. |
+| `npm run e2e:m6:interruption:journey` | PASS — all seven resume points, four durable recovery states, changed/stale credential transitions, Android-local Password Reset, sensitive-log audit, and complete teardown passed. `physicalLanClaim` was `false`. |
+| `npm run e2e:m6:port` | PASS — default/switch/rollback/cold-start matrix passed; authenticated browser and WebSocket reconnected, queue/runtime identity remained stable, native-session initialization count was one, and all teardown fields passed. `physicalLanClaim` was `false`. |
+| Focused Android instrumentation | PASS — `WebUiPortPersistenceTest` and `WebUiPortLifecycleTest`, 3 tests on `emulator_skill`. Notification and All Files Access were prepared through visible Android UI before the successful rerun; no shell permission grant was used. |
+| `npm run test:e2e:m4:static` | PASS — 6/6 static regressions, including exact ownership of the legacy completed-onboarding fixture. |
+| `TMPDIR=/tmp WEBUI_PASSWORD=start123 node e2e/m4-runner.mjs` | PASS — the full real-APK M4 storage, authentication, parseable WebSocket, permission revocation, collision-safe add, move/retry/cancel, unavailable-storage, daemon-lifecycle, and recovery flow passed. Final cleanup proved daemon/server, fixtures, virtual storage, and ADB forwarding absent. |
+
+The integrated runs exposed and repaired acceptance-harness races only: API 36 Settings return/scroll behavior, delayed Password Reset dialog rendering, WebUI Port status/error evidence appearing at different scroll positions, and legacy M4 setup needing an owned completed-onboarding record. No dependency or production failure-injection surface was added. Physical-device and physical-LAN onboarding remain the explicit Ticket 12 residual gap.

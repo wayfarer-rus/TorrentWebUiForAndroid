@@ -48,6 +48,40 @@ export function createAndroidUi({ adb, serial, packageName }) {
 		run('shell', 'input', 'tap', String(x), String(y));
 	}
 
+	function scrollBidirectionally(currentHierarchy) {
+		const atBottom = currentHierarchy.includes('text="Start downloads"') || currentHierarchy.includes('text="Stop downloads"');
+		const [fromY, toY] = atBottom ? ['650', '1900'] : ['1900', '650'];
+		run('shell', 'input', 'swipe', '540', fromY, '540', toY, '250');
+	}
+
+	async function tapVisibleText(text, attempts = 8) {
+		const pattern = new RegExp(`<node[^>]*text="${escapeRegExp(text)}"[^>]*>`);
+		for (let attempt = 0; attempt < attempts; attempt += 1) {
+			const current = await hierarchy();
+			const node = current.match(pattern)?.[0];
+			if (node) {
+				const [x, y] = boundsCenter(node);
+				run('shell', 'input', 'tap', String(x), String(y));
+				return;
+			}
+			scrollBidirectionally(current);
+			await new Promise((resolve) => setTimeout(resolve, 250));
+		}
+		assert.fail(`${text} was not visible after scrolling the Android UI.`);
+	}
+
+	async function waitForVisibleNode(pattern, description, attempts = 12) {
+		let lastHierarchy = '';
+		for (let attempt = 0; attempt < attempts; attempt += 1) {
+			lastHierarchy = await hierarchy();
+			const match = lastHierarchy.match(pattern);
+			if (match) return match[0];
+			scrollBidirectionally(lastHierarchy);
+			await new Promise((resolve) => setTimeout(resolve, 250));
+		}
+		assert.fail(`Timed out waiting for visible Android UI node ${description}. Hierarchy excerpt: ${lastHierarchy.slice(0, 500)}`);
+	}
+
 	async function grantNotificationIfRequested() {
 		try {
 			const node = await waitForNode(/<node[^>]*text="(?:Allow|ALLOW)"[^>]*clickable="true"[^>]*>/, 'notification Allow button', 5_000);
@@ -80,7 +114,11 @@ export function createAndroidUi({ adb, serial, packageName }) {
 			);
 		}
 		assert.equal(/checked="true"/.test(node), enabled);
-		run('shell', 'input', 'keyevent', 'KEYCODE_BACK');
+		if (enabled) {
+			await returnToBlockedApp('Torrent Daemon after All Files Access checked=true');
+		} else {
+			run('shell', 'input', 'keyevent', 'KEYCODE_BACK');
+		}
 	}
 
 	async function setAllFilesAccess(enabled) {
@@ -95,10 +133,10 @@ export function createAndroidUi({ adb, serial, packageName }) {
 
 	async function returnToBlockedApp(description) {
 		await new Promise((resolve) => setTimeout(resolve, 500));
-		for (let attempt = 0; attempt < 2; attempt += 1) {
+		for (let attempt = 0; attempt < 4; attempt += 1) {
 			run('shell', 'input', 'keyevent', 'KEYCODE_BACK');
 			try {
-				await waitForNode(/<node[^>]*text="Torrent Daemon"[^>]*>/, description, 1_500);
+				await waitForNode(/<node[^>]*text="Torrent Daemon"[^>]*>/, description, 3_000);
 				return;
 			} catch {
 				// Walk through any generic Settings list left under the per-app detail screen.
@@ -109,24 +147,49 @@ export function createAndroidUi({ adb, serial, packageName }) {
 	}
 
 	async function enterRuntimeRevokedApp() {
-		run('shell', 'input', 'keyevent', 'KEYCODE_HOME');
-		run('shell', 'am', 'start', '-n', `${packageName}/.MainActivity`);
-		await waitForNode(/<node[^>]*checkable="true"[^>]*checked="false"[^>]*>/, 'runtime-revoked All Files Access switch');
-		await returnToBlockedApp('Torrent Daemon after runtime revocation');
-		await waitForNode(/<node[^>]*text="Revoked[^\"]*storage operations blocked"[^>]*>/, 'blocked runtime storage state');
+		for (let attempt = 0; attempt < 3; attempt += 1) {
+			run('shell', 'input', 'keyevent', 'KEYCODE_HOME');
+			run('shell', 'am', 'start', '-n', `${packageName}/.MainActivity`);
+			let appVisible = false;
+			try {
+				await waitForNode(/<node[^>]*text="Torrent Daemon"[^>]*>/, 'Torrent Daemon after runtime revocation', 3_000);
+				appVisible = true;
+			} catch { /* The app may have opened Android Settings. */ }
+			if (appVisible) {
+				try {
+					await waitForVisibleNode(
+						/<node[^>]*text="Revoked[^\"]*storage operations blocked"[^>]*>/,
+						'blocked runtime storage state',
+						10
+					);
+					return;
+				} catch {
+					continue;
+				}
+			}
+			await waitForNode(/<node[^>]*checkable="true"[^>]*checked="false"[^>]*>/, 'runtime-revoked All Files Access switch');
+			try {
+				await returnToBlockedApp('Torrent Daemon after runtime revocation');
+				await waitForVisibleNode(/<node[^>]*text="Revoked[^\"]*storage operations blocked"[^>]*>/, 'blocked runtime storage state');
+				return;
+			} catch {
+				// Retry the whole visible recovery path when Settings transitions slowly.
+			}
+		}
+		assert.fail('Android did not expose its blocked runtime storage state.');
 	}
 
 	async function restoreAfterRuntimeRevocation() {
 		await setAllFilesAccess(true);
 		run('shell', 'am', 'start', '--activity-reorder-to-front', '-n', `${packageName}/.MainActivity`);
-		await waitForNode(/<node[^>]*text="Ready"[^>]*>/, 'Ready storage state after runtime revocation');
-		await tapText('Start downloads');
+		await waitForVisibleNode(/<node[^>]*text="Ready"[^>]*>/, 'Ready storage state after runtime revocation');
+		await tapVisibleText('Start downloads');
 		try {
-			await waitForNode(/<node[^>]*text="Session started"[^>]*>/, 'native session after permission restoration', 15_000);
+			await waitForVisibleNode(/text="Session started"[\s\S]*?text="yes"/, 'native session after permission restoration');
 		} catch {
 			run('shell', 'am', 'start', '--activity-reorder-to-front', '-n', `${packageName}/.MainActivity`);
-			await tapText('Start downloads');
-			await waitForNode(/<node[^>]*text="Session started"[^>]*>/, 'retried native session after permission restoration', 15_000);
+			await tapVisibleText('Start downloads');
+			await waitForVisibleNode(/text="Session started"[\s\S]*?text="yes"/, 'retried native session after permission restoration');
 		}
 	}
 
@@ -139,27 +202,29 @@ export function createAndroidUi({ adb, serial, packageName }) {
 		try {
 			await waitForNode(/<node[^>]*checkable="true"[^>]*checked="false"[^>]*>/, 'automatically opened denied All Files Access switch', 3_000);
 		} catch {
+			// API 36 can present the notification dialog after the first bounded wait.
+			await grantNotificationIfRequested();
 			run('shell', 'am', 'start', '-n', `${packageName}/.MainActivity`);
 			await waitForNode(/<node[^>]*checkable="true"[^>]*checked="false"[^>]*>/, 'automatically opened denied All Files Access switch');
 		}
 		await returnToBlockedApp('Torrent Daemon screen');
 		await waitForNode(/<node[^>]*text="Denied \(startup\)[^\"]*"[^>]*>/, 'Denied startup state');
-		await tapText('Grant All Files Access');
+		await tapVisibleText('Grant All Files Access');
 		await waitForNode(/<node[^>]*checkable="true"[^>]*checked="false"[^>]*>/, 'denied All Files Access switch');
 		run('shell', 'input', 'keyevent', 'KEYCODE_BACK');
 		await waitForNode(/<node[^>]*text="Denied \(startup\)[^\"]*"[^>]*>/, 'Denied startup state after returning');
-		await tapText('Grant All Files Access');
+		await tapVisibleText('Grant All Files Access');
 		let node = await waitForNode(/<node[^>]*checkable="true"[^>]*checked="false"[^>]*clickable="true"[^>]*>/, 'All Files Access restore switch');
 		const [x, y] = boundsCenter(node);
 		run('shell', 'input', 'tap', String(x), String(y));
 		await waitForNode(/<node[^>]*checkable="true"[^>]*checked="true"[^>]*>/, 'restored All Files Access switch');
 		run('shell', 'input', 'keyevent', 'KEYCODE_BACK');
 		await waitForNode(/<node[^>]*text="Ready"[^>]*>/, 'Ready storage state');
-		await tapText('Start downloads');
+		await tapVisibleText('Start downloads');
 	}
 
 	return {
-		run, hierarchy, waitForNode, tapText, grantNotificationIfRequested,
+		run, hierarchy, waitForNode, waitForVisibleNode, scrollBidirectionally, tapText, grantNotificationIfRequested,
 		setCurrentAllFilesAccess, setAllFilesAccess, launchApp,
 		enterRuntimeRevokedApp, restoreAfterRuntimeRevocation, assertStartupDenialAndRestore
 	};

@@ -112,20 +112,25 @@ async function observePermissionRecoveryState() {
 	for (let attempt = 0; attempt < 3; attempt += 1) {
 		androidUi.run('shell', 'input', 'keyevent', 'KEYCODE_HOME');
 		androidUi.run('shell', 'am', 'start', '-n', activityName);
+		let appVisible = false;
 		try {
 			await androidUi.waitForNode(/<node[^>]*text="Torrent Daemon"[^>]*>/, 'Torrent Daemon permission recovery surface', 3_000);
-			for (let scroll = 0; scroll < 8; scroll += 1) {
-				const hierarchy = await androidUi.hierarchy();
-				if (/<node[^>]*text="(?:Revoked|Denied)[^"]*"[^>]*>/.test(hierarchy)) return;
-				androidUi.run('shell', 'input', 'swipe', '540', '1900', '540', '650', '250');
-				await new Promise((resolveDelay) => setTimeout(resolveDelay, 250));
+			appVisible = true;
+		} catch { /* The startup gate may have opened Android Settings. */ }
+		if (appVisible) {
+			try {
+				await androidUi.waitForVisibleNode(
+					/<node[^>]*text="(?:Revoked|Denied)[^"]*"[^>]*>/,
+					'visible permission recovery state',
+					10
+				);
+				return;
+			} catch {
+				continue;
 			}
-			throw new Error('Permission recovery state was not visible after scrolling.');
-		} catch {
-			await androidUi.waitForNode(/<node[^>]*checkable="true"[^>]*checked="false"[^>]*>/, 'revoked All Files Access switch', 10_000);
-			androidUi.run('shell', 'input', 'keyevent', 'KEYCODE_BACK');
-			// A process transition can return to Home; relaunch and retry the visible flow.
 		}
+		await androidUi.waitForNode(/<node[^>]*checkable="true"[^>]*checked="false"[^>]*>/, 'revoked All Files Access switch', 10_000);
+		androidUi.run('shell', 'input', 'keyevent', 'KEYCODE_BACK');
 	}
 	assert.fail('Android did not expose its visible permission recovery state.');
 }
@@ -527,6 +532,7 @@ try {
 	androidUi.run('shell', 'am', 'start', '--activity-reorder-to-front', '-n', activityName);
 	await androidUi.waitForNode(/<node[^>]*text="Torrent Daemon"[^>]*>/, 'Android Password Reset surface');
 	await tapVisibleAndroidAction(androidUi, 'Reset WebUI Password');
+	await androidUi.waitForNode(/<node[^>]*text="Reset WebUI Password\?"[^>]*>/, 'Password Reset confirmation dialog');
 	const resetHierarchy = await androidUi.hierarchy();
 	assertPasswordResetDialog(resetHierarchy);
 	await androidUi.tapText('Reset Password');

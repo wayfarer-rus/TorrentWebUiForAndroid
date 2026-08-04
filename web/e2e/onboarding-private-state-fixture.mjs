@@ -1,0 +1,1 @@
+export const COMPLETED_ONBOARDING_RECORD = `<?xml version='1.0' encoding='utf-8' standalone='yes' ?>\n<map>\n<boolean name="initialized" value="true" />\n<boolean name="completed" value="true" />\n<string name="password_decision">Deferred</string>\n</map>\n`;

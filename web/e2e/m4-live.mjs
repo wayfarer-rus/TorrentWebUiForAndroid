@@ -487,8 +487,9 @@ try {
 	assert.equal((await api(`/api/torrents/${reused.result.id}/destination`)).canonicalPath, firstDestination);
 	await waitForTorrentComplete(reused.result.id);
 
-	// Preserve one explicit user pause separately from storage safety pauses.
-	await partial.card.getByRole('button', { name: /Pause/ }).click();
+	// Preserve one explicit user pause separately from storage safety pauses. Use the
+	// authenticated public API because the card may re-render after a completed move.
+	await api(`/api/torrents/${partial.result.id}/pause`, { method: 'PUT' });
 	await poll(async () => {
 		const torrent = (await api('/api/torrents')).find((candidate) => candidate.id === partial.result.id);
 		return torrent && ['paused', 'pause_requested'].includes(torrent.state) ? torrent : null;

@@ -6,7 +6,13 @@ import { fileURLToPath } from 'node:url';
 import { createAndroidUi } from './m4-android-ui.mjs';
 import { startOwnedFixtureController } from './m4-fixture.mjs';
 import { OFFICIAL_TORRENT_SOURCES } from './m4-official-torrents.mjs';
-import { CATALOG_STATE_PATHS, catalogStatesOwnedByM4 } from './m4-private-state.mjs';
+import {
+	CATALOG_STATE_PATHS,
+	catalogStatesOwnedByM4,
+	onboardingStateOwnedByM4
+} from './m4-private-state.mjs';
+import { seedRunAsFile } from './m6-real-apk-tools.mjs';
+import { COMPLETED_ONBOARDING_RECORD } from './onboarding-private-state-fixture.mjs';
 
 const e2eDirectory = fileURLToPath(new URL('.', import.meta.url));
 const repositoryRoot = resolve(e2eDirectory, '../..');
@@ -116,11 +122,14 @@ function cleanupOwnedPrivateState() {
 	);
 	const authText = readPrivate('shared_prefs/webui_auth.xml');
 	const credentialOwned = authText === null || !authText.includes('name="webui_password"');
-	assert(queueOwned && journalOwned && catalogOwned && resumeOwned && credentialOwned,
+	const onboardingText = readPrivate('shared_prefs/consumer_onboarding.xml');
+	const onboardingOwned = onboardingStateOwnedByM4(onboardingText);
+	assert(queueOwned && journalOwned && catalogOwned && resumeOwned && credentialOwned && onboardingOwned,
 		'Refusing to remove app-private state that is not wholly owned by M4 fixtures.');
 	adbArgs(
 		'exec-out', 'run-as', packageName, 'rm', '-f',
 		'files/queue_intent.json', 'files/move_journal_v2.json',
+		'shared_prefs/consumer_onboarding.xml',
 		...CATALOG_STATE_PATHS
 	);
 	adbArgs('exec-out', 'run-as', packageName, 'rm', '-rf', 'files/resume_data');
@@ -152,6 +161,7 @@ try {
 	// removes only proven M4-owned leftovers and rejects user credentials/state.
 	cleanupOwnedPrivateState();
 	assert.match(adbArgs('shell', 'pm', 'clear', packageName), /Success/, 'Unable to establish clean-install-equivalent app state.');
+	seedRunAsFile(adbArgs, packageName, 'shared_prefs/consumer_onboarding.xml', COMPLETED_ONBOARDING_RECORD);
 	adbArgs('shell', 'sm', 'set-virtual-disk', 'true');
 	const diskId = waitFor(() => adbArgs('shell', 'sm', 'list-disks').split('\n').find((line) => line.startsWith('disk:')), 'virtual storage disk');
 	adbArgs('shell', 'sm', 'partition', diskId, 'public');

@@ -176,6 +176,7 @@ scripts/
 - Durable completion is then observed through permission loss/restoration, removable Storage Volume unmount, removal of the last Approved Destination, and explicit Android process crash/restart. Scenario evidence is accepted only when the required resume, migration, recovery, credential-status, sensitive-log, and teardown matrices are complete; the runner still makes no physical-LAN claim.
 - `m6-port-lifecycle-runner.mjs` drives the real Android WebUI Port surface and proves bind → persist → promote ordering through listener, authenticated browser, WebSocket, and durable queue identity evidence. Owned Android listeners and app-private permission changes induce occupied-port, persistence-write, and cold-start bind failures without adding production test hooks.
 - `m6-real-apk-tools.mjs` centralizes bounded polling, visible Android actions, text-field replacement, and the shell-permission-grant guard used by the M6 real-APK runners so their safety policy cannot drift.
+- Final integrated acceptance also runs the established M4 storage/authentication/WebSocket/daemon lifecycle flow. That regression seeds and later removes an owned completed Consumer Onboarding record so normal authenticated APIs are exercised without bypassing Onboarding Readiness in production code; visible Android automation tolerates API 36 Settings transitions and scrolls bidirectionally to observe status and recovery surfaces.
 
 ## Known Limitations
 

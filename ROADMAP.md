@@ -122,13 +122,17 @@
 **Objective:** First-time user can set up the app without technical knowledge.
 
 **Scope:**
-- Minimal setup wizard: password, storage location, health status.
-- Safe defaults applied automatically.
+- Android Startup Bootstrap acquires platform permissions and starts the service without duplicating the browser journey.
+- Consumer Onboarding presents consumer-only Onboarding Readiness, a Recommended Destination or alternate Approved Destination, and an optional Password choice.
+- WebUI Port configuration and local Password Reset remain Android fallback controls.
+- Safe defaults apply automatically; technical torrent settings stay outside the journey.
 
 **Exit criteria:**
-- [ ] New user completes setup in under 3 minutes.
-- [ ] No technical settings required.
-- [ ] WebUI accessible after setup.
+- [x] New user completes setup in under 3 minutes — the final API 36 emulator clean-install run completed in 56.137 seconds.
+- [x] No technical settings required — the executed journey required only permission, destination, and Password decisions.
+- [x] WebUI accessible after setup — authenticated Chromium reached normal controls and retained completion after refresh and daemon restart.
+
+These checks are emulator acceptance over owned ADB forwarding. Physical-device and separate LAN-browser validation remain explicitly unclaimed and are tracked by Ticket 12.
 
 ---
 

@@ -1,3 +1,5 @@
+import { COMPLETED_ONBOARDING_RECORD } from './onboarding-private-state-fixture.mjs';
+
 export const CATALOG_STATE_PATHS = [
 	'files/destination_catalog.txt',
 	'files/destination_catalog.txt.bak',
@@ -14,4 +16,8 @@ export function catalogStateOwnedByM4(text) {
 
 export function catalogStatesOwnedByM4(states) {
 	return states.length === CATALOG_STATE_PATHS.length && states.every(catalogStateOwnedByM4);
+}
+
+export function onboardingStateOwnedByM4(text) {
+	return text === null || text.trim() === COMPLETED_ONBOARDING_RECORD.trim();
 }
