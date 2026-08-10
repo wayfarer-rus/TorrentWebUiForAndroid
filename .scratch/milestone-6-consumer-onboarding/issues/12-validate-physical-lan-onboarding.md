@@ -2,9 +2,11 @@
 
 **What to build:** Validate the completed M6 experience on a physical Android device from a separate LAN browser so real network behavior, browser authentication, port switching, and recovery are not claimed from emulator forwarding alone.
 
-**Blocked by:** 11 — Record integrated M6 acceptance evidence.
+**Prerequisite:** 11 — Record integrated M6 acceptance evidence (complete).
 
-**Status:** ready-for-agent
+**Milestone impact:** Required Milestone 6 delivery validation. This ticket blocks declaring Milestone 6 delivered and blocks physical-device or real-LAN validation claims, but it does not block Milestone 7 implementation work.
+
+**Status:** deferred (blocks M6 delivery; does not block M7 implementation)
 
 - [ ] A physical Android device completes Android Startup Bootstrap without test-only permission shortcuts.
 - [ ] A separate LAN browser authenticates and completes Consumer Onboarding using a real canonical Approved Destination.

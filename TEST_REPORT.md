@@ -343,7 +343,7 @@ Every test proves:
 
 **Status:** NOT RUN — deferred from M3.
 
-This remains the required acceptance gate for the WebUI's LAN-accessibility claim. It requires a physical Android device and a separate LAN browser, which is outside the scope of automated emulator acceptance.
+This remains the required Milestone 6 delivery gate and the required acceptance gate for a physical-device LAN-accessibility claim. It is deferred while Milestone 7 implementation proceeds and requires a physical Android device plus a separate LAN browser, which is outside the scope of automated emulator acceptance.
 
 ### Notes
 
@@ -550,7 +550,7 @@ The host-owned runner records only explicit emulator diagnostics, never claims p
 | `npm run test:e2e:m6:interruption:policy` | PASS — 5 tests cover complete scenario matrices, credential transitions, Password Reset presentation, all sensitive categories, bounded requests, syntax, and forbidden shell permission grants. |
 | Current-tree regression suite | PASS — 218 JVM tests with 0 failures/errors/skips; debug APK assembly and Android-test compilation; 9 Playwright onboarding tests; clean-install policy 7/7; Svelte check with 0 errors/42 warnings; M4 static regression 5/5. |
 
-The real-APK runner owns only uniquely named empty destination fixtures, fails if the fixture root or ADB host-forward already exists, and removes those resources in `finally`. Physical-device LAN onboarding remains for Ticket 12.
+The real-APK runner owns only uniquely named empty destination fixtures, fails if the fixture root or ADB host-forward already exists, and removes those resources in `finally`. Ticket 12 physical-device LAN onboarding remains the deferred Milestone 6 delivery gate while Milestone 7 implementation proceeds.
 
 ## Milestone 6: Consumer Onboarding — Ticket 10
 
@@ -591,4 +591,4 @@ The host runner uses only uniquely named empty fixtures, exclusive host forwards
 | `npm run test:e2e:m4:static` | PASS — 6/6 static regressions, including exact ownership of the legacy completed-onboarding fixture. |
 | `TMPDIR=/tmp WEBUI_PASSWORD=start123 node e2e/m4-runner.mjs` | PASS — the full real-APK M4 storage, authentication, parseable WebSocket, permission revocation, collision-safe add, move/retry/cancel, unavailable-storage, daemon-lifecycle, and recovery flow passed. Final cleanup proved daemon/server, fixtures, virtual storage, and ADB forwarding absent. |
 
-The integrated runs exposed and repaired acceptance-harness races only: API 36 Settings return/scroll behavior, delayed Password Reset dialog rendering, WebUI Port status/error evidence appearing at different scroll positions, and legacy M4 setup needing an owned completed-onboarding record. No dependency or production failure-injection surface was added. Physical-device and physical-LAN onboarding remain the explicit Ticket 12 residual gap.
+The integrated runs exposed and repaired acceptance-harness races only: API 36 Settings return/scroll behavior, delayed Password Reset dialog rendering, WebUI Port status/error evidence appearing at different scroll positions, and legacy M4 setup needing an owned completed-onboarding record. No dependency or production failure-injection surface was added. Physical-device and physical-LAN onboarding remain the explicit Ticket 12 Milestone 6 delivery gap and must not be claimed as validated until that ticket passes; Milestone 7 implementation may proceed while this gate is deferred.

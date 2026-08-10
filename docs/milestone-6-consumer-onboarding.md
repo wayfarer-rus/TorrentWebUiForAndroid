@@ -107,7 +107,7 @@ Android remains visually close to its current fallback screen. It displays and c
 12. The under-three-minute criterion is measured from the first actionable Android bootstrap screen to the authenticated normal WebUI under normal emulator conditions, excluding tool installation and fixture provisioning.
 13. Emulator teardown stops the daemon, closes candidate/old servers, removes test downloads and recovery records, restores the default port and Password, clears onboarding state, shuts down fixtures, and verifies no sensitive values entered logs.
 14. Existing M4 storage and lifecycle regression suites run after M6 changes. Previous results are not reused as evidence for the modified tree.
-15. Physical-device validation from a separate LAN browser is required before claiming real Android/LAN network behavior complete. Emulator evidence must be labeled emulator-only.
+15. Physical-device validation from a separate LAN browser is required before declaring Milestone 6 delivered or claiming real Android/LAN network behavior complete. It may be deferred while Milestone 7 implementation proceeds, and emulator evidence must remain labeled emulator-only.
 16. `TEST_REPORT.md` records only commands actually run, environment details, observed results, teardown evidence, and explicit residual gaps.
 17. Authenticated API tests call torrent mutation routes directly before completion and require `409 onboarding_incomplete`, proving the page-level gate cannot be bypassed.
 18. Migration tests cover established queues, existing Approved Destinations, non-default Passwords, and genuinely unused installations without a marker.
@@ -131,6 +131,8 @@ Android remains visually close to its current fallback screen. It displays and c
 - [ ] WebUI content, APIs, and WebSockets reject unauthenticated access.
 - [ ] A normal first-time setup completes in under three minutes.
 - [ ] Required automated and physical-device evidence is recorded without leaking sensitive data.
+
+The integrated API 36 emulator evidence for these criteria is recorded in [TEST_REPORT.md](../TEST_REPORT.md). The milestone acceptance checklist remains open until Ticket 12 supplies the repository-required physical-device and separate-LAN-browser validation.
 
 ## Out of Scope
 

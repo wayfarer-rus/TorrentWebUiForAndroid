@@ -2,9 +2,10 @@
 
 ## Current Delivery Status
 
-- **Current milestone:** **Milestone 4 — Path-Based Storage Model**. Required API 36 emulator acceptance is implemented and recorded in [TEST_REPORT.md](TEST_REPORT.md).
+- **Current implementation workstream:** **Milestone 7 — Polished WebUI**.
+- **Latest automated milestone evidence:** Milestone 6 Consumer Onboarding passes the required API 36 emulator acceptance recorded in [TEST_REPORT.md](TEST_REPORT.md); it is not yet a delivered milestone because physical-device/separate-LAN-browser validation has not run.
 - **Last delivered milestone:** Milestone 3 — Persistent Daemon.
-- **Outstanding validation:** Milestone 4 physical-device/Termux deployment validation is optional and has not been performed. Earlier Stage 1 manual gaps remain documented in [TEST_REPORT.md](TEST_REPORT.md) and [STAGE1_STATUS.md](STAGE1_STATUS.md); later emulator milestones do not retroactively prove them.
+- **Outstanding validation:** Milestone 4 physical-device/Termux deployment validation is optional and has not been performed; Milestone 5 VPN-safe appliance validation remains open; and Milestone 6 Ticket 12 remains a required delivery gate, deferred while Milestone 7 implementation proceeds. Earlier Stage 1 manual gaps remain documented in [TEST_REPORT.md](TEST_REPORT.md) and [STAGE1_STATUS.md](STAGE1_STATUS.md); later emulator milestones do not retroactively prove them.
 
 ## Milestone 1: Native Engine Proof
 
@@ -119,6 +120,8 @@
 
 ## Milestone 6: Consumer Onboarding
 
+**Status:** Automated emulator acceptance complete; required physical-LAN delivery validation is deferred.
+
 **Objective:** First-time user can set up the app without technical knowledge.
 
 **Scope:**
@@ -128,11 +131,11 @@
 - Safe defaults apply automatically; technical torrent settings stay outside the journey.
 
 **Exit criteria:**
-- [x] New user completes setup in under 3 minutes — the final API 36 emulator clean-install run completed in 56.137 seconds.
-- [x] No technical settings required — the executed journey required only permission, destination, and Password decisions.
-- [x] WebUI accessible after setup — authenticated Chromium reached normal controls and retained completion after refresh and daemon restart.
+- [ ] New user completes setup in under 3 minutes — API 36 emulator evidence is 56.137 seconds; physical-device confirmation is pending.
+- [ ] No technical settings required — the emulator journey required only permission, destination, and Password decisions; physical-device confirmation is pending.
+- [ ] WebUI accessible after setup — authenticated Chromium reached normal controls through owned ADB forwarding and retained completion after refresh and daemon restart; separate-LAN-browser confirmation is pending.
 
-These checks are emulator acceptance over owned ADB forwarding. Physical-device and separate LAN-browser validation remain explicitly unclaimed and are tracked by Ticket 12.
+Ticket 12 is the remaining M6 delivery gate. Its physical-device and separate-LAN-browser validation is deferred while Milestone 7 implementation proceeds; M6 must not be described as delivered, and physical-device or real-LAN behavior must not be described as verified, until that ticket passes.
 
 ---
 
