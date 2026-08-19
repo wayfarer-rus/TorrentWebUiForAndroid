@@ -36,7 +36,7 @@
     "e2e:m4:official-live": "M4_OFFICIAL_TORRENT_SMOKE=true npm run e2e:m4:live"
   },
   "devDependencies": {
-    "@playwright/test": "^1.61.1",
+    "@playwright/test": "^1.62.1",
     "@sveltejs/adapter-static": "^3.0.8",
     "@sveltejs/kit": "^2.16.0",
     "@sveltejs/vite-plugin-svelte": "^5.0.0",
