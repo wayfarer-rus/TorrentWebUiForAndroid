@@ -36,14 +36,14 @@
     "e2e:m4:official-live": "M4_OFFICIAL_TORRENT_SMOKE=true npm run e2e:m4:live"
   },
   "devDependencies": {
-    "@playwright/test": "^1.61.1",
+    "@playwright/test": "^1.62.1",
     "@sveltejs/adapter-static": "^3.0.8",
     "@sveltejs/kit": "^2.16.0",
-    "@sveltejs/vite-plugin-svelte": "^5.0.0",
+    "@sveltejs/vite-plugin-svelte": "^7.3.0",
     "svelte": "^5.56.9",
-    "svelte-check": "^4.0.0",
-    "typescript": "^5.0.0",
-    "vite": "^6.0.0"
+    "svelte-check": "^4.7.6",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.1"
   },
   "type": "module"
 }
