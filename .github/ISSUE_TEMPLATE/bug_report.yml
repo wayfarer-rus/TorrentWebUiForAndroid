@@ -1,0 +1,42 @@
+name: Bug report
+description: Report reproducible incorrect behavior
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include passwords, authorization headers, magnet URIs, private tracker URLs, or personal filesystem paths. Security vulnerabilities belong in a private vulnerability report.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      placeholder: "1. …\n2. …\n3. …"
+    validations:
+      required: true
+  - type: input
+    id: revision
+    attributes:
+      label: App version or commit
+      placeholder: 2dd8cf6
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Android/device/browser environment
+      placeholder: Android 16, arm64-v8a, Chromium 149
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Redacted diagnostics
+      description: Include only the minimum logs or screenshots needed, with sensitive data removed.

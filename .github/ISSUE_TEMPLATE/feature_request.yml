@@ -1,0 +1,32 @@
+name: Feature request
+description: Propose a focused product improvement
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user problem should be solved?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the smallest useful outcome, not only an implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: checkboxes
+    id: boundaries
+    attributes:
+      label: Product boundaries
+      options:
+        - label: This does not require public Internet exposure or router port forwarding.
+          required: true
+        - label: This does not require inspecting or controlling another VPN app.
+          required: true

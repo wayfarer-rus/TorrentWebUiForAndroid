@@ -16,7 +16,7 @@ DEP_DIR="$ROOT_DIR/dep"
 
 # ---------------------------------------------------------------------------
 # Boost 1.86.0 (headers-only, used by libtorrent)
-# License: Boost Software License 1.0 (BSD-style)
+# License: Boost Software License 1.0
 # Source:  https://archives.boost.io/release/1.86.0/source/boost_1_86_0.tar.gz
 # ---------------------------------------------------------------------------
 BOOST_VERSION="1.86.0"
@@ -28,22 +28,32 @@ if [ -d "$DEP_DIR/boost" ]; then
 else
     echo "Downloading Boost $BOOST_VERSION..."
     mkdir -p "$DEP_DIR"
-    TMPFILE=$(mktemp /tmp/boost_*.tar.gz)
-    curl -sL "$BOOST_URL" -o "$TMPFILE"
+    TEMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/torrentwebui-boost.XXXXXX")
+    trap 'rm -rf "$TEMP_DIR"' EXIT
+    TMPFILE="$TEMP_DIR/boost.tar.gz"
+    curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 \
+        "$BOOST_URL" -o "$TMPFILE"
 
-    ACTUAL_SHA=$(shasum -a 256 "$TMPFILE" 2>/dev/null | awk '{print $1}' || sha256sum "$TMPFILE" | awk '{print $1}')
+    if command -v shasum >/dev/null 2>&1; then
+        ACTUAL_SHA=$(shasum -a 256 "$TMPFILE" | awk '{print $1}')
+    elif command -v sha256sum >/dev/null 2>&1; then
+        ACTUAL_SHA=$(sha256sum "$TMPFILE" | awk '{print $1}')
+    else
+        echo "ERROR: Neither shasum nor sha256sum is available."
+        exit 1
+    fi
     if [ "$ACTUAL_SHA" != "$BOOST_SHA256" ]; then
         echo "ERROR: Boost SHA-256 mismatch!"
         echo "  Expected: $BOOST_SHA256"
         echo "  Actual:   $ACTUAL_SHA"
-        rm -f "$TMPFILE"
         exit 1
     fi
     echo "SHA-256 verified: $ACTUAL_SHA"
 
     echo "Extracting Boost $BOOST_VERSION..."
     tar xzf "$TMPFILE" -C "$DEP_DIR" --strip-components=1
-    rm -f "$TMPFILE"
+    rm -rf "$TEMP_DIR"
+    trap - EXIT
     echo "Boost $BOOST_VERSION installed in dep/."
 fi
 

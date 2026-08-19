@@ -1,28 +1,49 @@
 # Contributing
 
-## Before You Start
+Thanks for helping improve TorrentWebUiForAndroid.
 
-1. Read [AGENTS.md](AGENTS.md) — the engineering contract for this project.
-2. Read the relevant [skill](skills/) for the area you are working in.
-3. Read [ARCHITECTURE.md](ARCHITECTURE.md) for structural conventions.
-4. Read [DECISIONS.md](DECISIONS.md) for architectural decisions and rationale.
+## Before you start
 
-## Working in This Repository
+1. Read [AGENTS.md](AGENTS.md), the repository engineering contract.
+2. Review [ARCHITECTURE.md](ARCHITECTURE.md) and [DECISIONS.md](DECISIONS.md).
+3. Search existing issues before opening a proposal or implementation.
+4. For security vulnerabilities, follow [SECURITY.md](SECURITY.md) instead of filing a public issue.
 
-- **Update docs when architecture changes.** If you change how something works, update the relevant documentation.
-- **Keep commits focused.** One logical change per commit.
-- **Never claim unrun tests.** Device tests must actually run on a device.
-- **Document dependency licenses.** Add every new dependency to [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-- **Avoid scope creep.** Work within the current milestone's scope. Do not silently add features from future stages.
-- **Prefer small reversible changes.** Large refactors should be proposed separately.
+## Development setup
 
-## Testing
+Follow [BUILD_AND_RUN.md](BUILD_AND_RUN.md). Clone submodules, bootstrap pinned native dependencies, and install WebUI packages with `npm ci`.
 
-- Unit tests are encouraged where they add value.
-- Real-device validation is required for Android/native/network behavior.
-- Record results in [TEST_REPORT.md](TEST_REPORT.md).
-- Do not fabricate test results or claim device tests that did not run.
+## Change guidelines
 
-## Questions
+- Keep each commit focused and prefer small, reversible changes.
+- Preserve the browser-first product and the shared backend/domain model.
+- Do not add public Internet exposure, router configuration, VPN inspection, synthetic storage paths, or device-specific assumptions.
+- Update architecture, ADRs, roadmap, and test evidence when behavior or boundaries change.
+- Record every new or upgraded dependency and its license in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+- Never commit real user credentials, authorization headers, private tracker URLs, personal filesystem paths, or unredacted diagnostics. Synthetic magnets and localhost/public tracker fixtures belong only in deterministic test source and must never be emitted by runtime logs.
 
-When unsure, state your assumptions and propose the smallest change that moves things forward.
+## Validation
+
+Run the smallest relevant checks and report exactly what ran:
+
+```bash
+cd web
+npm run test:ci
+
+cd ..
+./gradlew :app:testDebugUnitTest :app:lintDebug --console=plain
+```
+
+Android instrumentation, native networking, storage, and LAN behavior require emulator or device-specific validation. Do not describe emulator results as physical-device results. Record acceptance evidence in [TEST_REPORT.md](TEST_REPORT.md) when relevant.
+
+## Pull requests
+
+A pull request should explain:
+
+- the user-visible or architectural problem;
+- the smallest implemented solution;
+- commands and environments actually validated;
+- security, storage, licensing, and compatibility risks; and
+- remaining limitations or follow-up work.
+
+By contributing, you agree that your original contribution is licensed under this repository's [Apache License 2.0](LICENSE). Do not submit third-party code unless its license and provenance are documented and compatible.

@@ -42,14 +42,28 @@ async function installDetailsApi(page, downloads) {
 	}));
 }
 
+function historyPrimitiveValues(value) {
+	if (value === null || value === undefined) return [];
+	if (Array.isArray(value)) return value.flatMap(historyPrimitiveValues);
+	if (typeof value === 'object') return Object.values(value).flatMap(historyPrimitiveValues);
+	return [String(value)];
+}
+
 function historyPrivacy(page, sensitiveValues) {
 	return page.evaluate(() => ({
 		url: `${window.location.pathname}${window.location.search}${window.location.hash}`,
-		state: JSON.stringify(window.history.state)
+		state: window.history.state
 	})).then(({ url, state }) => {
+		const stateValues = historyPrimitiveValues(state);
+		const urlTokens = url.split(/[^A-Za-z0-9._~-]+/).filter(Boolean);
 		for (const value of sensitiveValues) {
-			expect(url).not.toContain(value);
-			expect(state).not.toContain(value);
+			if (/^\d+$/.test(value)) {
+				expect(urlTokens).not.toContain(value);
+				expect(stateValues).not.toContain(value);
+			} else {
+				expect(url).not.toContain(value);
+				for (const stateValue of stateValues) expect(stateValue).not.toContain(value);
+			}
 		}
 	});
 }

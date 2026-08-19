@@ -285,31 +285,28 @@ object TorrentServer {
                     // Serve all static assets from the WebUI root (SvelteKit's /app-build/, etc.).
                     // Must come AFTER explicit routes above — catch-all matches everything.
                     get("/{path...}") {
-                        val uri = call.request.local.uri
-                        Log.i(TAG, "=== WILDCARD ROUTE MATCHED === URI: $uri")
-                        // Extract full path from URI (skip leading /)
-                        val fullPath = uri.removePrefix("/")
-                        Log.i(TAG, "Static request URI: $uri, extracted path: '$fullPath'")
+                        val segments = call.parameters.getAll("path").orEmpty()
+                        if (segments.isEmpty() || segments.any {
+                                it.isBlank() || it == "." || it == ".." || '/' in it || '\\' in it
+                            }
+                        ) {
+                            return@get call.respondText(
+                                "Not found", ContentType.Text.Plain, HttpStatusCode.NotFound
+                            )
+                        }
+                        val fullPath = segments.joinToString("/")
                         // Assets are stored under "www/" in the assets directory. The index.html route
                         // works with "www/index.html", and SvelteKit's build output is under "app-build/".
-                        val assetPath = when {
-                            fullPath == "index.html" -> "www/index.html"
+                        val assetPath = when (fullPath) {
+                            "index.html" -> "www/index.html"
                             else -> "www/$fullPath"
                         }
-                        Log.i(TAG, "Attempting to read asset: $assetPath")
                         val content = assetReader(assetPath)
                             ?: return@get call.respondText(
-                                "Not found (tried: $assetPath)", ContentType.Text.Plain, HttpStatusCode.NotFound
+                                "Not found", ContentType.Text.Plain, HttpStatusCode.NotFound
                             )
                         val contentType = detectContentType(assetPath)
                         call.respondText(content, contentType)
-                    }
-
-                    // Fallback: log all unmatched requests for debugging
-                    get("/*") {
-                        val uri = call.request.local.uri
-                        Log.i(TAG, "=== FALLBACK ROUTE MATCHED === URI: $uri")
-                        call.respondText("Fallback: $uri", ContentType.Text.Plain)
                     }
 
                     // ---- REST API: Consumer Onboarding ----
@@ -1228,8 +1225,7 @@ object TorrentServer {
         return try {
             if (!::appContext.isInitialized) return null
             appContext.assets.open(path).bufferedReader().readText()
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to read asset: $path", e)
+        } catch (_: Exception) {
             null
         }
     }

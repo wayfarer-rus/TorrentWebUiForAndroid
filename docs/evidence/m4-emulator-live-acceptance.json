@@ -1,0 +1,34 @@
+{
+  "date": "2026-08-19",
+  "environment": {
+    "device": "emulator_skill",
+    "android": "16",
+    "api": 36,
+    "abi": "arm64-v8a"
+  },
+  "command": "WEBUI_PASSWORD=<redacted> node e2e/m4-runner.mjs",
+  "durationSeconds": 304,
+  "result": "passed",
+  "flowMarkerObserved": true,
+  "cleanupMarkerObserved": true,
+  "coverage": [
+    "authenticated WebSocket frames",
+    "canonical destinations",
+    "collision-safe adds",
+    "completed, partial, conflict, and interrupted moves",
+    "unavailable storage",
+    "explicit retry, cancel, resume, and recovery"
+  ],
+  "cleanup": {
+    "ownedFixtureRoots": "absent",
+    "runnerAndFixtureProcesses": "absent",
+    "daemonServiceAndListener": "absent",
+    "hostListener": "absent",
+    "virtualRemovableVolume": "absent",
+    "adbForward": "absent"
+  },
+  "limitations": [
+    "Emulator evidence only; not a physical-device result.",
+    "Separate-LAN desktop-browser acceptance was not run."
+  ]
+}

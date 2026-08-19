@@ -1,0 +1,10 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Three deleted M2 documents contain only audited bootstrap and synthetic acceptance credentials"
+paths = [
+  '''^\.scratch/m2-emulator-acceptance/issues/01-headless-emulator-acceptance-environment\.md$''',
+  '''^\.scratch/m2-emulator-acceptance/issues/02-authentication-and-password-change-emulator-acceptance\.md$''',
+  '''^\.scratch/m2-emulator-acceptance/reports/partial-emulator-acceptance-report\.md$'''
+]

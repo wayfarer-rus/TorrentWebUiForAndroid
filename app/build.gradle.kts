@@ -4,6 +4,8 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
 }
 
+val generatedLicenseAssets = layout.buildDirectory.dir("generated/openSourceLicenseAssets")
+
 android {
     namespace = "com.andreiefimov.torrentwebui"
     compileSdk {
@@ -46,6 +48,8 @@ android {
         compose = true
     }
 
+    sourceSets.getByName("main").assets.srcDir(generatedLicenseAssets.get().asFile)
+
     // Fix duplicate META-INF files from Netty/Ktor dependencies.
     packaging {
         resources {
@@ -75,9 +79,31 @@ tasks.register("copyWebAssets", Exec::class) {
     commandLine("npm", "run", "copy-assets")
 }
 
-// Wire copyWebAssets to run before any APK assembly task.
+val generateOpenSourceLicenseAssets by tasks.registering(Sync::class) {
+    group = "build"
+    description = "Packages project and third-party license notices into the APK"
+    into(generatedLicenseAssets.map { it.dir("open_source_licenses") })
+    from(rootProject.file("LICENSE")) {
+        rename { "PROJECT-APACHE-2.0.txt" }
+    }
+    from(rootProject.file("NOTICE"))
+    from(rootProject.file("THIRD_PARTY_NOTICES.md"))
+    from(rootProject.file("third_party/web-dependencies.json"))
+    from(rootProject.file("app/gradle.lockfile")) {
+        rename { "android-dependencies.lock" }
+    }
+    from(rootProject.file("libtorrent/LICENSE")) {
+        rename { "libtorrent-LICENSE.txt" }
+    }
+    from(rootProject.file("dep/LICENSE_1_0.txt")) {
+        rename { "Boost-1.0.txt" }
+    }
+    from(rootProject.file("third_party/notices"))
+}
+
+// Wire generated WebUI and license assets before any APK assembly task.
 tasks.named("preBuild").configure {
-    dependsOn(tasks.named("copyWebAssets"))
+    dependsOn(tasks.named("copyWebAssets"), generateOpenSourceLicenseAssets)
 }
 
 dependencies {

@@ -1,49 +1,71 @@
 # Third-Party Notices
 
-Track every third-party dependency used in this project.
+Original TorrentWebUiForAndroid code is licensed under Apache License 2.0. Third-party components are not relicensed by this project and remain subject to their upstream licenses.
 
-| Dependency | Version / Commit | Source URL | License | Why Used | Bundled / Distributed | Notes |
-|------------|------------------|------------|---------|----------|----------------------|-------|
-| libtorrent-rasterbar | v2.0.10 (74bc93a37) | https://github.com/arvidn/libtorrent | Boost Software License 1.0 (BSD-style) | Native torrent engine | Bundled (git submodule) | Core torrent protocol implementation |
-| Boost | 1.86.0 | https://archives.boost.io/release/1.86.0/source/boost_1_86_0.tar.gz | Boost Software License 1.0 | Required by libtorrent | Bundled (headers via bootstrap-deps.sh) | SHA-256 pinned in scripts/bootstrap-deps.sh; not tracked in git |
-| AndroidX Compose BOM | 2025.03.01 | https://developer.android.com/jetpack/compose | Apache 2.0 | UI framework | Bundled (Gradle AAR) | Jetpack Compose UI |
-| AndroidX Compose UI Test | Compose BOM 2025.03.01 | https://developer.android.com/develop/ui/compose/testing | Apache 2.0 | Compose semantics testing | Test-only | Android Password Reset confirmation and control-absence tests |
-| AndroidX Lifecycle | 2.8.7 | https://developer.android.com/jetpack/androidx/releases/lifecycle | Apache 2.0 | ViewModel, lifecycle management | Bundled (Gradle AAR) | ViewModel for session lifecycle |
-| AndroidX Activity Compose | 1.10.1 | https://developer.android.com/jetpack/androidx/releases/activity | Apache 2.0 | Compose-Activity integration | Bundled (Gradle AAR) | ComponentActivity + setContent |
-| Kotlin | 2.1.20 | https://kotlinlang.org | Apache 2.0 | Programming language | Toolchain | Android development language |
-| Android NDK | 29.0.14206865 | https://developer.android.com/ndk | Android SDK License | Native build toolchain | Toolchain | Compiles libtorrent + JNI |
-| CMake | 3.22.1 | https://cmake.org | BSD-3-Clause | Native build system | Toolchain | Builds native libraries |
-| JUnit | 4.13.2 | https://junit.org | EPL 2.0 | Unit testing | Test-only | Local unit tests |
-| AndroidX Test | 1.3.0 / 3.7.0 | https://developer.android.com/testing | Apache 2.0 | Instrumented testing | Test-only | Device instrumentation tests |
-| OkHttp | 4.12.0 | https://github.com/square/okhttp | Apache 2.0 | HTTP client for Android instrumentation tests | Test-only | Used in M4 emulator acceptance suite (androidTest) |
-| Playwright Test | 1.61.1 | https://github.com/microsoft/playwright | Apache 2.0 | Headless Chromium WebUI E2E acceptance | Test-only | Host-side test tool; not bundled in the APK |
+Versions below are declared or resolved by the current Gradle and npm lockfiles. “Bundled” means code is distributed in the APK; build/test-only tools are not shipped as application runtime code. Resolved app dependencies for Gradle's lockable configurations are pinned in [`app/gradle.lockfile`](app/gradle.lockfile); plugin/tool distributions remain pinned by their declared versions and wrapper checksum. The complete generated npm inventory, including all 110 resolved direct, transitive, optional-platform, build, and test packages with versions and SPDX license identifiers, is tracked in [`third_party/web-dependencies.json`](third_party/web-dependencies.json) and checked by CI.
 
-## Dependency Bootstrap
+## Bundled runtime components
 
-Native dependencies (Boost) are not tracked in git. Run the bootstrap script after cloning:
+| Dependency | Version / Commit | Source | License | Distribution notes |
+|---|---:|---|---|---|
+| libtorrent-rasterbar | v2.0.10 (`74bc93a37`) | https://github.com/arvidn/libtorrent | BSD-3-Clause, with additional per-file licenses documented upstream | Statically linked into the JNI shared library. The complete pinned `libtorrent/LICENSE` is packaged with the APK. The submodule includes separately licensed files, including an APSL-2.0 route header; the Android build does not intentionally compile Apple route code. |
+| Boost headers | 1.86.0 | https://www.boost.org | Boost Software License 1.0 | Used by libtorrent; bootstrapped from a SHA-256-pinned archive. The license is packaged with the APK. |
+| AndroidX Core KTX | declared 1.15.0; resolved 1.16.0 | https://github.com/androidx/androidx | Apache-2.0 | Bundled Android runtime. |
+| AndroidX AppCompat | 1.7.1 | https://github.com/androidx/androidx | Apache-2.0 | Bundled Android runtime. |
+| Material Components for Android | 1.14.0 | https://github.com/material-components/material-components-android | Apache-2.0 | Bundled Android runtime. |
+| Jetpack Compose | BOM 2025.03.01; UI 1.7.8; Material3 1.3.1 | https://github.com/androidx/androidx | Apache-2.0 | Bundled Android UI runtime. |
+| AndroidX Lifecycle | 2.8.7 | https://github.com/androidx/androidx | Apache-2.0 | Bundled Android runtime. |
+| AndroidX Activity Compose | 1.10.1 | https://github.com/androidx/androidx | Apache-2.0 | Bundled Android runtime. |
+| Kotlin standard library | resolved 2.2.10 | https://github.com/JetBrains/kotlin | Apache-2.0 | Bundled Kotlin runtime. |
+| kotlinx.coroutines | resolved 1.9.0 | https://github.com/Kotlin/kotlinx.coroutines | Apache-2.0 | Bundled coroutine runtime. |
+| Ktor server | 3.0.1 | https://github.com/ktorio/ktor | Apache-2.0 | Bundled embedded HTTP/WebSocket server. |
+| Netty | 4.1.114.Final | https://github.com/netty/netty | Apache-2.0 | Bundled Ktor engine/runtime; upstream NOTICE is packaged with the APK. |
+| kotlinx.serialization JSON | 1.7.3 | https://github.com/Kotlin/kotlinx.serialization | Apache-2.0 | Bundled JSON runtime. |
+| Svelte | 5.56.9 | https://github.com/sveltejs/svelte | MIT | Compiled WebUI runtime bundled in APK assets; pinned upstream license is packaged with the APK. |
 
-```bash
-./scripts/bootstrap-deps.sh
-```
+## Build and test components
 
-This script:
-1. Downloads Boost 1.86.0 from the official archive
-2. Verifies the SHA-256 checksum (`2575e74ffc3ef1cd0babac2c1ee8bdb5782a0ee672b1912da40e5b4b591ca01f`)
-3. Extracts headers to `dep/`
+| Dependency | Version | Source | License | Use |
+|---|---:|---|---|---|
+| Android Gradle Plugin | 9.2.1 | https://android.googlesource.com/platform/tools/base/ | Apache-2.0 | Build toolchain. |
+| Gradle | 9.4.1 | https://github.com/gradle/gradle | Apache-2.0 | Build toolchain/wrapper. |
+| Kotlin Compose and serialization plugins | 2.1.20 | https://github.com/JetBrains/kotlin | Apache-2.0 | Build plugins. |
+| Foojay Toolchains Resolver | 1.0.0 | https://github.com/gradle/foojay-toolchains | Apache-2.0 | Gradle toolchain resolver. |
+| Android SDK / NDK | SDK 36.1 / NDK 29.0.14206865 | https://developer.android.com | Android SDK License | Build toolchain. |
+| CMake | 3.22.1 | https://cmake.org | BSD-3-Clause | Native build toolchain. |
+| JUnit 4 | 4.13.2 | https://github.com/junit-team/junit4 | EPL-1.0 | JVM tests only. |
+| AndroidX Test / Espresso / Compose UI Test | 1.3.0 / 3.7.0 / Compose BOM 2025.03.01 | https://github.com/android/android-test and https://github.com/androidx/androidx | Apache-2.0 | Instrumentation tests only. |
+| OkHttp | 4.12.0 | https://github.com/square/okhttp | Apache-2.0 | Instrumentation tests only. |
+| Playwright Test | 1.61.1 | https://github.com/microsoft/playwright | Apache-2.0 | Browser acceptance tests only. |
+| SvelteKit / adapter-static | 2.70.3 / 3.0.10 | https://github.com/sveltejs/kit | MIT | WebUI build toolchain. SvelteKit's transitive `cookie` dependency is overridden to patched 0.7.2. |
+| Svelte Vite plugin | 5.1.1 | https://github.com/sveltejs/vite-plugin-svelte | MIT | WebUI build toolchain. |
+| Vite | 6.4.3 | https://github.com/vitejs/vite | MIT, with bundled third-party notices in its upstream license | WebUI build toolchain. |
+| svelte-check | 4.7.2 | https://github.com/sveltejs/language-tools | MIT | Static analysis. |
+| TypeScript | 5.9.3 | https://github.com/microsoft/TypeScript | Apache-2.0 | Type checking/build toolchain. |
 
-The checksum is pinned in the script. If the upstream archive changes, the script will fail and must be updated with the new checksum.
+## License delivery
 
-## License Compatibility Notes
+Android builds generate an `open_source_licenses/` assets directory containing:
 
-- **libtorrent-rasterbar** uses the Boost Software License 1.0, which is a permissive BSD-style license. It is NOT GPL. This license allows static linking and distribution in closed-source applications without requiring source disclosure.
-- **Boost** uses the Boost Software License 1.0, also permissive.
-- All AndroidX/Kotlin dependencies use Apache 2.0.
-- No GPL dependencies are used in this project.
+- this notice inventory and the resolved Gradle/npm dependency inventories;
+- the project's Apache-2.0 license and NOTICE;
+- the complete pinned libtorrent license (including its per-file license disclosures);
+- the Boost Software License 1.0 text;
+- Netty's pinned NOTICE; and
+- Svelte's pinned MIT license; and
+- the complete generated WebUI dependency inventory.
 
-## Guidelines
+Source distributions also preserve upstream licenses in the `libtorrent/` submodule and `third_party/notices/`.
 
-- Add a row for every new dependency before merging.
-- Avoid GPL dependencies unless explicitly approved and documented in [DECISIONS.md](DECISIONS.md).
-- Do not copy source from other torrent clients without verifying license compatibility.
-- Prefer documented APIs and official upstream build guidance.
-- "Bundled / Distributed" indicates whether the dependency is packaged with the APK or downloaded at runtime.
+## Compatibility notes
+
+- No GPL or LGPL dependency is declared in the Android or WebUI build.
+- libtorrent is primarily BSD-3-Clause, not Boost-licensed as a whole. Static linking does not impose copyleft terms, but its binary notice requirements still apply.
+- The libtorrent source tree contains separately licensed files. Project Apache-2.0 terms apply only to original project code and do not replace those licenses.
+- JUnit 4 is EPL-1.0 and test-only; it is not distributed in the APK.
+
+## Contributor rule
+
+Before adding or upgrading a dependency, update this file, preserve required license/NOTICE material, and verify that generated APK notices remain complete. Avoid GPL dependencies unless explicitly approved and documented in [DECISIONS.md](DECISIONS.md).
+
+This inventory is an engineering compliance record, not legal advice.

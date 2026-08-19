@@ -2,16 +2,16 @@
 
 ## Core Principles
 
-- **LAN-only management.** The WebUI binds to LAN interfaces only. No public-facing ports.
-- **Authenticated WebUI.** Password authentication is required by default. No anonymous access.
-- **No public exposure by default.** The app does not offer port forwarding, UPnP, or NAT-PMP features.
+- **LAN-intended management.** The WebUI listens on the configured device port so trusted-LAN browsers can connect. The app does not create public reachability; network exposure remains the operator's responsibility.
+- **Authenticated WebUI.** Password authentication is required by default. No anonymous access. The publicly known bootstrap credential should be replaced during onboarding.
+- **No public exposure features.** The app does not offer router port forwarding, UPnP, or NAT-PMP configuration.
 
 ## Threat Model
 
 | Threat | Mitigation |
 |--------|-----------|
-| Accidental LAN access by unauthorized device | Password authentication; LAN-only binding |
-| Weak password | Password must meet minimum complexity during setup |
+| Accidental access by an unauthorized network peer | Password authentication; operator keeps the device port reachable only from a trusted LAN. The server currently listens on all IPv4 interfaces and does not itself distinguish LAN, VPN, or public routes. |
+| Publicly known bootstrap or weak password | Onboarding offers an immediate password change; documentation tells users not to retain the bootstrap credential on a shared LAN. Current minimum length is four characters and is not claimed as a strong-password guarantee. |
 | USB permission loss | Treated as normal recoverable state; no data loss |
 | VPN misconfiguration | App does not control VPN; documented deployment guidance |
 | App crash / process death | Foreground service; queue persistence |
@@ -29,7 +29,7 @@ Users configure split tunneling externally so that:
 - Torrent traffic flows through the VPN.
 - LAN WebUI traffic remains local and reachable.
 
-Deployment documentation will cover recommended configurations.
+Deployment guidance is limited to the product boundaries in [SECURITY.md](../SECURITY.md) and [BUILD_AND_RUN.md](../BUILD_AND_RUN.md); the app does not validate external VPN routing.
 
 ## Data Handling
 

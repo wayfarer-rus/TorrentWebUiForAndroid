@@ -2,97 +2,83 @@
 
 ## Prerequisites
 
-- **Android SDK** with platform `android-36.1` (or higher)
-- **Android NDK** 29.0.14206865
-- **CMake** 3.22.1
-- **Java 17** (JDK)
-- **Gradle** (via wrapper, no separate install needed)
+- Android SDK platform `android-36.1`
+- Android NDK `29.0.14206865`
+- CMake `3.22.1`
+- JDK 17
+- Node.js 20.19 or newer (Node.js 22 LTS recommended)
+- ADB for installation and device diagnostics
 
-## Setup
+The current APK targets Android 16, supports Android 13+ (`minSdk 33`), and builds only `arm64-v8a`.
 
-1. Clone the repository with submodules:
-   ```bash
-   git clone --recurse-submodules <repo-url>
-   cd TorrentWebUiForAndroid
-   ```
-
-2. If submodules were not cloned:
-   ```bash
-   git submodule update --init libtorrent
-   cd libtorrent && git checkout v2.0.10 && git submodule update --init deps/try_signal deps/asio-gnutls
-   cd ..
-   ```
-
-3. Bootstrap pinned dependencies (Boost headers):
-   ```bash
-   ./scripts/bootstrap-deps.sh
-   ```
-   This downloads Boost 1.86.0 from `archives.boost.io`, verifies SHA-256 checksum, and extracts to `dep/`. The checksum is pinned in `dep/boost-sha256.txt` and in the script.
-
-4. Ensure `local.properties` has correct SDK path:
-   ```
-   sdk.dir=/path/to/Android/sdk
-   ```
-
-## Build
+## Clone and bootstrap
 
 ```bash
-./gradlew assembleDebug
+git clone --recurse-submodules https://github.com/wayfarer-rus/TorrentWebUiForAndroid.git
+cd TorrentWebUiForAndroid
+./scripts/bootstrap-deps.sh
+cd web
+npm ci
+cd ..
 ```
 
-APK output: `app/build/outputs/apk/debug/app-debug.apk` (~72MB)
+If Android Studio has not generated `local.properties`, create it with your SDK location:
 
-## Install
+```properties
+sdk.dir=/path/to/Android/sdk
+```
+
+## Build the APK
+
+```bash
+./gradlew :app:assembleDebug --console=plain
+```
+
+Gradle builds the SvelteKit WebUI, copies it into APK assets, generates the packaged open-source notices, and compiles the native libtorrent/JNI layer. The APK is written to:
+
+```text
+app/build/outputs/apk/debug/app-debug.apk
+```
+
+## Install and start
 
 ```bash
 adb install -r app/build/outputs/apk/debug/app-debug.apk
-```
-
-## Launch
-
-```bash
 adb shell am start -n com.andreiefimov.torrentwebui/.MainActivity
 ```
 
-## Stage 1 Test Flow
+Complete Android onboarding, grant notification and All Files Access through system UI, choose a download folder, and replace the bootstrap WebUI password. Open the LAN URL shown by the app from a trusted-network browser.
 
-1. Launch the app
-2. Tap the info icon (top-right) to open Diagnostics panel
-3. Verify:
-   - ABI shows `arm64-v8a`
-   - libtorrent version shows `2.0.10`
-   - Native loaded: yes
-   - Session started: yes
-4. Paste a magnet URI into the text field (see Legal Test Magnets below)
-5. Tap "Add"
-6. Observe torrent appear in list with state, progress, rates, peers, save location
-7. Tap "Pause" to pause the torrent
-8. Tap "Resume" to resume
-9. Tap "Remove" to remove torrent and delete files
+Do not expose the WebUI port to the public Internet. See [SECURITY.md](SECURITY.md).
 
-## Legal Test Magnets
-
-Use only legal, publicly available torrents for testing:
-
-- **Ubuntu 24.04 LTS Desktop** (official release):
-  ```
-  magnet:?xt=urn:btih:2e62854a660074367b8104bd09472b04b44d870e&dn=ubuntu-24.04.1-desktop-amd64.iso&tr=udp://tracker.opentrackr.org:1337/announce&tr=udp://open.stealth.si:80/announce
-  ```
-
-## Expected Download Location
-
-```
-/storage/emulated/0/Android/data/com.andreiefimov.torrentwebui/files/downloads/
-```
-
-This is app-private external storage via `getExternalFilesDir("downloads")`.
-
-## Logcat
+## WebUI development
 
 ```bash
-# Watch JNI logs
-adb logcat -s "TorrentJNI"
-
-# Watch all app logs
-adb logcat | grep "com.andreiefimov.torrentwebui"
+cd web
+npm ci
+npm run dev
 ```
+
+The development server uses mocked/browser-test seams; Android remains the authority for real storage, daemon, and authentication behavior.
+
+## Host-side validation
+
+```bash
+cd web
+npm run check
+npm run test:policy
+npx playwright install chromium
+npm run test:browser
+```
+
+Run JVM tests and Android lint from the repository root:
+
+```bash
+./gradlew :app:testDebugUnitTest :app:lintDebug --console=plain
+```
+
+## Emulator/device acceptance
+
+Instrumentation and live native/storage runners require an isolated Android emulator, visible permission interaction, and additional cleanup guarantees. See [EMULATOR_REFERENCE.md](EMULATOR_REFERENCE.md), [TEST_REPORT.md](TEST_REPORT.md), and the runner scripts under `web/e2e/`.
+
+Never claim a physical-device or separate-LAN result unless that environment was actually used.
