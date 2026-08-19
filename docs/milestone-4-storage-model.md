@@ -102,6 +102,8 @@ Startup validates every referenced path and All Files Access. An unavailable des
 ## Authenticated API Shape
 
 All storage endpoints require the existing WebUI password authentication. Exact route names may follow existing Ktor conventions, but the model must support:
+Canonical paths in storage requests are typed JSON body fields, never URL path or query parameters.
+
 
 - storage readiness/permission state;
 - volume roots and validated directory children;

@@ -1,5 +1,7 @@
 package com.andreiefimov.torrentwebui
 
+import android.content.Context
+import android.content.ContextWrapper
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
@@ -10,7 +12,9 @@ import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.testing.testApplication
+import java.io.File
 import java.util.Base64
+import kotlin.io.path.createTempDirectory
 import kotlinx.serialization.json.Json
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -127,8 +131,10 @@ class OnboardingApiTest {
             storageApiOperations = storage
         )
 
-        val response = client.get("/api/storage/children/${encode("/storage/USB")}") {
+        val response = client.post("/api/storage/children") {
             header(HttpHeaders.Authorization, basic(WebUiCredentials.DEFAULT_PASSWORD))
+            header(HttpHeaders.ContentType, "application/json")
+            setBody("{\"path\":\"/storage/USB\"}")
         }
 
         assertEquals(HttpStatusCode.Conflict, response.status)
@@ -186,8 +192,10 @@ class OnboardingApiTest {
         assertTrue(rejected.bodyAsText().contains("cannot be used"))
         assertFalse(rejected.bodyAsText().contains("\"isValid\":true"))
 
-        val approved = client.post("/api/storage/destinations/${encode("/storage/USB/Movies")}") {
+        val approved = client.post("/api/storage/destinations") {
             header(HttpHeaders.Authorization, authorization)
+            header(HttpHeaders.ContentType, "application/json")
+            setBody("{\"path\":\"/storage/USB/Movies\"}")
         }
         assertEquals(HttpStatusCode.OK, approved.status)
         assertEquals("/storage/USB/Movies", approvalInput)
@@ -350,6 +358,75 @@ class OnboardingApiTest {
     }
 
     @Test
+    fun `approved move destinations reach the move service while unapproved destinations are rejected`() = testApplication {
+        val directory = createTempDirectory("move-destination-guard-").toFile()
+        try {
+            val context = testContext(directory)
+            val approvedPath = "/storage/primary/Approved"
+            val rejectedPath = "/storage/USB/Unapproved"
+            val catalog = RecordingDestinationCatalogOperations(approvedPath)
+            val journal = MoveJournal(context)
+            val bindings = QueueRuntimeBindings()
+            val rejectedRetryQueue = QueueId("rejected-retry")
+            val approvedRetryQueue = QueueId("approved-retry")
+            bindings.bind(rejectedRetryQueue, 2L)
+            bindings.bind(approvedRetryQueue, 3L)
+            assertTrue(journal.beginMove(rejectedRetryQueue, "/storage/primary/Source", rejectedPath))
+            assertTrue(journal.updatePhase(rejectedRetryQueue, MovePhase.Interrupted))
+            assertTrue(journal.beginMove(approvedRetryQueue, "/storage/primary/Source", approvedPath))
+            assertTrue(journal.updatePhase(approvedRetryQueue, MovePhase.Interrupted))
+            val moveService = RecordingMoveOperations()
+            configure(
+                onboarding = OnboardingCoordinator.completedForTest(),
+                daemonControl = DaemonControlFactory.createForTest(RecoveryBlockedDaemonControl)
+            )
+            TorrentServer.destinationCatalog = catalog
+            TorrentServer.moveJournal = journal
+            TorrentServer.queueBindings = bindings
+            TorrentServer.moveService = moveService
+            val authorization = basic(WebUiCredentials.DEFAULT_PASSWORD)
+
+            val rejectedMove = client.post("/api/torrents/1/move") {
+                header(HttpHeaders.Authorization, authorization)
+                header(HttpHeaders.ContentType, "application/json")
+                setBody("{\"destinationPath\":\"$rejectedPath\"}")
+            }
+            assertEquals(HttpStatusCode.Conflict, rejectedMove.status)
+
+            val rejectedRetry = client.post("/api/torrents/2/move/retry") {
+                header(HttpHeaders.Authorization, authorization)
+                header(HttpHeaders.ContentType, "application/json")
+                setBody("{\"destinationPath\":\"$rejectedPath\"}")
+            }
+            assertEquals(HttpStatusCode.Conflict, rejectedRetry.status)
+            assertTrue(moveService.startCalls.isEmpty())
+            assertTrue(moveService.retryCalls.isEmpty())
+
+            val approvedMove = client.post("/api/torrents/1/move") {
+                header(HttpHeaders.Authorization, authorization)
+                header(HttpHeaders.ContentType, "application/json")
+                setBody("{\"destinationPath\":\"$approvedPath\"}")
+            }
+            assertEquals(HttpStatusCode.OK, approvedMove.status)
+
+            val approvedRetry = client.post("/api/torrents/3/move/retry") {
+                header(HttpHeaders.Authorization, authorization)
+                header(HttpHeaders.ContentType, "application/json")
+                setBody("{\"destinationPath\":\"$approvedPath\"}")
+            }
+            assertEquals(HttpStatusCode.OK, approvedRetry.status)
+            assertEquals(listOf(1L to approvedPath), moveService.startCalls)
+            assertEquals(listOf(3L to approvedPath), moveService.retryCalls)
+        } finally {
+            TorrentServer.destinationCatalog = null
+            TorrentServer.moveJournal = null
+            TorrentServer.queueBindings = null
+            TorrentServer.moveService = null
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
     fun `completed onboarding does not apply the onboarding mutation rejection`() = testApplication {
         configure(OnboardingCoordinator.completedForTest())
 
@@ -365,11 +442,12 @@ class OnboardingApiTest {
         onboarding: OnboardingCoordinator,
         recommendedDestinationOperations: RecommendedDestinationOperations? = null,
         storageApiOperations: StorageApiOperations? = null,
-        authManager: AuthManager = InMemoryAuthManager()
+        authManager: AuthManager = InMemoryAuthManager(),
+        daemonControl: DaemonControl = RecoveryBlockedDaemonControl
     ) {
         TorrentServer.configureForTest(
             authManager = authManager,
-            daemonControl = RecoveryBlockedDaemonControl,
+            daemonControl = daemonControl,
             onboardingCoordinator = onboarding,
             recommendedDestinationOperations = recommendedDestinationOperations,
             storageApiOperations = storageApiOperations,
@@ -396,7 +474,40 @@ class OnboardingApiTest {
         readiness = { readiness }
     )
 
-    private fun encode(path: String): String = java.net.URLEncoder.encode(path, Charsets.UTF_8)
+    private fun testContext(directory: File): Context = object : ContextWrapper(null) {
+        override fun getFilesDir(): File = directory
+    }
+
+    private class RecordingDestinationCatalogOperations(
+        private val approvedPath: String
+    ) : DestinationCatalogOperations {
+        override suspend fun listDestinations(): List<String> = listOf(approvedPath)
+        override suspend fun getLatestSelected(): String? = approvedPath
+        override suspend fun addDestination(canonicalPath: String): Boolean = canonicalPath == approvedPath
+        override suspend fun removeDestination(
+            canonicalPath: String,
+            queueStore: QueueStore,
+            moveJournal: MoveJournal?
+        ): Boolean = false
+        override suspend fun contains(canonicalPath: String): Boolean = canonicalPath == approvedPath
+    }
+
+    private class RecordingMoveOperations : MoveOperations {
+        val startCalls = mutableListOf<Pair<Long, String>>()
+        val retryCalls = mutableListOf<Pair<Long, String>>()
+
+        override suspend fun startMove(runtimeId: Long, newDestination: String): MoveResult {
+            startCalls += runtimeId to newDestination
+            return MoveResult(status = "ok")
+        }
+
+        override suspend fun cancelMove(runtimeId: Long): Boolean = true
+
+        override suspend fun retryMove(runtimeId: Long, newDestination: String): MoveResult {
+            retryCalls += runtimeId to newDestination
+            return MoveResult(status = "ok")
+        }
+    }
 
     private fun basic(password: String): String {
         val encoded = Base64.getEncoder().encodeToString("browser:$password".toByteArray())

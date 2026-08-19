@@ -181,7 +181,7 @@ try {
 	assertNoDefaultPasswordInRenderedContent(await page.locator('body').innerText());
 
 	await page.getByRole('button', { name: 'Set it later' }).click();
-	await page.getByRole('heading', { name: 'Add Torrent' }).waitFor();
+	await page.getByRole('heading', { name: 'Add Download' }).waitFor();
 	const setupCompletedAt = Date.now();
 	const durationMs = assertWithinSetupBudget(setupStartedAt, setupCompletedAt);
 	assertNoDefaultPasswordInRenderedContent(await page.locator('body').innerText());
@@ -190,7 +190,7 @@ try {
 	assert.equal(completedStatus.passwordDecision, 'deferred');
 
 	await page.reload({ waitUntil: 'domcontentloaded' });
-	await page.getByRole('heading', { name: 'Add Torrent' }).waitFor();
+	await page.getByRole('heading', { name: 'Add Download' }).waitFor();
 	assertNoDefaultPasswordInRenderedContent(await page.locator('body').innerText());
 
 	const stopResponse = await page.evaluate(async () => {
@@ -207,7 +207,7 @@ try {
 	recordAppProcessIds();
 	await waitFor(async () => (await authenticatedFetch('/health')).ok, 'Ktor health after daemon restart');
 	await page.reload({ waitUntil: 'domcontentloaded' });
-	await page.getByRole('heading', { name: 'Add Torrent' }).waitFor();
+	await page.getByRole('heading', { name: 'Add Download' }).waitFor();
 	assertNoDefaultPasswordInRenderedContent(await page.locator('body').innerText());
 
 	const appLogs = [...appProcessIds]

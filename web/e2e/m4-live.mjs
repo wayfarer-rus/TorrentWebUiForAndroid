@@ -214,15 +214,17 @@ async function cleanupStaleOwnedState() {
 	}
 	const catalog = await api('/api/storage/catalog');
 	for (const destination of catalog.filter((path) => path.includes('TorrentWebUi-M4-'))) {
-		const response = await page.request.fetch(`${baseUrl}/api/storage/destinations/${encodeURIComponent(destination)}`, { method: 'DELETE' });
+		const response = await page.request.fetch(`${baseUrl}/api/storage/destinations`, { method: 'DELETE', data: { path: destination } });
 		assert(response.ok() || response.status() === 404, `Unable to remove stale owned destination: HTTP ${response.status()}`);
 	}
 }
 
 async function approveDestination(path) {
-	if (await page.getByRole('button', { name: 'Choose another folder' }).count()) {
-		await page.getByRole('button', { name: 'Choose another folder' }).click();
-	}
+	// M7 intentionally centralizes folder management in Settings; retain this
+	// production-seam test by following the user-visible Settings journey.
+	await page.getByRole('button', { name: 'Open settings' }).click();
+	await page.getByRole('button', { name: 'Download folders' }).click();
+	await page.getByRole('button', { name: 'Browse storage' }).click();
 	await page.locator('#destination-path').fill(path);
 	const validationResponse = page.waitForResponse((response) =>
 		response.url().endsWith('/api/storage/validate') && response.request().method() === 'POST'
@@ -232,9 +234,10 @@ async function approveDestination(path) {
 	const storageReload = page.waitForResponse((response) =>
 		response.url().endsWith('/api/storage/latest-selected') && response.request().method() === 'GET'
 	);
-	await page.getByRole('button', { name: 'Use this folder' }).click();
+	await page.getByRole('button', { name: 'Approve this folder' }).click();
 	await storageReload;
-	await page.getByText(`Downloads will be saved to ${path}`).waitFor();
+	await page.getByRole('dialog', { name: 'Settings' }).getByRole('button', { name: 'Close settings' }).click();
+	await page.getByRole('heading', { name: 'Download Folder' }).waitFor();
 	if (!approvedDestinations.includes(path)) approvedDestinations.push(path);
 }
 
@@ -242,8 +245,8 @@ async function addMagnet(magnet, expectedName, expectedStatus = 'ok') {
 	const addResponse = page.waitForResponse((response) =>
 		response.url().endsWith('/api/torrents/magnet') && response.request().method() === 'POST'
 	);
-	await page.locator('.add-torrent input').fill(magnet);
-	await page.locator('.add-torrent').getByRole('button', { name: 'Add' }).click();
+	await page.getByLabel('Download link').fill(magnet);
+	await page.getByRole('button', { name: 'Add Download' }).click();
 	const response = await addResponse;
 	const result = await response.json();
 	assert.equal(response.status(), 200, `Fixture add failed: ${JSON.stringify(result)}`);
@@ -269,6 +272,21 @@ async function addPausedOfficial(source, destinationPath) {
 	assert.equal(result?.status, 'ok', `${source.label} paused add did not return ok.`);
 	assert.equal(typeof result?.id, 'number', `${source.label} paused add returned no native runtime ID.`);
 	return { source, destinationPath, result };
+}
+
+async function chooseMoveTarget(card, targetPath) {
+	await card.getByRole('button', { name: 'Move files' }).click();
+	await card.getByRole('radio', { name: targetPath, exact: true }).check();
+	await card.getByRole('button', { name: 'Continue', exact: true }).click();
+}
+
+async function requestMove(card, targetPath, torrentId) {
+	await chooseMoveTarget(card, targetPath);
+	const moveResponse = page.waitForResponse((response) =>
+		response.url().endsWith(`/api/torrents/${torrentId}/move`) && response.request().method() === 'POST'
+	);
+	await card.getByRole('dialog').getByRole('button', { name: 'Move files', exact: true }).click();
+	return moveResponse;
 }
 
 async function removeTorrentAndWait(torrentId) {
@@ -341,7 +359,7 @@ try {
 	assert.deepEqual(await api('/api/torrents'), [], 'M4 acceptance requires an isolated empty queue.');
 
 	await page.goto(baseUrl, { waitUntil: 'networkidle' });
-	await page.getByRole('heading', { name: 'Torrent WebUI' }).waitFor();
+	await page.locator('h1').filter({ hasText: 'Downloads' }).waitFor();
 	await startAuthenticatedWebSocketObserver();
 	await page.getByRole('heading', { name: 'Download folder' }).waitFor();
 	assert.equal((await api('/api/storage/permission')).state, 'Ready');
@@ -442,11 +460,7 @@ try {
 	assert.equal((await api('/api/storage/latest-selected')).path, secondDestination);
 
 	await approveDestination(moveDestination);
-	await fixture.card.locator('select').selectOption(moveDestination);
-	const [moveResponse] = await Promise.all([
-		page.waitForResponse((response) => response.url().endsWith(`/api/torrents/${fixture.result.id}/move`) && response.request().method() === 'POST'),
-		fixture.card.getByRole('button', { name: 'Move', exact: true }).click()
-	]);
+	const moveResponse = await requestMove(fixture.card, moveDestination, fixture.result.id);
 	const moveResult = await moveResponse.json();
 	assert.equal(moveResponse.status(), 200, `Deterministic move was not accepted: ${JSON.stringify(moveResult)}`);
 	assert.equal(moveResult.status, 'ok');
@@ -471,11 +485,7 @@ try {
 	assert.equal((await fetch(`${fixtureControlUrl}/control/block?name=${encodeURIComponent(partialName)}`, { method: 'POST' })).status, 204);
 	assert(partialBeforeMove.progress < 0.999);
 	await approveDestination(partialDestination);
-	await partial.card.locator('select').selectOption(partialDestination);
-	const [partialMoveResponse] = await Promise.all([
-		page.waitForResponse((response) => response.url().endsWith(`/api/torrents/${partial.result.id}/move`) && response.request().method() === 'POST'),
-		partial.card.getByRole('button', { name: 'Move', exact: true }).click()
-	]);
+	const partialMoveResponse = await requestMove(partial.card, partialDestination, partial.result.id);
 	assert.equal(partialMoveResponse.status(), 200);
 	await waitForCompletedMove(partial.result.id, partialDestination, 90_000);
 	const partialAfterMove = (await api('/api/torrents')).find((torrent) => torrent.id === partial.result.id);
@@ -512,7 +522,7 @@ try {
 	await page.goto(baseUrl, { waitUntil: 'networkidle' });
 	assert.equal((await api('/api/storage/permission')).state, 'RevokedRuntime');
 	await page.getByText(/Storage permission is required/).waitFor();
-	assert.equal(await page.locator('.add-torrent').getByRole('button', { name: 'Add' }).isDisabled(), true);
+	assert.equal(await page.getByRole('button', { name: 'Add Download' }).isDisabled(), true);
 	const blockedAdd = await apiResponse('/api/torrents/magnet', {
 		method: 'POST', headers: { 'Content-Type': 'application/json' },
 		data: { magnet: fixtureMagnet, destinationPath: firstDestination }
@@ -580,7 +590,7 @@ try {
 
 	await approveDestination(addCorruptDestination);
 	const addCorrupt = await addMagnet(addCorruptMagnet, addCorruptName, 'storage_conflict');
-	await addCorrupt.card.getByText(/Storage conflict/).waitFor();
+	await addCorrupt.card.getByText(/Download Folder needs attention/).waitFor();
 	assert.equal((await api(`/api/torrents/${addCorrupt.result.id}/destination`)).status, 'storage_conflict');
 	const addCorruptSnapshot = (await api('/api/torrents')).find((torrent) => torrent.id === addCorrupt.result.id);
 	assert(addCorruptSnapshot && ['paused', 'pause_requested'].includes(addCorruptSnapshot.state));
@@ -593,11 +603,7 @@ try {
 	await approveDestination(conflictDestination);
 	assert.equal((await fetch(`${fixtureControlUrl}/control/block?name=${encodeURIComponent(fixtureName)}`, { method: 'POST' })).status, 204);
 	const fixtureCard = page.locator('.torrent-card').filter({ hasText: fixtureName }).first();
-	await fixtureCard.locator('select').selectOption(conflictDestination);
-	const [conflictResponse] = await Promise.all([
-		page.waitForResponse((response) => response.url().endsWith(`/api/torrents/${fixture.result.id}/move`) && response.request().method() === 'POST'),
-		fixtureCard.getByRole('button', { name: 'Move', exact: true }).click()
-	]);
+	const conflictResponse = await requestMove(fixtureCard, conflictDestination, fixture.result.id);
 	const conflictResult = await conflictResponse.json();
 	assert.equal(conflictResponse.status(), 200);
 	assert.equal(conflictResult.status, 'ok');
@@ -606,9 +612,9 @@ try {
 		'piece-verified storage conflict',
 		90_000
 	);
-	await fixtureCard.getByText(/Storage conflict/).waitFor();
+	await fixtureCard.getByText(/Files already exist at the target/).waitFor();
 	await new Promise((resolve) => setTimeout(resolve, 2_000));
-	await fixtureCard.getByText(/Storage conflict/).waitFor();
+	await fixtureCard.getByText(/Files already exist at the target/).waitFor();
 	assert.equal((await api(`/api/torrents/${fixture.result.id}/move/status`)).phase, 'storage-conflict');
 	await waitForWebSocketTorrent(fixture.result.id, (torrent) =>
 		torrent.destinationPath === moveDestination && torrent.moveState === 'storage-conflict',
@@ -638,12 +644,12 @@ try {
 	const interrupted = await addMagnet(interruptedMagnet, interruptedName);
 	await waitForTorrentComplete(interrupted.result.id, 90_000);
 	await approveDestination(interruptedDestination);
-	await interrupted.card.locator('select').selectOption(interruptedDestination);
 	androidUi.run('shell', 'touch', `${secondDestination}/${moveGateHold}`);
+	await chooseMoveTarget(interrupted.card, interruptedDestination);
 	const interruptedMoveResponsePromise = page.waitForResponse((response) =>
 		response.url().endsWith(`/api/torrents/${interrupted.result.id}/move`) && response.request().method() === 'POST'
 	).then((response) => ({ response }), (error) => ({ error }));
-	await interrupted.card.getByRole('button', { name: 'Move', exact: true }).click();
+	await interrupted.card.getByRole('dialog').getByRole('button', { name: 'Move files', exact: true }).click();
 	await poll(async () => androidUi.run('shell', `if [ -f '${secondDestination}/${moveGateReached}' ]; then echo reached; fi`) === 'reached', 'fixture-controlled native move boundary');
 	androidUi.run('shell', 'sm', 'unmount', interruptedVolumeId);
 	androidUi.run('shell', 'touch', `${secondDestination}/${moveGateRelease}`);
@@ -652,7 +658,7 @@ try {
 	const interruptedMoveResponse = interruptedMoveOutcome.response;
 	assert.equal(interruptedMoveResponse.status(), 200);
 	await poll(async () => (await api(`/api/torrents/${interrupted.result.id}/move/status`)).phase === 'move-interrupted', 'native move failure journal finalization', 45_000);
-	await page.locator('.torrent-card').filter({ hasText: interruptedName }).getByText(/Move interrupted/).waitFor();
+	await page.locator('.torrent-card').filter({ hasText: interruptedName }).getByText(/move stopped before completion/).waitFor();
 	const failedMoveSnapshot = (await api('/api/torrents')).find((torrent) => torrent.id === interrupted.result.id);
 	assert.equal(failedMoveSnapshot.destinationPath, secondDestination, 'REST lost the durable source destination after native move failure.');
 	assert.equal(failedMoveSnapshot.savePath, secondDestination, 'Native status lost the source save path after move failure.');
@@ -682,12 +688,12 @@ try {
 	);
 	await approveDestination(cancelInterruptedDestination);
 	const reusedCard = page.locator('.torrent-card').filter({ hasText: reuseName }).first();
-	await reusedCard.locator('select').selectOption(cancelInterruptedDestination);
 	androidUi.run('shell', 'touch', `${firstDestination}/${moveGateHold}`);
+	await chooseMoveTarget(reusedCard, cancelInterruptedDestination);
 	const cancelMoveResponsePromise = page.waitForResponse((response) =>
 		response.url().endsWith(`/api/torrents/${reused.result.id}/move`) && response.request().method() === 'POST'
 	).then((response) => ({ response }), (error) => ({ error }));
-	await reusedCard.getByRole('button', { name: 'Move', exact: true }).click();
+	await reusedCard.getByRole('dialog').getByRole('button', { name: 'Move files', exact: true }).click();
 	await poll(
 		async () => androidUi.run('shell', `if [ -f '${firstDestination}/${moveGateReached}' ]; then echo reached; fi`) === 'reached',
 		'fixture-controlled native move boundary for explicit cancel'
@@ -702,7 +708,7 @@ try {
 		'native move failure before explicit cancel',
 		45_000
 	);
-	await reusedCard.getByText(/Move interrupted/).waitFor();
+	await reusedCard.getByText(/move stopped before completion/).waitFor();
 	const cancelInterruptedSnapshot = (await api('/api/torrents')).find((torrent) => torrent.id === reused.result.id);
 	assert.equal(cancelInterruptedSnapshot.destinationPath, firstDestination, 'Cancel fixture lost its durable source destination.');
 	assert(['paused', 'pause_requested'].includes(cancelInterruptedSnapshot.state), 'Cancel fixture was not paused in move-interrupted state.');
@@ -721,8 +727,8 @@ try {
 	assert.equal((await api(`/api/torrents/${reused.result.id}/destination`)).canonicalPath, firstDestination);
 	assert(!(await api('/api/storage/moves')).some((move) => move.torrentId === reused.result.id), 'Interrupted cancel left a durable move journal entry.');
 	const removeCancelledTargetResponse = await page.request.fetch(
-		`${baseUrl}/api/storage/destinations/${encodeURIComponent(cancelInterruptedDestination)}`,
-		{ method: 'DELETE' }
+		`${baseUrl}/api/storage/destinations`,
+		{ method: 'DELETE', data: { path: cancelInterruptedDestination } }
 	);
 	assert.equal(removeCancelledTargetResponse.status(), 200, 'Interrupted cancel did not release the target catalog lock.');
 	approvedDestinations.splice(approvedDestinations.indexOf(cancelInterruptedDestination), 1);
@@ -754,7 +760,7 @@ try {
 	const unaffectedWhileUnmounted = (await api('/api/torrents')).find((torrent) => torrent.id === reused.result.id);
 	assert(unaffectedWhileUnmounted && !['paused', 'pause_requested'].includes(unaffectedWhileUnmounted.state), 'Unavailable storage paused an unaffected torrent.');
 	await page.reload({ waitUntil: 'networkidle' });
-	await page.locator('.torrent-card').filter({ hasText: interruptedName }).getByText(/Destination unavailable/).waitFor();
+	await page.locator('.torrent-card').filter({ hasText: interruptedName }).getByText(/Download Folder is unavailable/).waitFor();
 	androidUi.run('shell', 'sm', 'mount', interruptedVolumeId);
 	await poll(async () => (await api(`/api/torrents/${interrupted.result.id}/destination`)).status === 'ok', 'destination recovery after remount');
 	const stillPausedAfterRemount = (await api('/api/torrents')).find((torrent) => torrent.id === interrupted.result.id);
@@ -785,7 +791,7 @@ try {
 		}
 		for (const destination of [...approvedDestinations].reverse()) {
 			try {
-				const response = await page.request.fetch(`${baseUrl}/api/storage/destinations/${encodeURIComponent(destination)}`, { method: 'DELETE' });
+				const response = await page.request.fetch(`${baseUrl}/api/storage/destinations`, { method: 'DELETE', data: { path: destination } });
 				if (!response.ok() && response.status() !== 404) cleanupFailures.push(new Error(`Destination cleanup failed for ${destination}: HTTP ${response.status()}`));
 			} catch (error) { cleanupFailures.push(new Error(`Destination cleanup failed for ${destination}`, { cause: error })); }
 		}

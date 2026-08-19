@@ -7,6 +7,13 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 
+/** Narrow server dependency for durable move requests. */
+internal interface MoveOperations {
+    suspend fun startMove(runtimeId: Long, newDestination: String): MoveResult
+    suspend fun cancelMove(runtimeId: Long): Boolean
+    suspend fun retryMove(runtimeId: Long, newDestination: String): MoveResult
+}
+
 /**
  * Executes safe torrent data moves between approved destinations.
  *
@@ -24,7 +31,7 @@ class MoveService(
     private val control: TorrentSessionOps,
     private val bindings: QueueRuntimeBindings,
     private val executionGate: MoveExecutionGate = MoveExecutionGate.None
-) {
+) : MoveOperations {
 
     /**
      * Initiates a move of one torrent to [newDestination].
@@ -33,7 +40,7 @@ class MoveService(
      * engine accepts the request. The HTTP caller acknowledges `moving` immediately;
      * completion is async.
      */
-    suspend fun startMove(runtimeId: Long, newDestination: String): MoveResult = withContext(Dispatchers.IO) {
+    override suspend fun startMove(runtimeId: Long, newDestination: String): MoveResult = withContext(Dispatchers.IO) {
         // 1. Validate storage permission.
         if (!StoragePermissionChecker.isGranted(context)) {
             return@withContext MoveResult(status = "error", recoverableError = "Storage permission required")
@@ -205,7 +212,7 @@ class MoveService(
      * Cancels a recoverable move. Retains a terminal reconciliation record while
      * releasing the active target lock; both locations remain intact and paused.
      */
-    suspend fun cancelMove(runtimeId: Long): Boolean = withContext(Dispatchers.IO) {
+    override suspend fun cancelMove(runtimeId: Long): Boolean = withContext(Dispatchers.IO) {
         val queueId = bindings.queueIdFor(runtimeId) ?: return@withContext false
         val move = journal.getMove(queueId) ?: return@withContext false
         if (!move.phase.requiresUserAction) return@withContext false
@@ -238,7 +245,7 @@ class MoveService(
     }
 
     /** Retries an interrupted move. */
-    suspend fun retryMove(runtimeId: Long, newDestination: String): MoveResult = withContext(Dispatchers.IO) {
+    override suspend fun retryMove(runtimeId: Long, newDestination: String): MoveResult = withContext(Dispatchers.IO) {
         val queueId = bindings.queueIdFor(runtimeId) ?: return@withContext MoveResult(
             status = "error", recoverableError = "Torrent not found"
         )

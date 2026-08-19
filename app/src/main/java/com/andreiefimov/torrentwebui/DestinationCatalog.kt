@@ -9,6 +9,15 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
 
+/** Server dependency for approved canonical destinations. */
+internal interface DestinationCatalogOperations {
+    suspend fun listDestinations(): List<String>
+    suspend fun getLatestSelected(): String?
+    suspend fun addDestination(canonicalPath: String): Boolean
+    suspend fun removeDestination(canonicalPath: String, queueStore: QueueStore, moveJournal: MoveJournal?): Boolean
+    suspend fun contains(canonicalPath: String): Boolean
+}
+
 /**
  * Persistent catalog of approved destination paths and the latest-selected default.
  *
@@ -16,19 +25,19 @@ import java.io.IOException
  * Entries are persisted atomically; a path may only be removed when no queue entry references it.
  * The latest-selected path is updated on every successful add and persisted alongside the catalog.
  */
-class DestinationCatalog(private val context: Context) {
+class DestinationCatalog(private val context: Context) : DestinationCatalogOperations {
 
     private val catalogFile = File(context.filesDir, "destination_catalog.txt")
     private val atomicCatalogFile = AtomicFile(catalogFile)
     private val catalogMutex = Mutex()
 
     /** Returns all approved destination paths (canonical, sorted). */
-    suspend fun listDestinations(): List<String> = withContext(Dispatchers.IO) {
+    override suspend fun listDestinations(): List<String> = withContext(Dispatchers.IO) {
         catalogMutex.withLock { loadState().entries.keys.sorted() }
     }
 
     /** Returns the latest-selected destination path, or null if none has been selected. */
-    suspend fun getLatestSelected(): String? = withContext(Dispatchers.IO) {
+    override suspend fun getLatestSelected(): String? = withContext(Dispatchers.IO) {
         catalogMutex.withLock { loadState().latestSelected }
     }
 
@@ -36,7 +45,7 @@ class DestinationCatalog(private val context: Context) {
      * Adds a validated canonical path to the catalog and sets it as latest-selected.
      * @return true if added (or already present), false on I/O error.
      */
-    suspend fun addDestination(canonicalPath: String): Boolean = withContext(Dispatchers.IO) {
+    override suspend fun addDestination(canonicalPath: String): Boolean = withContext(Dispatchers.IO) {
         catalogMutex.withLock {
             try {
                 val state = loadState()
@@ -56,10 +65,13 @@ class DestinationCatalog(private val context: Context) {
      * Removes a destination from the catalog. Returns false if the path is not in the catalog
      * or if any queue entry or move journal still references it.
      */
-    suspend fun removeDestination(
+    suspend fun removeDestination(canonicalPath: String, queueStore: QueueStore): Boolean =
+        removeDestination(canonicalPath, queueStore, null)
+
+    override suspend fun removeDestination(
         canonicalPath: String,
         queueStore: QueueStore,
-        moveJournal: MoveJournal? = null
+        moveJournal: MoveJournal?
     ): Boolean = withContext(Dispatchers.IO) {
         catalogMutex.withLock {
             try {
@@ -91,7 +103,7 @@ class DestinationCatalog(private val context: Context) {
     }
 
     /** Returns true if the given path is in the catalog. */
-    suspend fun contains(canonicalPath: String): Boolean = withContext(Dispatchers.IO) {
+    override suspend fun contains(canonicalPath: String): Boolean = withContext(Dispatchers.IO) {
         catalogMutex.withLock { loadState().entries.containsKey(canonicalPath) }
     }
 

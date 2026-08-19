@@ -32,6 +32,38 @@ This file defines the domain vocabulary used across the Torrent WebUI project. C
 - Built with SvelteKit 5 (runes), served by Ktor server from Android assets, and protected by HTTP Basic Authentication.
 - It controls application-specific settings and torrent behavior, but not Android platform-permission onboarding. Milestone 4 limits those settings to storage.
 
+### Download
+- The consumer-facing representation of one queued torrent and its files in the WebUI. Default screens use **Download**; **Torrent** is reserved for technical details and internal architecture.
+_Avoid_: Torrent, Queue Entry, job, transfer (on default screens)
+
+### Active Downloads
+- The consumer-facing collection of Downloads whose files are not fully downloaded. It includes paused, recovering, moving, and failed Downloads; **Active** describes completion, not current network activity.
+_Avoid_: Active torrents, queue
+
+### Preparing
+- The consumer-facing state of an Active Download while the engine obtains download information, checks files or saved progress, or prepares storage before ordinary downloading.
+_Avoid_: Downloading metadata, checking resume data, allocating, queued for checking
+
+### Completed Downloads
+- The consumer-facing collection of Downloads whose files are fully downloaded, including Downloads that are still Sharing.
+_Avoid_: Finished torrents, seeding torrents
+
+### Needs Attention
+- An exceptional presentation state that raises an Active Download requiring user action above the ordinary list. It is not a permanent category.
+_Avoid_: Error category, failed queue
+
+### Sharing
+- The detail-level state of a Completed Download that continues uploading its data to peers.
+_Avoid_: Seeding (in consumer-facing UI)
+
+### Remove Download
+- The operation that removes a Download from the durable queue and WebUI while retaining its downloaded and partial files. The consumer action is labeled **Remove from list**.
+_Avoid_: Delete, Remove files
+
+### Remove Download and Files
+- The destructive operation that removes a Download from the durable queue and asks the native engine to delete its downloaded and partial files. The consumer action must explicitly mention deleting files.
+_Avoid_: Delete, Remove (without mentioning files)
+
 ### WebSocket Endpoint
 - The authenticated `/ws/progress` stream that provides real-time torrent status updates and alerts to the WebUI.
 
@@ -177,6 +209,10 @@ _Avoid_: WebUI setting, onboarding setting
 - Each torrent references one Approved Destination. Every verified selection persists in the reusable destination catalog and is removable only when no torrent references it. Its canonical, real, copyable filesystem path is its sole identity everywhere; generic SAF selections are not Approved Destinations.
 - Alternate selection browses only mounted backend-reported Storage Volumes and backend-returned readable children. A pasted or browsed path becomes approved only after backend canonicalization, volume confinement, directory/writability validation, and durable catalog persistence; unconfirmed browser state is disposable.
 
+### Download Folder
+- The consumer-facing presentation of an Approved Destination in the WebUI. Its complete canonical path remains its only identity and copyable value.
+_Avoid_: Destination (in consumer-facing UI), folder alias, friendly storage name
+
 ### Latest Selected Destination
 - The most recently chosen Approved Destination, used as the default for adding a new torrent.
 - It does not change the destination of an existing torrent.
@@ -192,8 +228,9 @@ _Avoid_: Default destination, storage alias
 - It remains available only to preserve or move that torrent's data; no new torrent may select it.
 
 ### Torrent Data Move
-- An explicit operation that relocates the downloaded and partial data of one torrent from its current Approved Destination to another.
+- An explicit operation that relocates the downloaded and partial data of one torrent from its current Approved Destination to another. The consumer action is labeled **Move files**.
 - Initiation acknowledges `moving` only after the durable move record exists and the native engine accepts the request; completion, failure, retry, and cancellation are asynchronous state transitions.
+_Avoid_: Move journal, storage migration (in consumer-facing UI)
 - It pauses only that torrent while it copies and verifies target data, changes the destination only on success, and removes the source only afterward. Failure or cancellation retains the source and leaves the torrent paused with a recoverable error; a move is never implied by changing the Latest Selected Destination or another torrent's destination. Existing target files are never overwritten. A non-empty target enters `storage_conflict` and remains paused; automatic reuse is deferred until a native piece-verification flow exists.
 
 ### Move Interrupted

@@ -54,6 +54,33 @@ class WebSocketSnapshotTest {
         assertEquals(0, session.popAlertsCalls)
     }
 
+    @Test
+    fun `snapshot with no durable destination does not expose the native save path`() = runTest {
+        val nativeSavePath = "/native/unverified/path"
+        val session = SnapshotSessionOps(
+            TorrentStatus(
+                id = 8L,
+                name = "legacy fixture",
+                state = "paused",
+                progress = 0.5f,
+                downloadRate = 0,
+                uploadRate = 0,
+                peers = 0,
+                savePath = nativeSavePath
+            )
+        )
+        TorrentServer.configureForTest(InMemoryAuthManager(), DaemonControlFactory.createForTest(session))
+        TorrentServer.queueStore = InMemoryQueueStore()
+        TorrentServer.queueBindings = QueueRuntimeBindings()
+
+        val torrent = Json.parseToJsonElement(TorrentServer.buildSnapshotJson())
+            .jsonObject.getValue("data").jsonArray.single().jsonObject
+
+        assertEquals("", torrent.getValue("destinationPath").jsonPrimitive.content)
+        assertEquals("destination_unavailable", torrent.getValue("destinationStatus").jsonPrimitive.content)
+        assertEquals(nativeSavePath, torrent.getValue("savePath").jsonPrimitive.content)
+    }
+
     private class SnapshotSessionOps(private val status: TorrentStatus) : TorrentSessionOps {
         var popAlertsCalls = 0
 

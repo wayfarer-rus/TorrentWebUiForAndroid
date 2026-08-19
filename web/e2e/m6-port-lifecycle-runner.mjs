@@ -230,7 +230,7 @@ async function assertDurableQueueReachable(hostPort, runtimeId) {
 async function openBrowserPage(hostPort) {
 	const page = await browserContext.newPage();
 	await page.goto(`http://127.0.0.1:${hostPort}`, { waitUntil: 'domcontentloaded' });
-	await page.getByRole('heading', { name: 'Add Torrent' }).waitFor();
+	await page.getByRole('heading', { name: 'Add Download' }).waitFor();
 	await page.evaluate(() => new Promise((resolve, reject) => {
 		const socket = new WebSocket(`ws://${location.host}/ws/progress`);
 		window.__m6PortSocket = { socket, opened: false, closed: false, frames: [] };
@@ -340,7 +340,7 @@ try {
 	checks.validSwitch = true;
 	checks.sessionPreserved = nativeSessionInitializationCount === 1;
 	checks.durableQueuePreserved = transition.queueIdentityPreserved && transition.runtimeIdentityPreserved;
-	checks.browserReconnect = await newPage.getByRole('heading', { name: 'Add Torrent' }).isVisible();
+	checks.browserReconnect = await newPage.getByRole('heading', { name: 'Add Download' }).isVisible();
 	checks.webSocketReconnect = await newPage.evaluate(() => window.__m6PortSocket.opened);
 
 	await applyPort(80);

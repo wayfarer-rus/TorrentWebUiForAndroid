@@ -71,3 +71,10 @@
 - **Context:** libtorrent provides an alert mechanism for real-time updates, but integrating it with Android's main thread and Kotlin coroutines adds complexity. For Stage 1, polling is simpler and sufficient.
 - **Decision:** Use 1-second polling via ViewModel coroutine. Alerts are consumed only for error reporting.
 - **Consequences:** Slight latency in UI updates (up to 1s). Minimal CPU overhead. Can be replaced with alert-driven updates in future stages.
+
+## ADR-010: Canonical Paths Stay Out of Request Targets
+
+- **Status:** Accepted
+- **Context:** Canonical filesystem paths are authenticated private values and request targets can be retained by browser history, proxies, and diagnostics.
+- **Decision:** Storage operations carry canonical paths only in typed authenticated JSON bodies, never URL paths or query strings. The WebUI keeps them out of browser URL/history state and routine logs. See [ADR 0027](docs/adr/0027-canonical-paths-stay-out-of-request-targets.md).
+- **Consequences:** The backend remains the sole canonicalization authority while storage clients use stable path-free request targets.

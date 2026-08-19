@@ -105,9 +105,10 @@ class M4EmulatorAcceptanceTest {
         context = ApplicationProvider.getApplicationContext()
         StartupPermissionTestHelper.ensureGranted(context)
 
-        // Clean up any previous test state
-        RecoverySuppressionStore.clearForceStopped(context)
-        TorrentDaemon.stop(context)
+        // Clean up any previous test state without treating the host's instrumentation restart
+        // as a product force stop or racing a new start against asynchronous daemon teardown.
+        StartupPermissionTestHelper.clearInstrumentationStop(context)
+        StartupPermissionTestHelper.stopDaemonIfActive(context)
         AlertDispatcher.stop()
         TorrentSession.destroy()
 
@@ -118,7 +119,7 @@ class M4EmulatorAcceptanceTest {
     @After
     fun tearDown() {
         // Prove cleanup: daemon/server stopped, test files deleted, recovery records removed
-        TorrentDaemon.stop(context)
+        StartupPermissionTestHelper.stopDaemonIfActive(context)
         AlertDispatcher.stop()
         TorrentSession.destroy()
 

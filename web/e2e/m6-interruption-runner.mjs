@@ -279,7 +279,7 @@ function completedMarkerIsDurable() {
 }
 
 async function assertNormalWebUi(page) {
-	await page.getByRole('heading', { name: 'Add Torrent' }).waitFor();
+	await page.getByRole('heading', { name: 'Add Download' }).waitFor();
 	assert.equal(await page.getByRole('heading', { name: 'Consumer Onboarding' }).count(), 0);
 }
 
@@ -566,7 +566,11 @@ try {
 	assert.equal((await onboardingStatus(defaultPassword)).completed, true);
 	recoveryStates.push('unavailableStorage');
 
-	const removeDestination = await request(`/api/storage/destinations/${encodeURIComponent(alternateDestination)}`, defaultPassword, { method: 'DELETE' });
+	const removeDestination = await request('/api/storage/destinations', defaultPassword, {
+		method: 'DELETE',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ path: alternateDestination })
+	});
 	assert(removeDestination.ok, `Last-destination removal failed with HTTP ${removeDestination.status}.`);
 	const noDestinationStatus = await onboardingStatus(defaultPassword);
 	assert.equal(noDestinationStatus.completed, true);

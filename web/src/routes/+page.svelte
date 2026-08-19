@@ -1,1745 +1,855 @@
 <script lang="ts">
-	import { onMount, onDestroy } from 'svelte';
+	import { tick, onDestroy, onMount } from 'svelte';
+	import {
+		consumerDownloadName,
+		formatConsumerProgress,
+		normalizedProgress,
+		presentDownload,
+		presentDownloads,
+		primaryConsumerAction,
+		recoveryForDownload,
+		type PresentedDownload
+	} from '$lib/webui/consumer-download-queue';
+	import { createWebUiCoordinator } from '$lib/webui/web-ui-coordinator.svelte';
 
-	type TorrentSnapshot = {
-		id: number;
-		name: string;
-		state: string;
-		progress: number;
-		downloadRate: number;
-		uploadRate: number;
-		peers: number;
-		savePath: string;
-		destinationPath?: string | null;
-		queueId?: string | null;
-		destinationStatus?: string | null;
-		moveState?: string | null;
-	};
-	type StorageVolume = { path: string; description?: string; isRemovable?: boolean };
-	type PathValidation = {
-		isValid: boolean;
-		canonicalPath?: string | null;
-		rejectionReason?: string | null;
-	};
-	type ProgressAlert = { type: 'alert'; alertType: string; message?: string };
-	type MoveStatus = { phase: string; sourcePath?: string | null; targetPath?: string | null };
-	type InterruptedMove = { torrentId: number; phase: string; targetPath?: string | null };
-	type OnboardingStatus = {
-		completed: boolean;
-		passwordDecision: 'pending' | 'deferred' | 'changed';
-		hasApprovedDestination: boolean;
-		readiness: 'Ready' | 'Action needed on Android' | 'Service unavailable';
-	};
+	// The route is presentation-only: the coordinator owns authenticated transport and live state.
+	const ui = createWebUiCoordinator();
 
-	const ONBOARDING_POLL_INTERVAL_MS = 2000;
-	const ONBOARDING_REQUEST_TIMEOUT_MS = 5000;
+	let presentedDownloads = $derived(presentDownloads(ui.lastSnapshot));
+	let needsAttentionDownloads = $derived(presentedDownloads.filter((item) => item.section === 'needs-attention'));
+	let activeDownloads = $derived(presentedDownloads.filter((item) => item.section === 'active'));
+	let completedDownloads = $derived(presentedDownloads.filter((item) => item.section === 'completed'));
+	let pathCopyFeedback = $state<Record<number, string>>({});
+	let detailsDialog = $state<HTMLDivElement | null>(null);
+	let detailsOpener: HTMLButtonElement | null = null;
+	let detailsHistoryEntry = false;
+	let settingsDialog = $state<HTMLDivElement | null>(null);
+	let settingsOpener: HTMLButtonElement | null = null;
+	let settingsHistoryEntry = false;
+	let settingsPanel = $state<'menu' | 'folders' | 'folder-browser' | 'password' | 'about'>('menu');
+	let moveFormFor = $state<number | null>(null);
+	let moveConfirmation = $state<{ id: number; name: string; sourcePath: string; targetPath: string } | null>(null);
+	let moveConfirmationDialog = $state<HTMLDivElement | null>(null);
+	let moveConfirmationOpener: HTMLButtonElement | null = null;
+	let moveConfirmationHistoryEntry = false;
+	let removalConfirmation = $state<{ id: number; name: string; deleteFiles: boolean } | null>(null);
+	let removalConfirmationDialog = $state<HTMLDivElement | null>(null);
+	let removalOpener: HTMLButtonElement | null = null;
+	let removalConfirmationHistoryEntry = false;
+	let selectedDetailState = $derived(ui.selectedTorrent ? presentDownload(ui.selectedTorrent).state : '');
 
-	// --- State (Svelte 5 runes) ---
-	let onboardingStatus = $state<OnboardingStatus | null>(null);
-	let onboardingLoading = $state(true);
-	let onboardingError = $state('');
-	let recommendedPath = $state<string | null>(null);
-	let recommendedLoading = $state(false);
-	let onboardingActionLoading = $state(false);
-	let onboardingActionError = $state('');
-	let showOnboardingPasswordChange = $state(false);
-	let onboardingNewPassword = $state('');
-	let onboardingPasswordConfirmation = $state('');
-	let onboardingPoll: ReturnType<typeof setTimeout> | null = null;
-	let onboardingRequest: AbortController | null = null;
-	let normalUiStarted = false;
-	let magnetUri = $state('');
-	let addError = $state('');
-	let wsConnected = $state(false);
-	let wsConnecting = $state(false);
-	let lastSnapshot = $state<TorrentSnapshot[]>([]);
-	let loading = $state(true);
-
-	// Canonical destination selection (all paths come from authenticated backend responses).
-	let storagePermission = $state<string | null>(null);
-	let volumes = $state<StorageVolume[]>([]);
-	let catalog = $state<string[]>([]);
-	let latestSelected = $state<string | null>(null);
-	let selectedDestination = $state<string | null>(null);
-	let storageLoading = $state(true);
-	let storageError = $state('');
-	let showBrowser = $state(false);
-	let browsedPath = $state<string | null>(null);
-	let children = $state<string[]>([]);
-	let pastedPath = $state('');
-	let pathValidation = $state<PathValidation | null>(null);
-	let validatingPath = $state(false);
-	let moveTargets = $state<Record<number, string>>({});
-	let moveErrors = $state<Record<number, string>>({});
-	let moveLoading = $state<Record<number, boolean>>({});
-	let storageReady = $derived(storagePermission === 'Ready');
-
-	// WebSocket reference (used only for cleanup)
-	let ws = $state<WebSocket | null>(null);
-
-	// --- API helpers ---
-
-	async function fetchJson<T = any>(url: string, options?: RequestInit): Promise<T> {
-		const response = await fetch(url, options);
-		if (!response.ok) {
-			const body = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
-			throw new Error(body.error || `HTTP ${response.status}`);
-		}
-		return response.json();
+	function selectCanonicalPath(inputId: string, path: string) {
+		const input = document.getElementById(inputId) as HTMLInputElement | null;
+		if (!input) return;
+		input.focus();
+		input.select();
+		input.setSelectionRange(0, path.length);
 	}
 
-	function startNormalUi() {
-		if (normalUiStarted) return;
-		normalUiStarted = true;
-		connectWebSocket();
-		void loadTorrents();
-		void loadStorageState().then(loadInterruptedMoves);
-	}
-
-	function scheduleOnboardingPoll() {
-		if (onboardingPoll) clearTimeout(onboardingPoll);
-		onboardingPoll = setTimeout(() => void loadOnboardingStatus(), ONBOARDING_POLL_INTERVAL_MS);
-	}
-
-	async function loadOnboardingStatus() {
-		if (onboardingRequest) onboardingRequest.abort();
-		onboardingRequest = new AbortController();
-		const request = onboardingRequest;
-		const timeout = setTimeout(() => request.abort(), ONBOARDING_REQUEST_TIMEOUT_MS);
-		onboardingError = '';
+	async function copyCanonicalPath(id: number, inputId: string, path: string) {
 		try {
-			const status = await fetchJson<OnboardingStatus>('/api/onboarding/status', {
-				signal: request.signal
-			});
-			onboardingStatus = status;
-			if (status.completed) {
-				startNormalUi();
-			} else if (status.readiness !== 'Ready') {
-				scheduleOnboardingPoll();
-			} else if (!status.hasApprovedDestination) {
-				void loadRecommendedDestination();
-			}
-		} catch (error) {
-			onboardingError = request.signal.aborted
-				? 'The onboarding status request timed out. Try again.'
-				: error instanceof Error ? error.message : 'Unable to load onboarding status.';
-		} finally {
-			clearTimeout(timeout);
-			if (onboardingRequest === request) onboardingRequest = null;
-			onboardingLoading = false;
+			if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable');
+			await navigator.clipboard.writeText(path);
+			pathCopyFeedback = { ...pathCopyFeedback, [id]: 'Path copied.' };
+		} catch {
+			selectCanonicalPath(inputId, path);
+			pathCopyFeedback = { ...pathCopyFeedback, [id]: 'Path selected. Use your system copy command.' };
 		}
 	}
 
-	async function loadRecommendedDestination() {
-		if (recommendedLoading || recommendedPath) return;
-		recommendedLoading = true;
-		onboardingActionError = '';
-		try {
-			const response = await fetchJson<{ path: string }>('/api/onboarding/recommended-destination');
-			recommendedPath = response.path;
-		} catch (error) {
-			onboardingActionError = error instanceof Error
-				? error.message
-				: 'Unable to prepare the recommended download folder.';
-		} finally {
-			recommendedLoading = false;
-		}
-	}
 
-	async function confirmRecommendedDestination() {
-		onboardingActionLoading = true;
-		onboardingActionError = '';
-		try {
-			await fetchJson('/api/onboarding/recommended-destination', { method: 'POST' });
-			recommendedPath = null;
-			await loadOnboardingStatus();
-		} catch (error) {
-			onboardingActionError = error instanceof Error
-				? error.message
-				: 'Unable to use the recommended download folder.';
-		} finally {
-			onboardingActionLoading = false;
-		}
-	}
-
-	function chooseAnotherOnboardingPassword() {
-		showOnboardingPasswordChange = true;
-		onboardingNewPassword = '';
-		onboardingPasswordConfirmation = '';
-		onboardingActionError = '';
-	}
-
-	function cancelOnboardingPasswordChange() {
-		showOnboardingPasswordChange = false;
-		onboardingNewPassword = '';
-		onboardingPasswordConfirmation = '';
-		onboardingActionError = '';
-	}
-
-	async function changeOnboardingPassword() {
-		onboardingActionError = '';
-		if (onboardingNewPassword !== onboardingPasswordConfirmation) {
-			onboardingActionError = 'The Password confirmation does not match.';
-			return;
-		}
-		onboardingActionLoading = true;
-		try {
-			await fetchJson('/api/onboarding/password', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ newPassword: onboardingNewPassword })
-			});
-			window.location.reload();
-		} catch (error) {
-			onboardingActionError = error instanceof Error
-				? error.message
-				: 'Unable to save the new Password.';
-		} finally {
-			onboardingActionLoading = false;
-		}
-	}
-
-	async function deferOnboardingPassword() {
-		onboardingActionLoading = true;
-		onboardingActionError = '';
-		try {
-			const status = await fetchJson<OnboardingStatus>('/api/onboarding/password/defer', {
-				method: 'POST'
-			});
-			onboardingStatus = status;
-			if (status.completed) startNormalUi();
-		} catch (error) {
-			onboardingActionError = error instanceof Error
-				? error.message
-				: 'Unable to save the Password choice.';
-		} finally {
-			onboardingActionLoading = false;
-		}
-	}
-
-	async function loadTorrents() {
-		try {
-			const torrents = await fetchJson<TorrentSnapshot[]>('/api/torrents');
-			lastSnapshot = Array.isArray(torrents) ? torrents : [];
-		} catch (e) {
-			addError = e instanceof Error ? e.message : 'Unable to load torrents.';
-		} finally {
-			loading = false;
-		}
-	}
-
-	async function loadStorageState(preferredPath: string | null = null) {
-		storageLoading = true;
-		storageError = '';
-		try {
-			const [permission, volumeList, destinationList, latest] = await Promise.all([
-				fetchJson('/api/storage/permission'),
-				fetchJson('/api/storage/volumes'),
-				fetchJson('/api/storage/catalog'),
-				fetchJson('/api/storage/latest-selected')
-			]);
-			storagePermission = permission.state;
-			volumes = Array.isArray(volumeList) ? volumeList : [];
-			catalog = Array.isArray(destinationList) ? destinationList : [];
-			latestSelected = latest?.path || null;
-
-			const candidate = preferredPath || latestSelected;
-			selectedDestination = candidate && catalog.includes(candidate) ? candidate : null;
-		} catch (e) {
-			storageError = e instanceof Error ? e.message : 'Unable to load download folders';
-			selectedDestination = null;
-		} finally {
-			storageLoading = false;
-		}
-	}
-
-	async function browseDirectory(path: string) {
-		storageError = '';
-		pathValidation = null;
-		try {
-			children = await fetchJson(`/api/storage/children/${encodeURIComponent(path)}`);
-			browsedPath = path;
-		} catch (e) {
-			storageError = e instanceof Error ? e.message : 'Unable to browse this folder';
-			children = [];
-		}
-	}
-
-	async function validatePath(path: string) {
-		if (!path || !path.startsWith('/')) {
-			pathValidation = { isValid: false, rejectionReason: 'Enter an absolute filesystem path.' };
-			return;
-		}
-		validatingPath = true;
-		storageError = '';
-		try {
-			pathValidation = await fetchJson('/api/storage/validate', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ path })
-			});
-		} catch (e) {
-			pathValidation = null;
-			storageError = e instanceof Error ? e.message : 'Unable to validate this folder';
-		} finally {
-			validatingPath = false;
-		}
-	}
-
-	function validateBrowsedPath() {
-		if (browsedPath) validatePath(browsedPath);
-	}
-
-	async function toggleDirectoryBrowser() {
-		showBrowser = !showBrowser;
-		pathValidation = null;
-		onboardingActionError = '';
-		if (showBrowser && volumes.length === 0) await loadStorageState();
-	}
-
-	async function approveDestination(
-		canonicalPath: string,
-		surface: 'normal' | 'onboarding' = 'normal'
-	) {
-		if (surface === 'onboarding') {
-			onboardingActionLoading = true;
-			onboardingActionError = '';
+	async function invokeTorrentAction(item: PresentedDownload) {
+		const action = primaryConsumerAction(item);
+		if (!action) return;
+		const changed = action === 'pause'
+			? await ui.pauseTorrent(item.download.id)
+			: await ui.resumeTorrent(item.download.id);
+		await tick();
+		const card = document.getElementById(`download-${item.download.id}-card`);
+		if (changed) {
+			card?.focus();
 		} else {
-			storageError = '';
-		}
-		try {
-			const approved = await fetchJson(
-				`/api/storage/destinations/${encodeURIComponent(canonicalPath)}`,
-				{ method: 'POST' }
-			);
-			pathValidation = null;
-			pastedPath = '';
-			showBrowser = false;
-			if (surface === 'onboarding') await loadOnboardingStatus();
-			else await loadStorageState(approved.path);
-		} catch (error) {
-			const message = error instanceof Error ? error.message : 'Unable to approve this folder.';
-			if (surface === 'onboarding') onboardingActionError = message;
-			else storageError = message;
-		} finally {
-			if (surface === 'onboarding') onboardingActionLoading = false;
+			card?.querySelector<HTMLButtonElement>('button.primary-button')?.focus();
 		}
 	}
 
-	async function selectApprovedDestination(path: string) {
-		await approveDestination(path);
+	function openMoveForm(id: number) {
+		moveConfirmation = null;
+		moveFormFor = id;
 	}
 
-	async function removeApprovedDestination(path: string) {
-		storageError = '';
-		try {
-			await fetchJson(`/api/storage/destinations/${encodeURIComponent(path)}`, { method: 'DELETE' });
-			await loadStorageState();
-		} catch (e) {
-			storageError = e instanceof Error ? e.message : 'Unable to remove this folder.';
-		}
+	function cancelMoveForm() {
+		moveConfirmation = null;
+		moveFormFor = null;
 	}
 
-	async function addMagnet() {
-		const uri = magnetUri.trim();
-		if (!uri) {
-			addError = 'Please enter a magnet URI';
+	async function requestMoveConfirmation(download: PresentedDownload['download'], sourcePath: string, opener: HTMLButtonElement) {
+		const targetPath = ui.moveTargetFor(download);
+		if (!targetPath || targetPath === sourcePath) {
+			ui.setMoveTarget(download.id, '');
 			return;
 		}
-		if (!selectedDestination) {
-			addError = 'Choose a download folder before adding this torrent.';
+		moveConfirmationOpener = opener;
+		moveConfirmation = {
+			id: download.id,
+			name: consumerDownloadName(download),
+			sourcePath,
+			targetPath
+		};
+		moveConfirmationHistoryEntry = true;
+		window.history.pushState({ moveConfirmationOpen: true }, '', window.location.href);
+		await tick();
+		moveConfirmationDialog?.querySelector<HTMLButtonElement>('button.primary-button')?.focus();
+	}
+
+	async function closeMoveConfirmation(fromHistory = false) {
+		if (!moveConfirmation) return;
+		moveConfirmation = null;
+		const opener = moveConfirmationOpener;
+		moveConfirmationOpener = null;
+		if (fromHistory) moveConfirmationHistoryEntry = false;
+		await tick();
+		if (opener?.isConnected) opener.focus();
+		if (moveConfirmationHistoryEntry && !fromHistory) {
+			moveConfirmationHistoryEntry = false;
+			window.history.back();
+		}
+	}
+
+	async function confirmMove() {
+		const confirmation = moveConfirmation;
+		if (!confirmation) return;
+		await ui.moveTorrent(confirmation.id, confirmation.targetPath);
+		if (!ui.moveErrors[confirmation.id]) {
+			await closeMoveConfirmation();
+			cancelMoveForm();
+		}
+	}
+
+	function removalActionIsPending(id: number, deleteFiles: boolean): boolean {
+		return ui.torrentActionPending[id] === (deleteFiles ? 'remove-and-delete-files' : 'remove-from-list');
+	}
+
+	async function requestRemovalConfirmation(download: PresentedDownload['download'], deleteFiles: boolean, opener: HTMLButtonElement) {
+		if (ui.torrentActionPending[download.id]) {
+			if (removalConfirmation?.id === download.id) {
+				await tick();
+				removalConfirmationDialog?.querySelector<HTMLButtonElement>('button.primary-button')?.focus();
+			}
 			return;
 		}
+		removalOpener = opener;
+		removalConfirmation = { id: download.id, name: consumerDownloadName(download), deleteFiles };
+		removalConfirmationHistoryEntry = true;
+		window.history.pushState({ removalConfirmationOpen: true }, '', window.location.href);
+		await tick();
+		removalConfirmationDialog?.querySelector<HTMLButtonElement>('button.primary-button')?.focus();
+	}
 
-		try {
-			const res = await fetch('/api/torrents/magnet', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ magnet: uri, destinationPath: selectedDestination }),
-			});
+	async function cancelRemovalConfirmation(fromHistory = false, restoreFocus = true) {
+		if (!removalConfirmation || removalActionIsPending(removalConfirmation.id, removalConfirmation.deleteFiles)) return;
+		removalConfirmation = null;
+		const opener = removalOpener;
+		removalOpener = null;
+		if (fromHistory) removalConfirmationHistoryEntry = false;
+		await tick();
+		if (restoreFocus && opener?.isConnected) opener.focus();
+		if (removalConfirmationHistoryEntry && !fromHistory) {
+			removalConfirmationHistoryEntry = false;
+			window.history.back();
+		}
+	}
 
-			if (!res.ok) {
-				const err = await res.json().catch(() => ({ error: 'Unknown error' }));
-				addError = err.error || `HTTP ${res.status}`;
+	async function confirmRemoval() {
+		const confirmation = removalConfirmation;
+		if (!confirmation) return;
+		const removed = await ui.removeTorrent(confirmation.id, confirmation.deleteFiles);
+		if (removed) {
+			await cancelRemovalConfirmation(false, false);
+			return;
+		}
+		await cancelRemovalConfirmation();
+	}
+
+	async function openDetails(torrent: PresentedDownload['download'], opener: HTMLButtonElement) {
+		detailsOpener = opener;
+		await ui.toggleInfo(torrent);
+		detailsHistoryEntry = true;
+		window.history.pushState({ detailsOpen: true }, '', window.location.href);
+		await tick();
+		detailsDialog?.focus();
+	}
+
+	async function closeDetails(fromHistory = false) {
+		if (!ui.showInfo) return;
+		ui.closeInfo();
+		const opener = detailsOpener;
+		detailsOpener = null;
+		if (fromHistory) detailsHistoryEntry = false;
+		await tick();
+		if (opener?.isConnected) opener.focus();
+		if (detailsHistoryEntry && !fromHistory) {
+			detailsHistoryEntry = false;
+			window.history.back();
+		}
+	}
+
+	function clearSettingsForm() {
+		ui.currentPassword = '';
+		ui.newPassword = '';
+		ui.settingsMessage = '';
+		ui.settingsError = '';
+	}
+
+	async function openSettings(opener: HTMLButtonElement, panel: typeof settingsPanel = 'menu') {
+		settingsOpener = opener;
+		settingsPanel = panel;
+		clearSettingsForm();
+		ui.showSettings = true;
+		settingsHistoryEntry = true;
+		window.history.pushState({ settingsOpen: true }, '', window.location.href);
+		await tick();
+		settingsDialog?.focus();
+	}
+
+	async function openStorageRecovery(opener: HTMLButtonElement) {
+		await openSettings(opener, 'folders');
+	}
+
+	async function closeSettings(fromHistory = false) {
+		if (!ui.showSettings) return;
+		ui.closeDirectoryBrowser();
+		ui.showSettings = false;
+		settingsPanel = 'menu';
+		clearSettingsForm();
+		const opener = settingsOpener;
+		settingsOpener = null;
+		if (fromHistory) settingsHistoryEntry = false;
+		await tick();
+		if (opener?.isConnected) opener.focus();
+		if (settingsHistoryEntry && !fromHistory) {
+			settingsHistoryEntry = false;
+			window.history.back();
+		}
+	}
+
+	async function openFolderBrowser() {
+		settingsPanel = 'folder-browser';
+		await ui.openDirectoryBrowser();
+		await tick();
+		settingsDialog?.querySelector<HTMLButtonElement>('button.settings-back')?.focus();
+	}
+
+	async function returnToDownloadFolders() {
+		ui.closeDirectoryBrowser();
+		settingsPanel = 'folders';
+		await tick();
+		settingsDialog?.querySelector<HTMLButtonElement>('#browse-storage')?.focus();
+	}
+
+	async function approveFolder(path: string): Promise<boolean> {
+		const approved = await ui.approveDestination(path);
+		if (approved) settingsPanel = 'folders';
+		return approved;
+	}
+
+	function trapFocus(event: KeyboardEvent, dialog: HTMLDivElement | null) {
+		if (event.key !== 'Tab' || !dialog) return;
+		const focusable = [...dialog.querySelectorAll<HTMLElement>(
+			'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+		)].filter((element) => !element.hasAttribute('hidden'));
+		const first = focusable[0];
+		const last = focusable.at(-1);
+		if (!first || !last) return;
+		if (event.shiftKey && document.activeElement === first) {
+			event.preventDefault();
+			last.focus();
+		} else if (!event.shiftKey && document.activeElement === last) {
+			event.preventDefault();
+			first.focus();
+		}
+	}
+
+	function handleSecondarySurfaceKeydown(event: KeyboardEvent) {
+		if (removalConfirmation) {
+			if (event.key === 'Escape') {
+				event.preventDefault();
+				void cancelRemovalConfirmation();
 				return;
 			}
-
-			const data = await res.json();
-			magnetUri = '';
-			addError = '';
-
-			// Add torrent to local list immediately for responsive UI
-			const newTorrent = {
-				id: data.id,
-				name: uri.substring(uri.indexOf('&dn=') + 4) || 'Unknown',
-				state: 'downloading_metadata',
-				progress: 0,
-				downloadRate: 0,
-				uploadRate: 0,
-				peers: 0,
-				savePath: '',
-				destinationPath: selectedDestination,
-				destinationStatus: data.status === 'storage_conflict' ? 'storage_conflict' : null
-			};
-			lastSnapshot = [...lastSnapshot, newTorrent];
-
-			// Show success message
-			console.log(`Added torrent: ${data.id}`);
-		} catch (e) {
-			addError = e instanceof Error ? e.message : 'Network error';
-		}
-	}
-
-	function updateTorrentState(id: number, state: string) {
-		lastSnapshot = lastSnapshot.map((torrent) => torrent.id === id ? { ...torrent, state } : torrent);
-	}
-
-	async function pauseTorrent(id: number) {
-		try {
-			const res = await fetch(`/api/torrents/${id}/pause`, { method: 'PUT' });
-			if (!res.ok) {
-				const err = await res.json().catch(() => ({ error: 'Failed to pause' }));
-				alert(err.error || 'Failed to pause torrent');
-			} else {
-				updateTorrentState(id, 'paused');
-			}
-		} catch (e) {
-			alert(e instanceof Error ? e.message : 'Network error');
-		}
-	}
-
-	async function resumeTorrent(id: number) {
-		try {
-			const res = await fetch(`/api/torrents/${id}/resume`, { method: 'PUT' });
-			if (!res.ok) {
-				const err = await res.json().catch(() => ({ error: 'Failed to resume' }));
-				alert(err.error || 'Failed to resume torrent');
-			} else {
-				updateTorrentState(id, 'downloading');
-			}
-		} catch (e) {
-			alert(e instanceof Error ? e.message : 'Network error');
-		}
-	}
-
-	async function removeTorrent(id: number, deleteFiles: boolean) {
-		if (!deleteFiles && !confirm('Remove this torrent without deleting files?')) return;
-		try {
-			const res = await fetch(`/api/torrents/${id}?deleteFiles=${deleteFiles}`, { method: 'DELETE' });
-			if (!res.ok) {
-				const err = await res.json().catch(() => ({ error: 'Failed to remove' }));
-				alert(err.error || 'Failed to remove torrent');
-			} else {
-				lastSnapshot = lastSnapshot.filter((torrent) => torrent.id !== id);
-			}
-		} catch (e) {
-			alert(e instanceof Error ? e.message : 'Network error');
-		}
-	}
-
-	function setMoveTarget(id: number, destinationPath: string) {
-		moveTargets = { ...moveTargets, [id]: destinationPath };
-	}
-
-	function moveTargetFor(torrent: TorrentSnapshot): string {
-		return moveTargets[torrent.id] ?? catalog.find((path) => path !== torrent.destinationPath) ?? '';
-	}
-
-	function updateMoveState(id: number, moveState: string | null) {
-		lastSnapshot = lastSnapshot.map((torrent) =>
-			torrent.id === id ? { ...torrent, moveState } : torrent
-		);
-	}
-
-	function isRecoverableMoveState(moveState?: string | null): boolean {
-		return moveState === 'move-interrupted' || moveState === 'interrupted' || moveState === 'storage-conflict';
-	}
-
-	async function refreshMoveStatus(id: number) {
-		const status = await fetchJson<MoveStatus>(`/api/torrents/${id}/move/status`);
-		if (status.targetPath) setMoveTarget(id, status.targetPath);
-		updateMoveState(id, status.phase === 'none' ? null : status.phase);
-	}
-
-	async function submitMove(id: number, destinationPath: string, endpoint: 'move' | 'move/retry') {
-		if (!destinationPath) {
-			moveErrors = { ...moveErrors, [id]: 'Choose an approved destination.' };
+			trapFocus(event, removalConfirmationDialog);
 			return;
 		}
-		moveLoading = { ...moveLoading, [id]: true };
-		moveErrors = { ...moveErrors, [id]: '' };
-		try {
-			const response = await fetch(`/api/torrents/${id}/${endpoint}`, {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ destinationPath })
-			});
-			const result = await response.json().catch(() => ({})) as MoveStatus & { status?: string; error?: string };
-			if (!response.ok && result.status !== 'interrupted' && result.status !== 'storage_conflict') {
-				throw new Error(result.error || `HTTP ${response.status}`);
-			}
-			updateMoveState(id, result.phase);
-			await refreshMoveStatus(id);
-		} catch (e) {
-			moveErrors = { ...moveErrors, [id]: e instanceof Error ? e.message : 'Unable to update the move.' };
-		} finally {
-			moveLoading = { ...moveLoading, [id]: false };
-		}
-	}
-
-	function moveTorrent(id: number, destinationPath: string) {
-		return submitMove(id, destinationPath, 'move');
-	}
-
-	function retryMove(id: number, destinationPath: string) {
-		return submitMove(id, destinationPath, 'move/retry');
-	}
-
-	async function cancelMove(id: number) {
-		moveLoading = { ...moveLoading, [id]: true };
-		moveErrors = { ...moveErrors, [id]: '' };
-		try {
-			await fetchJson(`/api/torrents/${id}/move/cancel`, { method: 'POST' });
-			updateMoveState(id, null);
-		} catch (e) {
-			moveErrors = { ...moveErrors, [id]: e instanceof Error ? e.message : 'Unable to cancel move.' };
-		} finally {
-			moveLoading = { ...moveLoading, [id]: false };
-		}
-	}
-
-	async function loadInterruptedMoves() {
-		try {
-			const moves = await fetchJson<InterruptedMove[]>('/api/storage/moves');
-			moves.forEach((move) => {
-				if (move.targetPath) setMoveTarget(move.torrentId, move.targetPath);
-				updateMoveState(move.torrentId, move.phase.toLowerCase().replace('_', '-'));
-			});
-		} catch (e) {
-			storageError = e instanceof Error ? e.message : 'Unable to load interrupted moves.';
-		}
-	}
-
-	let showInfo = $state(false);
-	let selectedTorrent = $state<TorrentSnapshot | null>(null);
-
-	// --- Settings / password change ---
-	let showSettings = $state(false);
-	let currentPassword = $state('');
-	let newPassword = $state('');
-	let settingsMessage = $state('');
-	let settingsError = $state('');
-
-	async function changePassword() {
-		settingsMessage = '';
-		settingsError = '';
-
-		try {
-			const res = await fetch('/api/settings/password', {
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json',
-					Authorization: 'Basic ' + btoa(':' + currentPassword),
-				},
-				body: JSON.stringify({ currentPassword, newPassword }),
-			});
-
-			if (res.ok) {
-				settingsMessage = 'Password changed successfully. Your browser will re-prompt for the new password.';
-				currentPassword = '';
-				newPassword = '';
-			} else {
-				const err = await res.json().catch(() => ({ error: 'Unknown error' }));
-				settingsError = err.error || `HTTP ${res.status}`;
-			}
-		} catch (e) {
-			settingsError = e instanceof Error ? e.message : 'Network error';
-		}
-	}
-
-	async function toggleInfo(torrent: TorrentSnapshot) {
-		if (showInfo && selectedTorrent?.id === torrent.id) {
-			closeInfo();
+		if (moveConfirmation && event.key === 'Escape') {
+			event.preventDefault();
+			void closeMoveConfirmation();
 			return;
 		}
-		selectedTorrent = torrent;
-		showInfo = true;
-		try {
-			const destination = await fetchJson<{ canonicalPath?: string | null; path?: string }>(
-				`/api/torrents/${torrent.id}/destination`
-			);
-			if (selectedTorrent?.id === torrent.id) {
-				selectedTorrent = {
-					...torrent,
-					destinationPath: destination.canonicalPath ?? destination.path ?? torrent.destinationPath
-				};
+		if (ui.showSettings) {
+			if (event.key === 'Escape') {
+				event.preventDefault();
+				void closeSettings();
+				return;
 			}
-		} catch (e) {
-			moveErrors = { ...moveErrors, [torrent.id]: e instanceof Error ? e.message : 'Unable to load destination.' };
+			trapFocus(event, settingsDialog);
+			return;
 		}
-	}
-
-	function closeInfo() {
-		console.log('closeInfo called');
-		showInfo = false;
-		selectedTorrent = null;
-	}
-
-	// --- WebSocket connection ---
-
-	function connectWebSocket() {
-		wsConnecting = true;
-
-		const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
-		const socket = new WebSocket(`${protocol}://${location.host}/ws/progress`);
-		ws = socket;
-
-		socket.onopen = () => {
-			wsConnecting = false;
-			wsConnected = true;
-		};
-
-		socket.onclose = () => {
-			wsConnected = false;
-			wsConnecting = false;
-
-			// Reconnect after a delay (exponential backoff up to 15s)
-			setTimeout(() => {
-				if (!ws || ws.readyState === WebSocket.CLOSED) {
-					connectWebSocket();
-				}
-			}, 1500);
-		};
-
-		socket.onerror = () => {
-			wsConnecting = false;
-		};
-
-		socket.onmessage = (event: MessageEvent) => {
-			try {
-				const data = JSON.parse(event.data);
-
-				if (data.type === 'torrents' && Array.isArray(data.data)) {
-					lastSnapshot = data.data;
-				} else if (data.type === 'alert') {
-					handleAlert(data);
-				}
-			} catch (e) {
-				console.warn('WebSocket parse error:', e);
-			}
-
-			if (loading) loading = false;
-		};
-	}
-
-	function handleAlert(alert: ProgressAlert) {
-		switch (alert.alertType) {
-			case 'torrent_finished':
-				console.log('Torrent finished');
-				break;
-			case 'error':
-				console.error('Torrent operation failed');
-				break;
-			case 'state_changed':
-				console.log('Torrent state changed');
-				break;
+		if (!ui.showInfo) return;
+		if (event.key === 'Escape') {
+			event.preventDefault();
+			void closeDetails();
+			return;
 		}
-	}
-
-	function sendPing() {
-		if (ws && ws.readyState === WebSocket.OPEN) {
-			ws.send('ping');
-		}
-	}
-
-	function formatBytes(bytes: number) {
-		if (bytes === 0) return '—';
-		const units = ['B', 'KB', 'MB', 'GB'];
-		let i = 0;
-		while (bytes >= 1024 && i < units.length - 1) {
-			bytes /= 1024;
-			i++;
-		}
-		return `${bytes.toFixed(1)} ${units[i]}`;
-	}
-
-	function formatProgress(progress: number) {
-		return `${(progress * 100).toFixed(1)}%`;
-	}
-
-	function stateColor(state: string) {
-		switch (state) {
-			case 'downloading': return '#2196F3';
-			case 'seeding': case 'finished': return '#4CAF50';
-			case 'paused': case 'pause_requested': return '#FF9800';
-			case 'error': case 'checking_files': return '#f44336';
-			default: return '#9E9E9E';
-		}
-	}
-
-	function stateIcon(state: string) {
-		switch (state) {
-			case 'downloading': return '⬇️';
-			case 'seeding': case 'finished': return '⬆️';
-			case 'paused': case 'pause_requested': return '⏸️';
-			case 'checking_files': case 'checking_resume_data': return '🔍';
-			default: return '❓';
-		}
-	}
-
-	function stateDisplayName(state: string) {
-		if (state === 'pause_requested') return 'Pausing';
-		return state;
+		trapFocus(event, detailsDialog);
 	}
 
 	onMount(() => {
-		void loadOnboardingStatus();
+		ui.start();
+		const closeFromHistory = () => {
+			if (removalConfirmation) void cancelRemovalConfirmation(true);
+			else if (moveConfirmation) void closeMoveConfirmation(true);
+			else if (ui.showSettings) void closeSettings(true);
+			else if (ui.showInfo) void closeDetails(true);
+		};
+		window.addEventListener('popstate', closeFromHistory);
+		return () => window.removeEventListener('popstate', closeFromHistory);
 	});
-
-	onDestroy(() => {
-		if (onboardingPoll) clearTimeout(onboardingPoll);
-		if (onboardingRequest) onboardingRequest.abort();
-		if (ws) ws.close();
-	});
+	onDestroy(() => ui.dispose());
 </script>
 
 <svelte:head>
-	<title>Torrent WebUI</title>
+	<title>Downloads</title>
 </svelte:head>
 
-{#snippet directoryBrowser(onApproved: (path: string) => Promise<void>)}
-	<button class="secondary-button" on:click={toggleDirectoryBrowser}>
-		{showBrowser ? 'Hide folder browser' : 'Choose another folder'}
-	</button>
+<svelte:window onkeydown={handleSecondarySurfaceKeydown} />
 
-	{#if showBrowser}
-		<div class="folder-browser">
-			{#if storageLoading}
-				<p>Loading available folders…</p>
-			{:else if !storageReady}
-				<p class="storage-guidance">Storage access needs attention in the Android app.</p>
+{#snippet directoryBrowser(onApproved: (path: string) => Promise<boolean>, disabled = false)}
+	<button class="text-button" type="button" onclick={ui.toggleDirectoryBrowser} disabled={disabled}>
+		{ui.showBrowser ? 'Hide folder browser' : 'Choose another folder'}
+	</button>
+	{#if ui.showBrowser}{@render directoryBrowserContent(onApproved, disabled)}{/if}
+{/snippet}
+
+{#snippet directoryBrowserContent(onApproved: (path: string) => Promise<boolean>, disabled = false, approvalLabel = 'Use this folder')}
+	<div class="folder-browser">
+		{#if ui.storageLoading}
+			<p>Loading available folders…</p>
+		{:else if !ui.storageReady}
+			<p class="storage-guidance">{ui.storageRecoveryMessage || 'Storage access needs attention in the Android app.'}</p>
+		{:else}
+			<h4>Storage volumes</h4>
+			{#if ui.volumes.length === 0}
+				<p class="quiet-empty">No mounted storage volumes are available. Reconnect storage, then try again.</p>
 			{:else}
-				<h3>Storage roots</h3>
 				<div class="path-buttons">
-					{#each volumes as volume}
-						<button class="path-button" on:click={() => browseDirectory(volume.path)}>
+					{#each ui.volumes as volume}
+						<button class="path-button" type="button" onclick={() => void ui.browseDirectory(volume.path)} disabled={disabled || ui.storageMutationPending}>
 							{#if volume.description}<span>{volume.description}</span>{/if}
 							<code>{volume.path}</code>
 						</button>
 					{/each}
 				</div>
+			{/if}
 
-				{#if browsedPath}
-					<div class="browser-current">
-						<p>Current folder</p>
-						<code>{browsedPath}</code>
-						<button on:click={validateBrowsedPath} disabled={validatingPath}>Check this folder</button>
-					</div>
-					<h3>Child folders</h3>
-					{#if children.length === 0}
-						<p class="empty compact">No selectable child folders returned by the device.</p>
-					{:else}
-						<div class="path-buttons">
-							{#each children as childPath}
-								<button class="path-button" on:click={() => browseDirectory(childPath)}>
-									<code>{childPath}</code>
-								</button>
-							{/each}
-						</div>
-					{/if}
-				{/if}
-
-				<div class="paste-path">
-					<label for="destination-path">Or paste an absolute path</label>
-					<div class="input-row">
-						<input id="destination-path" type="text" bind:value={pastedPath} placeholder="/storage/…" />
-						<button on:click={() => validatePath(pastedPath.trim())} disabled={validatingPath}>Check folder</button>
-					</div>
+			{#if ui.browsedPath}
+				<div class="browser-current">
+					<p>Current folder</p>
+					<code>{ui.browsedPath}</code>
+					<button class="secondary-button" type="button" onclick={ui.validateBrowsedPath} disabled={disabled || ui.validatingPath || ui.storageMutationPending}>Check this folder</button>
 				</div>
+				<h4>Child folders</h4>
+				{#if ui.children.length === 0}
+					<p class="quiet-empty">No readable child folders were returned by the device.</p>
+				{:else}
+					<div class="path-buttons">
+						{#each ui.children as childPath}
+							<button class="path-button" type="button" onclick={() => void ui.browseDirectory(childPath)} disabled={disabled || ui.storageMutationPending}><code>{childPath}</code></button>
+						{/each}
+					</div>
+				{/if}
 			{/if}
-		</div>
-	{/if}
 
-	{#if pathValidation}
-		<div class:validation-success={pathValidation.isValid} class:validation-error={!pathValidation.isValid} class="validation-result">
-			{#if pathValidation.isValid && pathValidation.canonicalPath}
-				<p>Verified canonical path</p>
-				<code>{pathValidation.canonicalPath}</code>
-				<button on:click={() => onApproved(pathValidation?.canonicalPath || '')} disabled={onboardingActionLoading}>
-					Use this folder
-				</button>
-			{:else}
-				<p>{pathValidation.rejectionReason || 'This folder cannot be used.'}</p>
-			{/if}
-		</div>
-	{/if}
+			<div class="paste-path">
+				<label for="destination-path">Or paste an absolute path</label>
+				<div class="input-row compact-row">
+					<input id="destination-path" type="text" bind:value={ui.pastedPath} placeholder="/storage/…" disabled={disabled || ui.storageMutationPending} />
+					<button class="secondary-button" type="button" onclick={() => void ui.validatePath(ui.pastedPath)} disabled={disabled || ui.validatingPath || ui.storageMutationPending}>Check folder</button>
+				</div>
+			</div>
+		{/if}
 
+		{#if ui.pathValidation}
+			<div class:validation-success={ui.pathValidation.isValid} class:validation-error={!ui.pathValidation.isValid} class="validation-result">
+				{#if ui.pathValidation.isValid && ui.pathValidation.canonicalPath}
+					<p>Verified canonical path</p>
+					<code>{ui.pathValidation.canonicalPath}</code>
+					<button class="primary-button" type="button" onclick={() => void onApproved(ui.pathValidation?.canonicalPath || '')} disabled={disabled || ui.storageMutationPending}>{approvalLabel}</button>
+				{:else}
+					<p>{ui.pathValidation.rejectionReason || 'This folder cannot be used.'}</p>
+				{/if}
+			</div>
+		{/if}
+		{#if ui.storageError}<p class="error" role="alert">{ui.storageError}</p>{/if}
+	</div>
 {/snippet}
 
-{#if onboardingLoading && !onboardingStatus}
-	<main class="onboarding-shell" aria-busy="true">
-		<h1>Consumer Onboarding</h1>
-		<p>Checking whether downloads are ready…</p>
-	</main>
-{:else if onboardingStatus && !onboardingStatus.completed}
-	<main class="onboarding-shell">
-		<h1>Consumer Onboarding</h1>
-		{#if onboardingStatus.readiness === 'Action needed on Android'}
-			<h2>Action needed on Android</h2>
-			<p>Open the Android app and complete the requested device action.</p>
-		{:else if onboardingStatus.readiness === 'Service unavailable'}
-			<h2>Service unavailable</h2>
-			<p>The download service is not ready. Use the Android app to recover or restart it.</p>
-		{:else if !onboardingStatus.hasApprovedDestination}
-			<h2>Choose a download folder</h2>
-			<p>Use the recommended folder for completed and in-progress downloads.</p>
-			{#if recommendedLoading}
-				<p>Preparing the recommended path…</p>
-			{:else if recommendedPath}
-				{#if !showBrowser}
-					<code>{recommendedPath}</code>
-					<button on:click={confirmRecommendedDestination} disabled={onboardingActionLoading}>
-						{onboardingActionLoading ? 'Creating folder…' : 'Use this folder'}
-					</button>
-				{/if}
-				{@render directoryBrowser((path) => approveDestination(path, 'onboarding'))}
-				{#if storageError}<p class="error">{storageError}</p>{/if}
-			{/if}
-		{:else if onboardingStatus.passwordDecision === 'pending'}
-			<h2>Password choice</h2>
-			{#if !showOnboardingPasswordChange}
-				<p>Choose another Password now or keep the current one for later.</p>
-				<button on:click={chooseAnotherOnboardingPassword} disabled={onboardingActionLoading}>
-					Choose another password
-				</button>
-				<button on:click={deferOnboardingPassword} disabled={onboardingActionLoading}>
-					{onboardingActionLoading ? 'Finishing setup…' : 'Set it later'}
-				</button>
-			{:else}
-				<label for="onboarding-new-password">New Password</label>
-				<input
-					id="onboarding-new-password"
-					type="password"
-					autocomplete="new-password"
-					bind:value={onboardingNewPassword}
-				/>
-				<label for="onboarding-confirm-password">Confirm Password</label>
-				<input
-					id="onboarding-confirm-password"
-					type="password"
-					autocomplete="new-password"
-					bind:value={onboardingPasswordConfirmation}
-				/>
-				<button on:click={changeOnboardingPassword} disabled={onboardingActionLoading}>
-					{onboardingActionLoading ? 'Saving Password…' : 'Change Password'}
-				</button>
-				<button class="secondary-button" on:click={cancelOnboardingPasswordChange} disabled={onboardingActionLoading}>
-					Back
-				</button>
-			{/if}
-		{:else}
-			<h2>Finishing setup</h2>
-			<p>Your saved onboarding progress is being completed.</p>
-		{/if}
-		{#if onboardingActionError}
-			<p class="error">{onboardingActionError}</p>
-		{/if}
-	</main>
-{:else if onboardingError}
-	<main class="onboarding-shell">
-		<h1>Consumer Onboarding</h1>
-		<p class="error">{onboardingError}</p>
-		<a href="/">Try again</a>
-	</main>
-{:else}
-<div class="container">
-	<header>
-		<h1>Torrent WebUI</h1>
-		<div class="header-actions">
-			<button class="settings-btn" on:click={() => { showSettings = !showSettings; settingsMessage = ''; settingsError = ''; }} title="Settings">⚙️</button>
-			<div class="status">
-				<span class="ws-indicator" class:connected={wsConnected} class:connecting={wsConnecting}>
-					{wsConnecting ? '⏳ Connecting...' : wsConnected ? '🟢 Connected' : '🔴 Disconnected'}
-				</span>
-			</div>
-		</div>
-	</header>
-
-	<section class="destination-picker">
-		<h2>Download folder</h2>
-		{#if storageLoading}
-			<p class="loading compact">Loading available folders…</p>
-		{:else if !storageReady}
-			<p class="storage-guidance">
-				Storage permission is required. Grant All Files Access in the Android app before choosing a download folder.
-			</p>
-		{:else}
-			{#if catalog.length > 0}
-				<fieldset class="catalog-list">
-					<legend>Approved folders</legend>
-					{#each catalog as path}
-						<div class="path-option">
-							<label>
-								<input
-									type="radio"
-									name="destination"
-									checked={selectedDestination === path}
-									on:change={() => selectApprovedDestination(path)}
-								/>
-								<code>{path}</code>
-							</label>
-							<button class="forget-destination" on:click={() => removeApprovedDestination(path)}>Forget</button>
-						</div>
-					{/each}
-				</fieldset>
-			{:else}
-				<p class="empty compact">Choose and approve a folder before adding a torrent.</p>
-			{/if}
-
-			{@render directoryBrowser(approveDestination)}
-		{/if}
-		{#if selectedDestination}
-			<p class="selected-path">Downloads will be saved to <code>{selectedDestination}</code></p>
-		{/if}
-		{#if storageError}<p class="error">{storageError}</p>{/if}
-	</section>
-
-	<section class="add-torrent">
-		<h2>Add Torrent</h2>
-		<div class="input-row">
-			<input
-				type="text"
-				bind:value={magnetUri}
-				placeholder="Paste magnet URI or torrent link..."
-				on:keydown={(e) => e.key === 'Enter' && addMagnet()}
-			/>
-			<button on:click={addMagnet} disabled={!storageReady || !selectedDestination}>Add</button>
-		</div>
-		{#if !selectedDestination}
-			<p class="folder-required">Choose a download folder to continue.</p>
-		{/if}
-		{#if addError}
-			<p class="error">{addError}</p>
-		{/if}
-	</section>
-
-	<section class="torrent-list">
-		<h2>Torrents ({lastSnapshot.length})</h2>
-
-		{#if loading}
-			<p class="loading">Loading torrents...</p>
-		{:else if lastSnapshot.length === 0}
-			<p class="empty">No torrents. Add one above to get started.</p>
-		{:else}
-			{#each lastSnapshot as torrent (torrent.id)}
-				<article class="torrent-card">
-					<div class="card-header">
-						<span class="state-badge" style="--color: {stateColor(torrent.state)}">
-							{stateIcon(torrent.state)} {stateDisplayName(torrent.state)}
-						</span>
-						<h3 class="torrent-name">{torrent.name}</h3>
-					</div>
-
-					<div class="progress-section">
-						<progress value={torrent.progress * 100} max="100"></progress>
-						<span class="progress-text">{formatProgress(torrent.progress)}</span>
-					</div>
-
-					<div class="torrent-meta">
-						<span>{formatBytes(torrent.downloadRate)}↓</span>
-						<span>{formatBytes(torrent.uploadRate)}↑</span>
-						<span>👥 {torrent.peers} peers</span>
-					</div>
-
-					{#if torrent.destinationPath || torrent.savePath}
-						<p class="save-path">📁 {torrent.destinationPath || torrent.savePath}</p>
-					{/if}
-
-					{#if torrent.destinationStatus === 'destination_unavailable'}
-						<p class="move-warning">⏸️ Destination unavailable — torrent paused until storage returns.</p>
-					{:else if torrent.destinationStatus === 'storage_conflict'}
-						<p class="move-warning">⚠️ Storage conflict — existing torrent data did not verify. Remove or repair it, then Resume to verify again.</p>
-					{/if}
-
-					{#if torrent.moveState === 'storage-conflict'}
-						<p class="move-warning">⚠️ Storage conflict — target directory has data. Retry or cancel the move.</p>
-					{:else if torrent.moveState && torrent.moveState !== 'none' && !isRecoverableMoveState(torrent.moveState)}
-						<p class="move-status">🔄 Move status: {torrent.moveState}</p>
-					{/if}
-
-					{#if torrent.moveState === 'move-interrupted' || torrent.moveState === 'interrupted'}
-						<p class="move-warning">⏸️ Move interrupted — retry or cancel to recover.</p>
-					{/if}
-
-					{#if isRecoverableMoveState(torrent.moveState) || catalog.some((path) => path !== torrent.destinationPath)}
-						<div class="move-controls">
-							<label for={`move-destination-${torrent.id}`}>Move to</label>
-							<select
-								id={`move-destination-${torrent.id}`}
-								value={moveTargetFor(torrent)}
-								disabled={isRecoverableMoveState(torrent.moveState)}
-								on:change={(event) => setMoveTarget(torrent.id, (event.currentTarget as HTMLSelectElement).value)}
-							>
-								<option value="">Choose approved folder</option>
-								{#each catalog.filter((path) => path !== torrent.destinationPath) as path}
-									<option value={path}>{path}</option>
-								{/each}
-							</select>
-							{#if isRecoverableMoveState(torrent.moveState)}
-								<button class="btn btn-resume" on:click={() => retryMove(torrent.id, moveTargetFor(torrent))} disabled={moveLoading[torrent.id]}>Retry move</button>
-								<button class="btn btn-remove" on:click={() => cancelMove(torrent.id)} disabled={moveLoading[torrent.id]}>Cancel move</button>
-							{:else}
-								<button class="btn btn-move" on:click={() => moveTorrent(torrent.id, moveTargetFor(torrent))} disabled={moveLoading[torrent.id] || torrent.destinationStatus === 'destination_unavailable'}>Move</button>
-							{/if}
-						</div>
-					{/if}
-					{#if moveErrors[torrent.id]}<p class="error">{moveErrors[torrent.id]}</p>{/if}
-
-					<div class="card-actions">
-						{#if torrent.state === 'paused' || torrent.state === 'pause_requested'}
-							<button class="btn btn-resume" on:click={() => resumeTorrent(torrent.id)} disabled={torrent.destinationStatus === 'destination_unavailable'}>▶ Resume</button>
-						{:else}
-							<button class="btn btn-pause" on:click={() => pauseTorrent(torrent.id)}>⏸ Pause</button>
-						{/if}
-
-						<button class="btn btn-info" on:click={() => toggleInfo(torrent)}>ℹ Info</button>
-
-						<button class="btn btn-remove" on:click={() => removeTorrent(torrent.id, false)}>🗑 Remove</button>
-
-						<button
-							class="btn btn-delete"
-							on:click={() => removeTorrent(torrent.id, true)}
-						>🗑 Remove &amp; Delete Files</button>
-					</div>
-				</article>
-			{/each}
-		{/if}
-	</section>
-
-	<footer>
-		<p>Torrent WebUI — powered by libtorrent via JNI</p>
-	</footer>
-
-	{#if showSettings}
-		<div class="modal-overlay" on:click={() => { showSettings = false; settingsMessage = ''; settingsError = ''; }}>
-			<div class="modal-content settings-modal" on:click={(e) => e.stopPropagation()}>
-				<div class="modal-header">
-					<h2>Settings</h2>
-					<button class="btn-close" on:click={() => { showSettings = false; settingsMessage = ''; settingsError = ''; }}>✕</button>
+{#snippet downloadCard(item: PresentedDownload)}
+	{@const download = item.download}
+	{@const name = consumerDownloadName(download)}
+	{@const progress = normalizedProgress(download.progress)}
+	{@const progressText = formatConsumerProgress(download.progress)}
+	{@const folderPath = download.destinationPath?.trim() || null}
+	{@const pathInputId = `download-${download.id}-folder-path`}
+	{@const pathFeedbackId = `download-${download.id}-folder-feedback`}
+	{@const action = primaryConsumerAction(item)}
+	{@const pendingAction = ui.torrentActionPending[download.id]}
+	{@const actionError = ui.torrentActionErrors[download.id]}
+	{@const actionFeedbackId = `download-${download.id}-action-feedback`}
+	{@const approvedMoveTargets = ui.catalog.filter((path) => path !== folderPath)}
+	{@const selectedMoveTarget = ui.moveTargetFor(download)}
+	{@const recovery = recoveryForDownload(download)}
+	{@const recoverableMove = ui.isRecoverableMoveState(download.moveState)}
+	{@const recoverableMoveTarget = ui.recoverableMoveTargetFor(download)}
+	{@const movePending = Boolean(ui.moveLoading[download.id])}
+	{@const moving = item.state === 'Moving files'}
+	{@const moveError = ui.moveErrors[download.id]}
+	{@const moveMessage = ui.moveMessages[download.id]}
+	<article id={`download-${download.id}-card`} class="torrent-card download-card" aria-labelledby={`download-${download.id}-name`} tabindex="-1">
+		<div class="card-main">
+			<div class="card-title-row">
+				<div>
+					<p class="state">{item.state}</p>
+					<h3 id={`download-${download.id}-name`} class="torrent-name">{name}</h3>
 				</div>
+				<span class="progress-text">{progressText}</span>
+			</div>
+			<progress aria-label={`${name}: ${item.state}, ${progressText}`} value={progress * 100} max="100">{progressText}</progress>
+			<div class="card-secondary-action">
+				<button class="text-button details-button" type="button" onclick={(event) => void openDetails(download, event.currentTarget as HTMLButtonElement)}>View details</button>
+				{#if folderPath && (approvedMoveTargets.length > 0 || recoverableMove || moving)}
+					<button class="text-button details-button" type="button" onclick={() => openMoveForm(download.id)} disabled={movePending || moving}>Move files</button>
+				{/if}
+			</div>
+			{#if action}
+				<div class="card-action">
+					<button
+						class="primary-button"
+						type="button"
+						onclick={() => void invokeTorrentAction(item)}
+						disabled={Boolean(pendingAction) || movePending || moving}
+						aria-describedby={actionError ? actionFeedbackId : undefined}
+					>{pendingAction === 'pause' ? 'Pausing…' : pendingAction === 'resume' ? 'Resuming…' : action === 'pause' ? 'Pause' : 'Resume'}</button>
+				</div>
+			{/if}
+			<div class="card-remove-actions" aria-label={`Remove ${name}`}>
+				<button class="text-button remove-from-list-button" type="button" onclick={(event) => void requestRemovalConfirmation(download, false, event.currentTarget as HTMLButtonElement)} disabled={removalActionIsPending(download.id, false) || pendingAction === 'pause' || pendingAction === 'resume' || movePending || moving}>{removalActionIsPending(download.id, false) ? 'Removing from list…' : 'Remove from list'}</button>
+				<button class="destructive-button" type="button" onclick={(event) => void requestRemovalConfirmation(download, true, event.currentTarget as HTMLButtonElement)} disabled={removalActionIsPending(download.id, true) || pendingAction === 'pause' || pendingAction === 'resume' || movePending || moving}>{removalActionIsPending(download.id, true) ? 'Removing and deleting files…' : 'Remove and delete files'}</button>
+			</div>
+			{#if actionError}<p id={actionFeedbackId} class="card-action-feedback error" role="alert">{actionError}</p>{/if}
+			{#if folderPath && recoverableMove && recovery}
+				<div class="move-recovery" role="alert">
+					<p><strong>Needs attention.</strong> {recovery.message}</p>
+					{#if recoverableMoveTarget}
+						<button class="primary-button" type="button" onclick={() => void ui.retryMove(download.id, recoverableMoveTarget)} disabled={movePending}>{movePending ? 'Retrying move…' : 'Retry move'}</button>
+					{:else}
+						<p class="move-feedback">The interrupted target cannot be retried safely. Cancel this move, then choose another approved Download Folder if needed.</p>
+					{/if}
+					<button class:primary-button={!recoverableMoveTarget} class:secondary-button={Boolean(recoverableMoveTarget)} type="button" onclick={() => void ui.cancelMove(download.id)} disabled={movePending}>{movePending ? 'Cancelling move…' : 'Cancel move'}</button>
+				</div>
+			{:else if recovery}
+				<div class="download-recovery" role="alert">
+					<p><strong>Needs attention.</strong> {recovery.message}</p>
+					{#if recovery.primaryAction === 'fix-problem'}
+						<button class="primary-button" type="button" onclick={(event) => void openStorageRecovery(event.currentTarget as HTMLButtonElement)}>Fix problem</button>
+					{/if}
+				</div>
+			{:else if folderPath && moveFormFor === download.id}
+				<div class="move-panel" aria-label={`Move ${name} files`}>
+					<h4>Move files</h4>
+					{#if approvedMoveTargets.length === 0}
+						<p class="quiet-empty">Approve another Download Folder in Settings before moving files.</p>
+					{:else}
+						<fieldset class="catalog-list"><legend>Move to an approved Download Folder</legend>
+							{#each approvedMoveTargets as path, index}
+								<div class="path-option"><label><input type="radio" name={`move-target-${download.id}`} checked={selectedMoveTarget === path} onchange={() => ui.setMoveTarget(download.id, path)} disabled={movePending} /><code>{path}</code></label></div>
+							{/each}
+						</fieldset>
+						<button class="primary-button" type="button" onclick={(event) => void requestMoveConfirmation(download, folderPath, event.currentTarget as HTMLButtonElement)} disabled={movePending || !selectedMoveTarget}>Continue</button>
+					{/if}
+					<button class="text-button" type="button" onclick={cancelMoveForm} disabled={movePending}>Cancel</button>
+				</div>
+			{/if}
+			{#if moveConfirmation?.id === download.id}
+				<div bind:this={moveConfirmationDialog} class="move-confirmation" role="dialog" aria-modal="false" aria-labelledby={`move-${download.id}-confirmation-title`} tabindex="-1">
+					<h4 id={`move-${download.id}-confirmation-title`}>Move {moveConfirmation.name}?</h4>
+					<p>Files will move only after Downloads records the request and the download engine accepts it.</p>
+					<dl class="move-paths"><div><dt>From</dt><dd><code>{moveConfirmation.sourcePath}</code></dd></div><div><dt>To</dt><dd><code>{moveConfirmation.targetPath}</code></dd></div></dl>
+					<button class="primary-button" type="button" onclick={() => void confirmMove()} disabled={movePending}>{movePending ? 'Starting move…' : 'Move files'}</button>
+					<button class="text-button" type="button" onclick={() => void closeMoveConfirmation()} disabled={movePending}>Back</button>
+				</div>
+			{/if}
+			{#if moveError}<p class="card-action-feedback error" role="alert">{moveError}</p>{:else if moveMessage}<p class="move-feedback" role="status">{moveMessage}</p>{/if}
+			{#if folderPath}
+				<div class="download-folder">
+					<label for={pathInputId}>Download Folder</label>
+					<div class="folder-path-action">
+						<input id={pathInputId} class="canonical-path" type="text" value={folderPath} readonly aria-describedby={pathFeedbackId} />
+						<button class="secondary-button copy-path-button" type="button" onclick={() => void copyCanonicalPath(download.id, pathInputId, folderPath)}>Copy path</button>
+					</div>
+					<p id={pathFeedbackId} class="path-copy-feedback" role="status">{pathCopyFeedback[download.id] || ''}</p>
+				</div>
+			{:else}
+				<p class="folder-unavailable" role="status">Download Folder unavailable. Check the Android app to restore its verified folder.</p>
+			{/if}
+		</div>
+	</article>
+{/snippet}
+
+{#if ui.onboardingLoading && !ui.onboardingStatus}
+	<main class="onboarding-shell" aria-busy="true"><h1>Getting Downloads ready</h1><p>Checking whether Downloads are ready…</p></main>
+{:else if ui.onboardingStatus && !ui.onboardingStatus.completed}
+	<main class="onboarding-shell">
+		<h1>Getting Downloads ready</h1>
+		{#if ui.onboardingStatus.readiness === 'Action needed on Android'}
+			<h2>Action needed on Android</h2><p>Open the Android app and complete the requested device action.</p>
+		{:else if ui.onboardingStatus.readiness === 'Service unavailable'}
+			<h2>Downloads are unavailable</h2><p>Use the Android app to recover or restart Downloads.</p>
+		{:else if !ui.onboardingStatus.hasApprovedDestination}
+			<h2>Choose a download folder</h2><p>Use the recommended folder for completed and in-progress downloads.</p>
+			{#if ui.recommendedLoading}<p>Preparing the recommended path…</p>{:else if ui.recommendedPath}
+				{#if !ui.showBrowser}<code class="path-readout">{ui.recommendedPath}</code><button class="primary-button" onclick={ui.confirmRecommendedDestination} disabled={ui.onboardingActionLoading}>{ui.onboardingActionLoading ? 'Creating folder…' : 'Use this folder'}</button>{/if}
+				{@render directoryBrowser((path) => ui.approveDestination(path, 'onboarding'))}
+			{/if}
+		{:else if ui.onboardingStatus.passwordDecision === 'pending'}
+			<h2>Password choice</h2>
+			{#if !ui.showOnboardingPasswordChange}
+				<p>Choose another Password now or keep the current one for later.</p>
+				<button class="primary-button" onclick={ui.chooseAnotherOnboardingPassword} disabled={ui.onboardingActionLoading}>Choose another password</button>
+				<button class="text-button" onclick={ui.deferOnboardingPassword} disabled={ui.onboardingActionLoading}>{ui.onboardingActionLoading ? 'Finishing setup…' : 'Set it later'}</button>
+			{:else}
+				<label for="onboarding-new-password">New Password</label><input id="onboarding-new-password" type="password" autocomplete="new-password" bind:value={ui.onboardingNewPassword} />
+				<label for="onboarding-confirm-password">Confirm Password</label><input id="onboarding-confirm-password" type="password" autocomplete="new-password" bind:value={ui.onboardingPasswordConfirmation} />
+				<button class="primary-button" onclick={ui.changeOnboardingPassword} disabled={ui.onboardingActionLoading}>{ui.onboardingActionLoading ? 'Saving Password…' : 'Change Password'}</button>
+				<button class="text-button" onclick={ui.cancelOnboardingPasswordChange} disabled={ui.onboardingActionLoading}>Back</button>
+			{/if}
+		{:else}
+			<h2>Finishing setup</h2><p>Your saved onboarding progress is being completed.</p>
+		{/if}
+		{#if ui.onboardingActionError}<p class="error">{ui.onboardingActionError}</p>{/if}
+	</main>
+{:else if ui.onboardingError}
+	<main class="onboarding-shell"><h1>Getting Downloads ready</h1><p class="error">{ui.onboardingError}</p><a href="/">Try again</a></main>
+{:else}
+	<div class="app-shell">
+		<header class="site-header">
+			<div><p class="eyebrow">Home downloader</p><h1>Downloads</h1></div>
+			<div class="header-actions">
+				<span class="system-readout" aria-label="Service status"><i class:connected={ui.wsConnected && !ui.updatesPaused} class="status-dot"></i>{ui.updatesPaused ? 'Updates paused — reconnecting…' : ui.wsConnecting ? 'Connecting…' : ui.wsConnected ? 'Running' : 'Checking…'}</span>
+				<button class="settings-button" type="button" onclick={(event) => void openSettings(event.currentTarget as HTMLButtonElement)} aria-label="Open settings">•••</button>
+			</div>
+		</header>
+
+		<main>
+			<section class="add-torrent add-panel" aria-labelledby="add-heading">
+				<div class="add-copy"><p class="section-kicker">Start something new</p><h2 id="add-heading">Add Download</h2></div>
+				<form class="add-form" aria-busy={ui.addPending} onsubmit={(event) => { event.preventDefault(); void ui.addMagnet(); }}>
+					<label for="download-link">Download link</label>
+					<p id="download-link-hint" class="field-hint">Paste a magnet link that starts with <code>magnet:?</code>.</p>
+					<div class="input-row link-row"><input id="download-link" type="text" bind:value={ui.magnetUri} placeholder="Paste your Download link" aria-describedby="download-link-hint add-form-feedback" oninput={ui.clearAddFeedback} disabled={ui.addPending} /><button class="primary-button" type="submit" disabled={!ui.storageReady || ui.addPending}>{ui.addPending ? 'Adding Download…' : 'Add Download'}</button></div>
+					<div class="destination-picker" aria-label="Download folder">
+						<h3>Download Folder</h3>
+						{#if ui.storageLoading}<p class="quiet-empty">Loading available folders…</p>
+						{:else if !ui.storageReady}<p class="storage-guidance">Storage permission is required. Grant All Files Access in the Android app before choosing a Download Folder.</p>
+						{:else}
+							{#if ui.catalog.length > 0}<fieldset class="catalog-list" aria-describedby="add-form-feedback"><legend>Approved Destinations</legend>{#each ui.catalog as path}<div class="path-option"><label><input type="radio" name="destination" checked={ui.selectedDestination === path} onchange={() => { ui.clearAddFeedback(); void ui.selectApprovedDestination(path); }} disabled={ui.addPending || ui.storageMutationPending} /><code>{path}</code></label></div>{/each}</fieldset>
+							{:else}<p class="quiet-empty">Choose and approve a Download Folder in Settings before adding a Download.</p>{/if}
+						{/if}
+						{#if ui.selectedDestination}<p class="selected-path">Downloads will be saved to <code>{ui.selectedDestination}</code></p>{/if}
+						{#if ui.storageError}<p class="error">{ui.storageError}</p>{/if}
+					</div>
+					{#if !ui.selectedDestination}<p class="folder-required">Choose a Download Folder to continue.</p>{/if}
+					{#if ui.addError}<p id="add-form-feedback" class="error" role="alert">{ui.addError}</p>{:else if ui.addStatus}<p id="add-form-feedback" class="add-status" role="status">{ui.addStatus}</p>{:else}<p id="add-form-feedback" class="visually-hidden"></p>{/if}
+				</form>
+			</section>
+
+			{#if needsAttentionDownloads.length > 0}
+				<section class="queue-section attention-section" aria-labelledby="needs-attention-heading">
+					<div class="section-heading"><div><p class="section-kicker">Action needed</p><h2 id="needs-attention-heading">Needs Attention</h2></div><span class="count">{needsAttentionDownloads.length}</span></div>
+					<div class="card-list">{#each needsAttentionDownloads as item (item.download.id)}{@render downloadCard(item)}{/each}</div>
+				</section>
+			{/if}
+
+			<section class="queue-section" aria-labelledby="active-heading">
+				<div class="section-heading"><div><p class="section-kicker">In progress</p><h2 id="active-heading">Active</h2></div><span class="count">{activeDownloads.length}</span></div>
+				{#if ui.loading}<p class="quiet-empty">Loading Downloads…</p>
+				{:else if ui.lastSnapshot.length === 0}<div class="empty-state"><h3>Ready when you are</h3><p>Add your first Download to see its progress here.</p><a href="#download-link" class="primary-link">Add Download</a></div>
+				{:else if activeDownloads.length === 0}<p class="quiet-empty">Nothing is active right now.</p>
+				{:else}<div class="card-list">{#each activeDownloads as item (item.download.id)}{@render downloadCard(item)}{/each}</div>{/if}
+			</section>
+
+			<section class="queue-section completed-section" aria-labelledby="completed-heading">
+				<div class="section-heading"><div><p class="section-kicker">Ready when you are</p><h2 id="completed-heading">Completed</h2></div><span class="count">{completedDownloads.length}</span></div>
+				{#if !ui.loading && completedDownloads.length === 0}<p class="quiet-empty">Completed Downloads will appear here.</p>
+				{:else if completedDownloads.length > 0}<div class="card-list">{#each completedDownloads as item (item.download.id)}{@render downloadCard(item)}{/each}</div>{/if}
+			</section>
+		</main>
+	</div>
+
+	{#if removalConfirmation}
+		<div class="modal-overlay removal-overlay">
+			<button class="modal-scrim" type="button" aria-label="Cancel removal" onclick={() => void cancelRemovalConfirmation()} disabled={removalActionIsPending(removalConfirmation.id, removalConfirmation.deleteFiles)}></button>
+			<div bind:this={removalConfirmationDialog} class="modal-content removal-confirmation" role="alertdialog" aria-modal="true" aria-labelledby="removal-confirmation-title" tabindex="-1">
+				<div class="modal-header"><div><p class="section-kicker">{removalConfirmation.deleteFiles ? 'Delete files' : 'Remove Download'}</p><h2 id="removal-confirmation-title">{removalConfirmation.deleteFiles ? `Remove ${removalConfirmation.name} and delete files?` : `Remove ${removalConfirmation.name} from list?`}</h2></div></div>
 				<div class="modal-body">
-					<p class="settings-description">Change the password used to access this WebUI.</p>
-
-					{#if settingsMessage}
-						<p class="settings-success">{settingsMessage}</p>
+					{#if removalConfirmation.deleteFiles}
+						<p>Downloaded and partial files for this Download will be deleted from its Download Folder.</p>
+					{:else}
+						<p>This Download will be removed from the list. Downloaded and partial files will remain in its Download Folder.</p>
 					{/if}
-
-					{#if settingsError}
-						<p class="settings-error">{settingsError}</p>
-					{/if}
-
-					<div class="form-group">
-						<label for="current-password">Current Password</label>
-						<input
-							id="current-password"
-							type="password"
-							bind:value={currentPassword}
-							placeholder="Enter current password"
-						/>
+					<div class="removal-confirmation-actions">
+						<button class:destructive-button={removalConfirmation.deleteFiles} class="primary-button" type="button" onclick={() => void confirmRemoval()} disabled={removalActionIsPending(removalConfirmation.id, removalConfirmation.deleteFiles)}>{removalActionIsPending(removalConfirmation.id, removalConfirmation.deleteFiles) ? removalConfirmation.deleteFiles ? 'Removing and deleting files…' : 'Removing from list…' : removalConfirmation.deleteFiles ? 'Remove and delete files' : 'Remove from list'}</button>
+						<button class="text-button" type="button" onclick={() => void cancelRemovalConfirmation()} disabled={removalActionIsPending(removalConfirmation.id, removalConfirmation.deleteFiles)}>Cancel</button>
 					</div>
-
-					<div class="form-group">
-						<label for="new-password">New Password</label>
-						<input
-							id="new-password"
-							type="password"
-							bind:value={newPassword}
-							placeholder="Min. 4 characters"
-						/>
-					</div>
-
-					<button class="btn btn-settings-submit" on:click={changePassword}>Change Password</button>
 				</div>
 			</div>
 		</div>
 	{/if}
-</div>
 
-{#if showInfo && selectedTorrent}
-	<div class="modal-overlay" on:click={closeInfo}>
-		<div class="modal-content" on:click={(e) => e.stopPropagation()}>
-			<div class="modal-header">
-				<h2>Torrent Info</h2>
-				<button class="btn-close" on:click={closeInfo}>✕</button>
-			</div>
-			<div class="modal-body">
-				<div class="info-row">
-					<span class="label">Name:</span>
-					<span class="value">{selectedTorrent.name}</span>
+	{#if ui.showSettings}
+		<div class="modal-overlay settings-overlay">
+			<button class="modal-scrim" type="button" aria-label="Close settings" onclick={() => void closeSettings()}></button>
+			<div bind:this={settingsDialog} class="modal-content settings-surface" role="dialog" aria-modal="true" aria-labelledby="settings-title" tabindex="-1">
+				<div class="modal-header">
+					<div><p class="section-kicker">Downloads</p><h2 id="settings-title">Settings</h2></div>
+					<button class="close-button" type="button" onclick={() => void closeSettings()} aria-label="Close settings">×</button>
 				</div>
-				<div class="info-row">
-					<span class="label">ID:</span>
-					<span class="value">{selectedTorrent.id}</span>
+				<div class="modal-body settings-body">
+					{#if settingsPanel === 'menu'}
+						<nav class="settings-menu" aria-label="Settings sections">
+							<button class="settings-entry" type="button" onclick={() => settingsPanel = 'folders'}><span><strong>Download folders</strong><small>Choose where Downloads are saved.</small></span><span aria-hidden="true">›</span></button>
+							<button class="settings-entry" type="button" onclick={() => settingsPanel = 'password'}><span><strong>Password</strong><small>Change the Password used to access Downloads.</small></span><span aria-hidden="true">›</span></button>
+							<button class="settings-entry" type="button" onclick={() => settingsPanel = 'about'}><span><strong>About</strong><small>Learn about Downloads on this device.</small></span><span aria-hidden="true">›</span></button>
+						</nav>
+					{:else if settingsPanel === 'folder-browser'}
+						<button class="text-button settings-back" type="button" onclick={() => void returnToDownloadFolders()}>Back to Download folders</button>
+						<h3>Browse storage</h3>
+						<p class="settings-description">Choose only a folder shown by this device, or paste its full path for device verification.</p>
+						{@render directoryBrowserContent(approveFolder, false, 'Approve this folder')}
+					{:else}
+						<button class="text-button settings-back" type="button" onclick={() => settingsPanel = 'menu'}>Back to Settings</button>
+						{#if settingsPanel === 'folders'}
+							<h3>Download folders</h3>
+							<p class="settings-description">Manage the folders used for Downloads.</p>
+							{#if ui.storageLoading}
+								<p class="quiet-empty">Loading Download Folders…</p>
+							{:else if !ui.storageReady}
+								<p class="storage-guidance">{ui.storageRecoveryMessage || 'Storage access needs attention in the Android app.'}</p>
+							{:else}
+								{#if ui.catalog.length > 0}
+									<fieldset class="catalog-list settings-catalog-list"><legend>Approved Destinations</legend>
+										{#each ui.catalog as path, index}
+											<div class="path-option settings-path-option">
+												<input id={`approved-destination-${index}`} class="canonical-path" aria-label={`Approved Download Folder: ${path}`} type="text" value={path} readonly onclick={() => selectCanonicalPath(`approved-destination-${index}`, path)} />
+												<button class="text-button" type="button" aria-label={`Forget ${path}`} onclick={() => void ui.removeApprovedDestination(path)} disabled={ui.storageMutationPending}>Forget</button>
+											</div>
+										{/each}
+									</fieldset>
+								{:else}
+									<p class="quiet-empty">No Download Folders are approved yet.</p>
+								{/if}
+								<button id="browse-storage" class="primary-button" type="button" onclick={() => void openFolderBrowser()} disabled={ui.storageMutationPending}>Browse storage</button>
+							{/if}
+							{#if ui.storageError}<p class="settings-error" role="alert">{ui.storageError}</p>{/if}
+						{:else if settingsPanel === 'password'}
+							<h3>Password</h3>
+							<p class="settings-description">Change the Password used to access Downloads. You will be asked to sign in again after saving it.</p>
+							<form onsubmit={(event) => { event.preventDefault(); void ui.changePassword(); }} aria-busy={ui.settingsSaving}>
+								{#if ui.settingsMessage}<p class="settings-success" role="status">{ui.settingsMessage}</p>{/if}
+								{#if ui.settingsError}<p class="settings-error" role="alert">{ui.settingsError}</p>{/if}
+								<label for="current-password">Current Password</label>
+								<input id="current-password" type="password" bind:value={ui.currentPassword} autocomplete="current-password" />
+								<label for="new-password">New Password</label>
+								<input id="new-password" type="password" bind:value={ui.newPassword} autocomplete="new-password" />
+								<button class="primary-button settings-submit" type="submit" disabled={ui.settingsSaving}>{ui.settingsSaving ? 'Saving Password…' : 'Change Password'}</button>
+							</form>
+						{:else}
+							<h3>About Downloads</h3>
+							<p class="settings-description">Downloads helps your household manage downloads from browsers you authorize on your local network.</p>
+							<p class="settings-description">It runs on this device and keeps its service details in the background so the everyday controls stay simple.</p>
+						{/if}
+					{/if}
 				</div>
-				<div class="info-row">
-					<span class="label">State:</span>
-					<span class="value state-badge" style="--color: {stateColor(selectedTorrent.state)}">
-						{stateIcon(selectedTorrent.state)} {stateDisplayName(selectedTorrent.state)}
-					</span>
-				</div>
-				<div class="info-row">
-					<span class="label">Progress:</span>
-					<span class="value">{formatProgress(selectedTorrent.progress)}</span>
-				</div>
-				<div class="info-row">
-					<span class="label">Download Speed:</span>
-					<span class="value">{formatBytes(selectedTorrent.downloadRate)}/s</span>
-				</div>
-				<div class="info-row">
-					<span class="label">Upload Speed:</span>
-					<span class="value">{formatBytes(selectedTorrent.uploadRate)}/s</span>
-				</div>
-				<div class="info-row">
-					<span class="label">Peers:</span>
-					<span class="value">{selectedTorrent.peers}</span>
-				</div>
-				{#if selectedTorrent.destinationPath || selectedTorrent.savePath}
-					<div class="info-row">
-						<span class="label">Destination:</span>
-						<span class="value path">{selectedTorrent.destinationPath || selectedTorrent.savePath}</span>
-					</div>
-				{/if}
-			</div>
-			<div class="modal-footer">
-				<button class="btn btn-close-modal" on:click={closeInfo}>Close</button>
 			</div>
 		</div>
-	</div>
-{/if}
+	{/if}
+
+	{#if ui.showInfo && ui.selectedTorrent}
+		{@const detailPath = ui.selectedTorrent.destinationPath?.trim() || null}
+		{@const isSharing = ui.selectedTorrent.state.trim().toLowerCase() === 'seeding' || ui.selectedTorrent.uploadRate > 0}
+		<div class="modal-overlay details-overlay">
+			<button class="modal-scrim" aria-label="Close details" onclick={() => void closeDetails()}></button>
+			<div bind:this={detailsDialog} class="modal-content details-surface" role="dialog" aria-modal="true" aria-label={`${consumerDownloadName(ui.selectedTorrent)} details`} tabindex="-1">
+				<div class="modal-header"><div><p class="section-kicker">Download details</p><h2 id="details-title">{consumerDownloadName(ui.selectedTorrent)}</h2></div><button class="close-button" type="button" onclick={() => void closeDetails()} aria-label="Close details">×</button></div>
+				<div class="modal-body details-body">
+					<dl class="details-list">
+						<div class="info-row"><dt>Progress and state</dt><dd>{formatConsumerProgress(ui.selectedTorrent.progress)} · {selectedDetailState}</dd></div>
+						<div class="info-row"><dt>Download speed</dt><dd>{ui.formatBytes(ui.selectedTorrent.downloadRate)}/s</dd></div>
+						<div class="info-row"><dt>Upload speed</dt><dd>{ui.formatBytes(ui.selectedTorrent.uploadRate)}/s</dd></div>
+						<div class="info-row"><dt>Peer information</dt><dd>{ui.selectedTorrent.peers} connected</dd></div>
+						{#if isSharing}<div class="info-row"><dt>Sharing</dt><dd>Sharing with {ui.selectedTorrent.peers} connected peers</dd></div>{/if}
+						{#if detailPath}<div class="info-row path"><dt>Download folder</dt><dd><code>{detailPath}</code></dd></div>{:else}<div class="info-row"><dt>Download folder</dt><dd>Unavailable. Check the Android app to restore its verified folder.</dd></div>{/if}
+					</dl>
+				</div>
+			</div>
+		</div>
+	{/if}
 {/if}
 
 <style>
-.onboarding-shell {
-	max-width: 640px;
-	margin: 4rem auto;
-	padding: 2rem;
-	background: var(--surface);
-	border: 1px solid var(--border);
-	border-radius: 12px;
-}
-
-.onboarding-shell h1 {
-	margin-bottom: 1.5rem;
-}
-
-.onboarding-shell h2 {
-	margin-bottom: 0.75rem;
-}
-
-.onboarding-shell p {
-	line-height: 1.5;
-}
-
-.onboarding-shell a {
-	display: inline-block;
-	margin-top: 1rem;
-}
-
-.modal-overlay {
-	position: fixed;
-	top: 0;
-	left: 0;
-	right: 0;
-	bottom: 0;
-	background: rgba(0, 0, 0, 0.7);
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	z-index: 1000;
-}
-
-.modal-content {
-	background: var(--surface);
-	border: 1px solid var(--border);
-	border-radius: 8px;
-	width: 90%;
-	max-width: 500px;
-	max-height: 80vh;
-	overflow-y: auto;
-}
-
-.modal-header {
-	display: flex;
-	align-items: center;
-	justify-content: space-between;
-	padding: 1rem;
-	border-bottom: 1px solid var(--border);
-}
-
-.modal-header h2 {
-	font-size: 1.1rem;
-	color: var(--text);
-}
-
-.btn-close {
-	background: none;
-	border: none;
-	color: var(--muted);
-	font-size: 1.2rem;
-	cursor: pointer;
-	padding: 0;
-	width: 32px;
-	height: 32px;
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	border-radius: 4px;
-}
-
-.btn-close:hover {
-	background: var(--border);
-	color: var(--text);
-}
-
-.modal-body {
-	padding: 1rem;
-}
-
-.info-row {
-	display: flex;
-	justify-content: space-between;
-	align-items: center;
-	padding: 0.5rem 0;
-	border-bottom: 1px solid var(--border);
-}
-
-.info-row:last-child {
-	border-bottom: none;
-}
-
-.label {
-	font-size: 0.85rem;
-	color: var(--muted);
-	font-weight: 500;
-}
-
-.value {
-	font-size: 0.85rem;
-	color: var(--text);
-	text-align: right;
-	word-break: break-word;
-}
-
-.value.path {
-	font-size: 0.75rem;
-	color: var(--muted);
-}
-
-.modal-footer {
-	padding: 1rem;
-	border-top: 1px solid var(--border);
-	display: flex;
-	justify-content: flex-end;
-}
-
-.btn-close-modal {
-	background: var(--border);
-	color: var(--text);
-}
-
-.btn-close-modal:hover {
-	background: color-mix(in srgb, var(--border) 80%, white);
-}
-
-:root {
-	--bg: #1a1a2e;
-	--surface: #16213e;
-	--border: #0f3460;
-	--text: #e8e8e8;
-	--muted: #a0a0b0;
-	--accent: #e94560;
-	--input-bg: #1a1a2e;
-}
-
-	* {
-		box-sizing: border-box;
-		margin: 0;
-		padding: 0;
-	}
-
-	body {
-		font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-		background: var(--bg);
-		color: var(--text);
-		line-height: 1.5;
-	}
-
-	.container {
-		max-width: 800px;
-		margin: 0 auto;
-		padding: 1rem;
-	}
-
-	header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		padding-bottom: 1rem;
-		border-bottom: 1px solid var(--border);
-		margin-bottom: 1.5rem;
-	}
-
-	h1 {
-		font-size: 1.4rem;
-		color: var(--accent);
-	}
-
-	h2 {
-		font-size: 1.1rem;
-		color: var(--muted);
-		margin-bottom: 0.75rem;
-	}
-
-	.status {
-		font-size: 0.85rem;
-	}
-
-	.ws-indicator {
-		padding: 2px 8px;
-		border-radius: 12px;
-		background: var(--surface);
-	}
-
-	.ws-indicator.connected {
-		color: #4CAF50;
-	}
-
-	.ws-indicator.connecting {
-		color: #FF9800;
-	}
-
-	/* Canonical destination selector */
-
-	.destination-picker {
-		background: var(--surface);
-		border: 1px solid var(--border);
-		border-radius: 8px;
-		padding: 1rem;
-		margin-bottom: 1.5rem;
-	}
-
-	.catalog-list {
-		border: 0;
-		margin-bottom: 0.75rem;
-	}
-
-	.catalog-list legend, .folder-browser h3, .paste-path label {
-		color: var(--muted);
-		font-size: 0.8rem;
-		font-weight: 600;
-		margin-bottom: 0.5rem;
-	}
-
-	.path-option {
-		display: flex;
-		align-items: flex-start;
-		justify-content: space-between;
-		gap: 0.6rem;
-		padding: 0.65rem;
-		border: 1px solid var(--border);
-		border-radius: 6px;
-		margin-bottom: 0.5rem;
-	}
-
-	.path-option label {
-		display: flex;
-		align-items: flex-start;
-		gap: 0.6rem;
-		cursor: pointer;
-	}
-
-	.forget-destination {
-		background: transparent;
-		border: 1px solid var(--border);
-		color: var(--muted);
-		padding: 0.25rem 0.5rem;
-		font-size: 0.75rem;
-	}
-
-	.path-option code, .path-button code, .browser-current code,
-	.validation-result code, .selected-path code {
-		word-break: break-all;
-		color: var(--text);
-	}
-
-	.secondary-button, .path-button {
-		background: var(--border);
-		color: var(--text);
-	}
-
-	.folder-browser {
-		border-top: 1px solid var(--border);
-		margin-top: 1rem;
-		padding-top: 1rem;
-	}
-
-	.path-buttons {
-		display: grid;
-		gap: 0.5rem;
-		margin-bottom: 1rem;
-	}
-
-	.path-button {
-		display: flex;
-		flex-direction: column;
-		align-items: flex-start;
-		text-align: left;
-	}
-
-	.path-button span {
-		font-size: 0.8rem;
-		color: var(--muted);
-	}
-
-	.browser-current, .validation-result {
-		background: var(--input-bg);
-		border: 1px solid var(--border);
-		border-radius: 6px;
-		padding: 0.75rem;
-		margin-bottom: 1rem;
-	}
-
-	.browser-current code, .validation-result code {
-		display: block;
-		margin: 0.35rem 0 0.75rem;
-	}
-
-	.browser-current button, .validation-success button, .paste-path button {
-		background: var(--accent);
-		color: white;
-	}
-
-	.paste-path {
-		margin-top: 1rem;
-	}
-
-	.paste-path label {
-		display: block;
-	}
-
-	.validation-success { border-color: #4CAF50; }
-	.validation-error, .storage-guidance { color: var(--accent); }
-	.selected-path, .folder-required {
-		font-size: 0.85rem;
-		color: var(--muted);
-		margin-top: 0.75rem;
-	}
-	.compact { padding: 0.75rem; }
-
-	button:disabled {
-		opacity: 0.45;
-		cursor: not-allowed;
-	}
-
-	/* Add torrent section */
-
-	.add-torrent {
-		margin-bottom: 1.5rem;
-	}
-
-	.input-row {
-		display: flex;
-		gap: 0.5rem;
-	}
-
-	.input-row input {
-		flex: 1;
-		padding: 0.6rem 0.8rem;
-		border-radius: 6px;
-		border: 1px solid var(--border);
-		background: var(--input-bg);
-		color: var(--text);
-		font-size: 0.95rem;
-	}
-
-	.input-row input:focus {
-		outline: none;
-		border-color: var(--accent);
-	}
-
-	button {
-		padding: 0.6rem 1rem;
-		border-radius: 6px;
-		border: none;
-		cursor: pointer;
-		font-size: 0.9rem;
-		font-weight: 500;
-		transition: opacity 0.15s;
-	}
-
-	button:hover {
-		opacity: 0.85;
-	}
-
-	.add-torrent .input-row button {
-		background: var(--accent);
-		color: white;
-	}
-
-	.error {
-		color: var(--accent);
-		margin-top: 0.5rem;
-		font-size: 0.85rem;
-	}
-
-	/* Torrent list */
-
-	.torrent-list {
-		margin-bottom: 1.5rem;
-	}
-
-	.loading, .empty {
-		text-align: center;
-		color: var(--muted);
-		padding: 2rem;
-	}
-
-	.torrent-card {
-		background: var(--surface);
-		border: 1px solid var(--border);
-		border-radius: 8px;
-		padding: 1rem;
-		margin-bottom: 0.75rem;
-	}
-
-	.card-header {
-		display: flex;
-		align-items: center;
-		gap: 0.5rem;
-		margin-bottom: 0.75rem;
-	}
-
-	.state-badge {
-		padding: 2px 8px;
-		border-radius: 4px;
-		font-size: 0.75rem;
-		font-weight: 600;
-		background: color-mix(in srgb, var(--color) 20%, transparent);
-		color: var(--color);
-		text-transform: uppercase;
-		flex-shrink: 0;
-	}
-
-	.torrent-name {
-		font-size: 1rem;
-		word-break: break-word;
-	}
-
-	.progress-section {
-		display: flex;
-		align-items: center;
-		gap: 0.75rem;
-		margin-bottom: 0.5rem;
-	}
-
-	progress {
-		flex: 1;
-		height: 8px;
-		border-radius: 4px;
-		appearance: none;
-		background: var(--border);
-	}
-
-	progress::-webkit-progress-bar {
-		background: var(--border);
-		border-radius: 4px;
-	}
-
-	progress::-webkit-progress-value {
-		background: var(--accent);
-		border-radius: 4px;
-	}
-
-	progress::-moz-progress-bar {
-		background: var(--accent);
-		border-radius: 4px;
-	}
-
-	.progress-text {
-		font-size: 0.85rem;
-		color: var(--muted);
-		min-width: 48px;
-		text-align: right;
-	}
-
-	.torrent-meta {
-		display: flex;
-		gap: 1rem;
-		font-size: 0.85rem;
-		color: var(--muted);
-		margin-bottom: 0.5rem;
-	}
-
-	.save-path {
-		font-size: 0.75rem;
-		color: var(--muted);
-		margin-bottom: 0.75rem;
-		word-break: break-all;
-	}
-
-	.move-status {
-		font-size: 0.8rem;
-		color: #2196F3;
-		margin-bottom: 0.5rem;
-	}
-
-	.move-warning {
-		font-size: 0.8rem;
-		color: #f44336;
-		margin-bottom: 0.5rem;
-	}
-
-	.move-controls {
-		display: flex;
-		align-items: center;
-		gap: 0.5rem;
-		flex-wrap: wrap;
-		margin-bottom: 0.75rem;
-		font-size: 0.8rem;
-		color: var(--muted);
-	}
-
-	.move-controls select {
-		flex: 1 1 180px;
-		min-width: 0;
-		padding: 0.4rem;
-		border: 1px solid var(--border);
-		border-radius: 4px;
-		background: var(--input-bg);
-		color: var(--text);
-	}
-
-	.card-actions {
-		display: flex;
-		gap: 0.5rem;
-		flex-wrap: wrap;
-	}
-
-	.btn {
-		padding: 0.4rem 0.75rem;
-		font-size: 0.8rem;
-		border-radius: 4px;
-	}
-
-	.btn-resume { background: #2196F3; color: white; }
-	.btn-pause { background: #FF9800; color: white; }
-	.btn-info { background: var(--border); color: var(--text); }
-	.btn-remove { background: #555; color: white; }
-	.btn-delete { background: var(--accent); color: white; }
-	.btn-move { background: #6b5bd2; color: white; }
-
-	/* Header actions */
-
-	.header-actions {
-		display: flex;
-		align-items: center;
-		gap: 0.75rem;
-	}
-
-	.settings-btn {
-		background: none;
-		border: none;
-		font-size: 1.2rem;
-		cursor: pointer;
-		padding: 4px;
-		line-height: 1;
-	}
-
-	.settings-btn:hover {
-		opacity: 0.7;
-	}
-
-	/* Settings modal */
-
-	.settings-modal {
-		max-width: 420px;
-	}
-
-	.settings-description {
-		font-size: 0.85rem;
-		color: var(--muted);
-		margin-bottom: 1rem;
-	}
-
-	.settings-success {
-		background: color-mix(in srgb, #4CAF50 15%, transparent);
-		color: #4CAF50;
-		padding: 0.6rem 0.75rem;
-		border-radius: 4px;
-		font-size: 0.85rem;
-		margin-bottom: 1rem;
-	}
-
-	.settings-error {
-		background: color-mix(in srgb, var(--accent) 15%, transparent);
-		color: var(--accent);
-		padding: 0.6rem 0.75rem;
-		border-radius: 4px;
-		font-size: 0.85rem;
-		margin-bottom: 1rem;
-	}
-
-	.form-group {
-		margin-bottom: 0.75rem;
-	}
-
-	.form-group label {
-		display: block;
-		font-size: 0.85rem;
-		color: var(--muted);
-		margin-bottom: 0.3rem;
-		font-weight: 500;
-	}
-
-	.form-group input {
-		width: 100%;
-		padding: 0.6rem 0.8rem;
-		border-radius: 6px;
-		border: 1px solid var(--border);
-		background: var(--input-bg);
-		color: var(--text);
-		font-size: 0.95rem;
-	}
-
-	.form-group input:focus {
-		outline: none;
-		border-color: var(--accent);
-	}
-
-	.btn-settings-submit {
-		width: 100%;
-		padding: 0.6rem;
-		background: var(--accent);
-		color: white;
-		font-weight: 600;
-		margin-top: 0.5rem;
-	}
-
-	footer {
-		text-align: center;
-		padding-top: 1rem;
-		border-top: 1px solid var(--border);
-		color: var(--muted);
-		font-size: 0.8rem;
-	}
-
-	/* Mobile */
-
-	@media (max-width: 480px) {
-		.container { padding: 0.5rem; }
-		header h1 { font-size: 1.1rem; }
-		.input-row { flex-direction: column; }
-		.torrent-meta { flex-wrap: wrap; gap: 0.5rem; }
-		header { flex-wrap: wrap; gap: 0.5rem; }
-	}
+	:global(*) { box-sizing: border-box; }
+	:global(html) { min-width: 320px; background: #0d1114; }
+	:global(body) { margin: 0; min-width: 320px; background: #0d1114; color: #e9f0f2; font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+	:global(button), :global(input), :global(select) { font: inherit; }
+	:global(button) { cursor: pointer; }
+	:global(button:focus-visible), :global(input:focus-visible), :global(select:focus-visible), :global(a:focus-visible) { outline: 3px solid rgba(101, 230, 204, .65); outline-offset: 3px; }
+
+	.app-shell, .onboarding-shell { width: min(100% - 28px, 880px); margin: 0 auto; }
+	.app-shell { min-height: 100vh; padding: 28px 0 72px; }
+	.site-header { display: flex; align-items: center; min-height: 76px; margin-bottom: 24px; border-bottom: 1px solid rgba(233, 240, 242, .13); }
+	.eyebrow, .section-kicker, .state, .count, .system-readout { margin: 0 0 4px; color: #8c9aa0; font: 650 11px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .1em; text-transform: uppercase; }
+	h1, h2, h3, h4, p { margin-top: 0; }
+	h1 { margin-bottom: 0; font: 690 24px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: -.04em; }
+	h2 { margin-bottom: 0; font-size: 24px; letter-spacing: -.035em; }
+	h3 { margin-bottom: 0; font-size: 16px; letter-spacing: -.02em; }
+	h4 { margin-bottom: 10px; color: #8c9aa0; font-size: 13px; }
+	.header-actions { display: flex; align-items: center; gap: 14px; margin-left: auto; }
+	.system-readout { display: flex; align-items: center; margin: 0; white-space: nowrap; }
+	.status-dot { width: 7px; height: 7px; margin-right: 7px; border-radius: 50%; background: #5d6b71; }
+	.status-dot.connected { background: #65e6cc; box-shadow: 0 0 0 4px rgba(101, 230, 204, .13); }
+	.settings-button, .close-button { display: grid; width: 44px; height: 44px; place-items: center; border: 1px solid rgba(233, 240, 242, .13); border-radius: 5px; color: #e9f0f2; background: #13191d; font-weight: 700; }
+
+	.add-panel { display: grid; grid-template-columns: 170px minmax(0, 1fr); gap: 30px; padding: 25px; border: 1px solid rgba(233, 240, 242, .13); border-left: 4px solid #65e6cc; border-radius: 5px; background: #13191d; }
+	.add-form { min-width: 0; }
+	.add-form > label, .paste-path label, .modal-body form > label { display: block; margin-bottom: 8px; color: #e9f0f2; font-size: 13px; font-weight: 690; }
+	.field-hint { margin: -2px 0 8px; color: #8c9aa0; font-size: 12px; line-height: 1.45; }
+	.input-row { display: flex; gap: 8px; }
+	.input-row input, .modal-body input { width: 100%; min-width: 0; height: 48px; padding: 0 13px; border: 1px solid rgba(233, 240, 242, .13); border-radius: 4px; color: #e9f0f2; background: #0d1114; }
+	.input-row input::placeholder { color: #5d6b71; }
+	.primary-button, .secondary-button, .text-button, .destructive-button { min-height: 44px; padding: 0 14px; border: 0; border-radius: 3px; font-weight: 720; }
+	.primary-button { color: #06231d; background: #65e6cc; }
+	.destructive-button { color: #fff4f2; background: #9d3d37; }
+	.secondary-button { color: #e9f0f2; background: #263138; }
+	.text-button { color: #8c9aa0; background: transparent; }
+	.text-button:hover { color: #e9f0f2; background: #192126; }
+	button:disabled { cursor: not-allowed; opacity: .5; }
+	.destination-picker { margin-top: 12px; padding-top: 13px; border-top: 1px solid rgba(233, 240, 242, .13); }
+	.destination-picker h3 { margin-bottom: 9px; }
+	.catalog-list { margin: 0 0 8px; padding: 0; border: 0; }
+	.catalog-list legend { margin-bottom: 7px; color: #8c9aa0; font-size: 11px; }
+	.path-option { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 0; border-bottom: 1px solid rgba(233, 240, 242, .09); }
+	.path-option label { display: flex; min-width: 0; align-items: center; gap: 8px; }
+	code { overflow-wrap: anywhere; color: #e9f0f2; font: 500 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+	.selected-path, .folder-required, .quiet-empty { margin: 8px 0 0; color: #8c9aa0; font-size: 13px; line-height: 1.5; }
+	.storage-guidance, .error { color: #ffb86f; font-size: 13px; line-height: 1.5; }
+	.error, .add-status { margin: 8px 0 0; }
+	.error { color: #ff9c91; }
+	.add-status { color: #65e6cc; font-size: 13px; line-height: 1.5; }
+	.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+	.folder-browser { margin-top: 11px; padding: 14px; border: 1px solid rgba(233, 240, 242, .13); border-radius: 4px; background: #0d1114; }
+	.path-buttons { display: grid; gap: 7px; margin-bottom: 12px; }
+	.path-button { display: grid; gap: 3px; width: 100%; padding: 9px; border: 1px solid rgba(233, 240, 242, .13); border-radius: 3px; color: #e9f0f2; background: #192126; text-align: left; }
+	.path-button span { color: #8c9aa0; font-size: 12px; }
+	.browser-current, .validation-result { margin: 10px 0; padding: 12px; border: 1px solid rgba(233, 240, 242, .13); border-radius: 4px; }
+	.browser-current code, .validation-result code { display: block; margin: 5px 0 10px; }
+	.validation-success { border-color: rgba(101, 230, 204, .55); }
+	.validation-error { border-color: rgba(255, 156, 145, .55); }
+	.paste-path { margin-top: 12px; }
+	.compact-row { margin-top: 5px; }
+
+	.queue-section { margin-top: 46px; }
+	.section-heading { display: flex; align-items: end; justify-content: space-between; margin: 0 4px 14px; }
+	.count { display: grid; width: 30px; height: 30px; place-items: center; margin: 0; border: 1px solid rgba(233, 240, 242, .13); border-radius: 50%; }
+	.card-list { display: grid; gap: 10px; }
+	.download-card { overflow: hidden; border: 1px solid rgba(233, 240, 242, .13); border-left: 3px solid #65e6cc; border-radius: 5px; background: #13191d; }
+	.card-main { min-width: 0; padding: 18px 20px 16px; }
+	.card-title-row { display: flex; align-items: start; justify-content: space-between; gap: 16px; }
+	.state { margin-bottom: 5px; color: #65e6cc; }
+	.torrent-name { overflow-wrap: anywhere; }
+	.progress-text { flex: 0 0 auto; color: #8c9aa0; font: 650 13px/1 ui-monospace, SFMono-Regular, Menlo, monospace; }
+	progress { display: block; width: 100%; height: 5px; margin: 15px 0 12px; appearance: none; border: 0; border-radius: 10px; background: #263138; }
+	.card-secondary-action { display: flex; justify-content: flex-end; gap: 12px; margin-top: 10px; }
+	.details-button { min-height: 44px; padding-inline: 0; color: #b9c7cb; text-decoration: underline; text-underline-offset: 3px; }
+	.card-action { display: flex; align-items: center; gap: 12px; margin-top: 14px; }
+	.card-remove-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
+	.remove-from-list-button { text-decoration: underline; text-underline-offset: 3px; }
+	.card-action-feedback { min-height: 1.5em; margin: 0; color: #8c9aa0; font-size: 13px; line-height: 1.5; }
+	.card-action-feedback.error { color: #ff9c91; }
+	.move-panel, .move-confirmation, .move-recovery, .download-recovery { margin-top: 14px; padding: 14px; border: 1px solid rgba(233, 240, 242, .13); border-radius: 4px; background: #0d1114; }
+	.move-panel h4, .move-confirmation h4 { margin-bottom: 10px; color: #e9f0f2; }
+	.move-panel .primary-button, .move-confirmation .primary-button, .move-recovery .primary-button { margin-right: 8px; }
+	.move-confirmation p, .move-recovery p, .download-recovery p { color: #b9c7cb; font-size: 13px; line-height: 1.5; }
+	.move-feedback { margin: 12px 0 0; color: #8c9aa0; font-size: 13px; line-height: 1.5; }
+	.move-paths { display: grid; gap: 10px; margin: 14px 0; }
+	.move-paths div { display: grid; gap: 4px; }
+	.move-paths dt { color: #8c9aa0; font-size: 11px; font-weight: 650; letter-spacing: .08em; text-transform: uppercase; }
+	.move-paths dd { margin: 0; overflow-wrap: anywhere; }
+	.download-folder { margin-top: 14px; }
+	.download-folder label { display: block; margin-bottom: 6px; color: #8c9aa0; font-size: 11px; font-weight: 650; letter-spacing: .08em; text-transform: uppercase; }
+	.folder-path-action { display: flex; min-width: 0; gap: 8px; }
+	.canonical-path { width: 100%; min-width: 0; height: 44px; padding: 0 11px; overflow: hidden; border: 1px solid rgba(233, 240, 242, .13); border-radius: 3px; color: #e9f0f2; background: #0d1114; font: 500 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; }
+	.copy-path-button { flex: 0 0 auto; min-height: 44px; }
+	.path-copy-feedback { min-height: 1.5em; margin: 6px 0 0; color: #8c9aa0; font-size: 12px; line-height: 1.5; }
+	progress::-webkit-progress-bar { border-radius: inherit; background: #263138; }
+	progress::-webkit-progress-value { border-radius: inherit; background: #65e6cc; }
+	progress::-moz-progress-bar { border-radius: inherit; background: #65e6cc; }
+	.empty-state { padding: 30px 20px; border: 1px dashed rgba(233, 240, 242, .18); border-radius: 5px; color: #8c9aa0; text-align: center; }
+	.empty-state h3 { color: #e9f0f2; }
+	.empty-state p { margin: 8px 0 18px; }
+	.primary-link { display: inline-grid; min-height: 44px; place-items: center; padding: 0 14px; border-radius: 3px; color: #06231d; background: #65e6cc; font-weight: 720; text-decoration: none; }
+	.completed-section .download-card { border-left-color: #4a9385; }
+
+	.onboarding-shell { margin-top: 64px; padding: 28px; border: 1px solid rgba(233, 240, 242, .13); border-left: 4px solid #65e6cc; border-radius: 5px; background: #13191d; }
+	.onboarding-shell h1 { margin-bottom: 24px; }
+	.onboarding-shell h2 { margin-bottom: 10px; font-size: 20px; }
+	.onboarding-shell p { line-height: 1.5; }
+	.onboarding-shell input { display: block; width: 100%; height: 44px; margin: 0 0 12px; padding: 0 12px; border: 1px solid rgba(233, 240, 242, .13); border-radius: 4px; color: #e9f0f2; background: #0d1114; }
+	.onboarding-shell .primary-button, .onboarding-shell .text-button { margin: 8px 6px 0 0; }
+	.path-readout { display: block; margin: 12px 0; padding: 10px; border: 1px solid rgba(233, 240, 242, .13); border-radius: 4px; background: #0d1114; }
+	.onboarding-shell a { color: #65e6cc; }
+
+	.modal-overlay { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 14px; }
+	.modal-scrim { position: absolute; inset: 0; border: 0; background: rgba(5, 8, 10, .76); }
+	.modal-content { position: relative; z-index: 1; width: min(100%, 550px); max-height: min(80vh, 760px); overflow-y: auto; border: 1px solid rgba(233, 240, 242, .13); border-radius: 5px; background: #13191d; box-shadow: 0 24px 70px rgba(0, 0, 0, .45); }
+	.removal-confirmation { width: min(100%, 500px); }
+	.removal-confirmation .modal-body > p { color: #b9c7cb; line-height: 1.5; }
+	.removal-confirmation-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 20px; }
+	.modal-header { display: flex; justify-content: space-between; gap: 16px; padding: 20px; border-bottom: 1px solid rgba(233, 240, 242, .13); }
+	.modal-body { padding: 20px; }
+	.modal-body form > label:not(:first-child) { margin-top: 14px; }
+	.modal-body input { margin-bottom: 0; }
+	.settings-menu { display: grid; gap: 8px; }
+	.settings-entry { display: flex; width: 100%; min-height: 72px; align-items: center; justify-content: space-between; gap: 16px; padding: 14px; border: 1px solid rgba(233, 240, 242, .13); border-radius: 4px; color: #e9f0f2; background: #192126; text-align: left; }
+	.settings-entry:hover { background: #263138; }
+	.settings-entry span:first-child { display: grid; gap: 4px; }
+	.settings-entry strong { font-size: 14px; }
+	.settings-entry small { color: #8c9aa0; font-size: 12px; line-height: 1.4; }
+	.settings-entry > span:last-child { color: #65e6cc; font-size: 26px; line-height: 1; }
+	.settings-back { min-height: 44px; margin: -8px 0 16px; padding-inline: 0; text-decoration: underline; text-underline-offset: 3px; }
+	.settings-body h3 { margin-bottom: 10px; }
+	.settings-description { color: #8c9aa0; line-height: 1.5; }
+	.settings-success, .settings-error { padding: 10px; border-radius: 4px; font-size: 13px; }
+	.settings-success { color: #65e6cc; background: rgba(101, 230, 204, .1); }
+	.settings-error { color: #ff9c91; background: rgba(255, 156, 145, .1); }
+	.settings-submit { width: 100%; margin-top: 18px; }
+	.details-list { margin: 0; }
+	.info-row { display: flex; justify-content: space-between; gap: 20px; padding: 14px 0; border-bottom: 1px solid rgba(233, 240, 242, .1); color: #8c9aa0; }
+	.info-row dt { flex: 0 1 42%; font-size: 13px; }
+	.info-row dd { min-width: 0; margin: 0; color: #e9f0f2; text-align: right; font-size: 13px; font-weight: 650; overflow-wrap: anywhere; }
+	.info-row.path { display: grid; gap: 7px; }
+	.info-row.path dd { text-align: left; }
+
+	@media (min-width: 721px) { .details-overlay, .settings-overlay { justify-items: end; padding: 0; } .details-surface, .settings-surface { height: 100%; max-height: none; border-radius: 0; border-top: 0; border-right: 0; border-bottom: 0; } .details-surface { width: min(100%, 540px); } .settings-surface { width: min(100%, 440px); } }
+	@media (max-width: 720px) { .app-shell { padding-top: 18px; } .add-panel { grid-template-columns: 1fr; gap: 20px; padding: 20px 16px; } .link-row { display: grid; } .link-row .primary-button { width: 100%; } .system-readout { display: none; } .details-overlay, .settings-overlay { padding: 0; } .details-surface, .settings-surface { width: 100%; height: 100%; max-height: none; border-radius: 0; border: 0; } }
+	@media (max-width: 420px) { .app-shell, .onboarding-shell { width: min(100% - 20px, 880px); } .app-shell { padding-bottom: 48px; } .eyebrow { display: none; } .site-header { min-height: 64px; } .card-main { padding: 16px 14px; } .card-title-row { display: block; } .progress-text { display: block; margin-top: 8px; } .compact-row, .folder-path-action, .card-action, .card-remove-actions { display: grid; } .copy-path-button { width: 100%; } .info-row { display: grid; gap: 5px; } .info-row dd { text-align: left; } }
+	@media (prefers-reduced-motion: reduce) { :global(*), :global(*::before), :global(*::after) { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; } }
 </style>

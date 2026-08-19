@@ -43,8 +43,9 @@ class OnboardingPersistenceTest {
 
     @Test
     fun deferredEligibleOnboardingCompletesDurablyAcrossReconstructionAndRecoveryLoss() = runBlocking {
-        val first = coordinator(hasDestination = true)
-        val deferred = first.deferPassword() as PasswordDeferralResult.Updated
+        val first = coordinator()
+        assertFalse(first.status().completed)
+        val deferred = coordinator(hasDestination = true).deferPassword() as PasswordDeferralResult.Updated
         assertTrue(deferred.status.completed)
 
         val reconstructed = coordinator(
@@ -59,6 +60,8 @@ class OnboardingPersistenceTest {
     @Test
     fun changedPasswordAndDecisionSurviveReauthenticationInterruption() = runBlocking {
         val firstAuth = DefaultAuthManager(context)
+        val first = coordinator()
+        assertFalse(first.status().completed)
         val changed = coordinator(hasDestination = true).changePassword(
             "household-passphrase",
             firstAuth::setPassword

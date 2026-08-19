@@ -24,16 +24,14 @@ class WebUiPortLifecycleTest {
             SharedPreferencesWebUiPortStore.PREFERENCES_NAME,
             Context.MODE_PRIVATE
         ).edit().clear().commit()
-        RecoverySuppressionStore.clearForceStopped(context)
+        StartupPermissionTestHelper.clearInstrumentationStop(context)
         context.stopService(Intent(context, TorrentDaemon::class.java))
-        TorrentDaemon.currentDaemonState = TorrentDaemon.DaemonState.Stopped
-        Thread.sleep(500)
+        StartupPermissionTestHelper.awaitDaemonStopped(context)
     }
 
     @After
     fun tearDown() {
-        TorrentDaemon.stop(context)
-        waitUntil { TorrentDaemon.getHealthStatus(context).lifecycleState == TorrentDaemon.DaemonState.Stopped.name }
+        StartupPermissionTestHelper.stopDaemonIfActive(context)
         TorrentDaemon.resetDaemonControlFactory()
         AlertDispatcher.stop()
         context.getSharedPreferences(

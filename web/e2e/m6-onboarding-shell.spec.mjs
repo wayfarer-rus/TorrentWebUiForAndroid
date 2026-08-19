@@ -23,9 +23,9 @@ test('incomplete onboarding hides normal controls, resumes, and advances after r
 	});
 
 	await page.goto('/');
-	await expect(page.getByRole('heading', { name: 'Consumer Onboarding' })).toBeVisible();
-	await expect(page.getByRole('heading', { name: 'Service unavailable' })).toBeVisible();
-	await expect(page.getByRole('heading', { name: 'Add Torrent' })).toHaveCount(0);
+	await expect(page.getByRole('heading', { name: 'Getting Downloads ready' })).toBeVisible();
+	await expect(page.getByRole('heading', { name: 'Downloads are unavailable' })).toBeVisible();
+	await expect(page.getByRole('heading', { name: 'Add Download' })).toHaveCount(0);
 	await expect.poll(() => statusRequests, { timeout: 4000 }).toBeGreaterThan(1);
 	await expect.poll(() => normalApiRequests).toBe(0);
 
@@ -36,7 +36,7 @@ test('incomplete onboarding hides normal controls, resumes, and advances after r
 
 	await page.reload();
 	await expect(page.getByRole('heading', { name: 'Choose a download folder' })).toBeVisible();
-	await expect(page.getByRole('heading', { name: 'Add Torrent' })).toHaveCount(0);
+	await expect(page.getByRole('heading', { name: 'Add Download' })).toHaveCount(0);
 });
 
 test('readiness holding state survives refresh and browser closure before advancing', async ({ page, context }) => {
@@ -55,14 +55,14 @@ test('readiness holding state survives refresh and browser closure before advanc
 	}));
 
 	await page.goto('/');
-	await expect(page.getByRole('heading', { name: 'Service unavailable' })).toBeVisible();
+	await expect(page.getByRole('heading', { name: 'Downloads are unavailable' })).toBeVisible();
 	await page.reload();
-	await expect(page.getByRole('heading', { name: 'Service unavailable' })).toBeVisible();
+	await expect(page.getByRole('heading', { name: 'Downloads are unavailable' })).toBeVisible();
 	await page.close();
 
 	const reopened = await context.newPage();
 	await reopened.goto('/');
-	await expect(reopened.getByRole('heading', { name: 'Service unavailable' })).toBeVisible();
+	await expect(reopened.getByRole('heading', { name: 'Downloads are unavailable' })).toBeVisible();
 	state.readiness = 'Ready';
 	await expect(reopened.getByRole('heading', { name: 'Choose a download folder' })).toBeVisible({ timeout: 4000 });
 });
@@ -113,13 +113,13 @@ test('recommended destination and Set it later complete onboarding durably', asy
 	await expect(page.getByText('start123')).toHaveCount(0);
 
 	await page.getByRole('button', { name: 'Set it later' }).click();
-	await expect(page.getByRole('heading', { name: 'Add Torrent' })).toBeVisible();
+	await expect(page.getByRole('heading', { name: 'Add Download' })).toBeVisible();
 
 	state.readiness = 'Service unavailable';
 	state.hasApprovedDestination = false;
 	await page.reload();
-	await expect(page.getByRole('heading', { name: 'Add Torrent' })).toBeVisible();
-	await expect(page.getByRole('heading', { name: 'Consumer Onboarding' })).toHaveCount(0);
+	await expect(page.getByRole('heading', { name: 'Add Download' })).toBeVisible();
+	await expect(page.getByRole('heading', { name: 'Getting Downloads ready' })).toHaveCount(0);
 });
 
 test('alternate onboarding browser navigates primary and removable canonical paths', async ({ page }) => {
@@ -156,8 +156,8 @@ test('alternate onboarding browser navigates primary and removable canonical pat
 	await page.route('**/api/storage/latest-selected', (route) => route.fulfill({
 		contentType: 'application/json', body: JSON.stringify({ path: null })
 	}));
-	await page.route('**/api/storage/children/**', (route) => {
-		const parent = decodeURIComponent(new URL(route.request().url()).pathname.split('/').pop());
+	await page.route('**/api/storage/children', (route) => {
+		const parent = route.request().postDataJSON().path;
 		if (parent === '/storage/USB' && !removableConnected) {
 			return route.fulfill({
 				status: 409,
@@ -181,8 +181,8 @@ test('alternate onboarding browser navigates primary and removable canonical pat
 			})
 		});
 	});
-	await page.route('**/api/storage/destinations/**', (route) => {
-		approvedPath = decodeURIComponent(new URL(route.request().url()).pathname.split('/').pop());
+	await page.route('**/api/storage/destinations', (route) => {
+		approvedPath = route.request().postDataJSON().path;
 		state.hasApprovedDestination = true;
 		return route.fulfill({
 			contentType: 'application/json',
@@ -279,12 +279,12 @@ test('password change rejects mismatch and short values then reloads for reauthe
 	await page.getByLabel('Confirm Password').fill('abc');
 	await page.getByRole('button', { name: 'Change Password' }).click();
 	await expect(page.getByText('New password must be at least 4 characters')).toBeVisible();
-	await expect(page.getByRole('heading', { name: 'Consumer Onboarding' })).toBeVisible();
+	await expect(page.getByRole('heading', { name: 'Getting Downloads ready' })).toBeVisible();
 
 	await page.getByLabel('New Password').fill('household passphrase');
 	await page.getByLabel('Confirm Password').fill('household passphrase');
 	await page.getByRole('button', { name: 'Change Password' }).click();
-	await expect(page.getByRole('heading', { name: 'Add Torrent' })).toBeVisible();
+	await expect(page.getByRole('heading', { name: 'Add Download' })).toBeVisible();
 	await expect.poll(() => statusRequests).toBeGreaterThan(1);
 	await expect.poll(() => passwordRequests).toBe(2);
 });
@@ -324,8 +324,8 @@ test('closing during password reauthentication retains completed backend progres
 
 	const reopened = await context.newPage();
 	await reopened.goto('/');
-	await expect(reopened.getByRole('heading', { name: 'Add Torrent' })).toBeVisible();
-	await expect(reopened.getByRole('heading', { name: 'Consumer Onboarding' })).toHaveCount(0);
+	await expect(reopened.getByRole('heading', { name: 'Add Download' })).toBeVisible();
+	await expect(reopened.getByRole('heading', { name: 'Getting Downloads ready' })).toHaveCount(0);
 });
 
 test('onboarding status requests time out instead of hanging', async ({ page }) => {
@@ -347,7 +347,7 @@ test('onboarding status requests time out instead of hanging', async ({ page }) 
 	await expect(page.getByText('The onboarding status request timed out. Try again.')).toBeVisible({
 		timeout: 7000
 	});
-	await expect(page.getByRole('heading', { name: 'Add Torrent' })).toHaveCount(0);
+	await expect(page.getByRole('heading', { name: 'Add Download' })).toHaveCount(0);
 });
 
 test('completed onboarding keeps normal controls during a later daemon failure state', async ({ page }) => {
@@ -370,8 +370,8 @@ test('completed onboarding keeps normal controls during a later daemon failure s
 	}));
 
 	await page.goto('/');
-	await expect(page.getByRole('heading', { name: 'Add Torrent' })).toBeVisible();
-	await expect(page.getByRole('heading', { name: 'Consumer Onboarding' })).toHaveCount(0);
+	await expect(page.getByRole('heading', { name: 'Add Download' })).toBeVisible();
+	await expect(page.getByRole('heading', { name: 'Getting Downloads ready' })).toHaveCount(0);
 });
 
 test('completed onboarding starts the normal WebUI', async ({ page }) => {
@@ -394,6 +394,6 @@ test('completed onboarding starts the normal WebUI', async ({ page }) => {
 	}));
 
 	await page.goto('/');
-	await expect(page.getByRole('heading', { name: 'Add Torrent' })).toBeVisible();
-	await expect(page.getByRole('heading', { name: 'Consumer Onboarding' })).toHaveCount(0);
+	await expect(page.getByRole('heading', { name: 'Add Download' })).toBeVisible();
+	await expect(page.getByRole('heading', { name: 'Getting Downloads ready' })).toHaveCount(0);
 });

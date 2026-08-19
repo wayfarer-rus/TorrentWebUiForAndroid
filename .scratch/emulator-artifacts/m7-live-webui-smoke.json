@@ -1,0 +1,25 @@
+{
+  "timestamp": "2026-08-19T06:59:29.663Z",
+  "device": {
+    "serial": "emulator-5554",
+    "avd": "emulator_skill",
+    "api": "36",
+    "android": "16",
+    "abi": "arm64-v8a"
+  },
+  "networkPath": "ADB forward host tcp:8081 -> emulator tcp:8080",
+  "viewport": {
+    "width": 360,
+    "height": 800
+  },
+  "unauthenticatedRootStatus": 401,
+  "browser": "Chromium 149.0.7827.55",
+  "authenticatedRootStatus": 200,
+  "onboardingApiStatus": 200,
+  "onboardingCompleted": false,
+  "onboardingReadiness": "Ready",
+  "horizontalOverflow": false,
+  "consoleErrorCount": 0,
+  "consoleErrors": [],
+  "screenshot": ".scratch/emulator-artifacts/m7-live-webui-360x800-review-fixed.png"
+}

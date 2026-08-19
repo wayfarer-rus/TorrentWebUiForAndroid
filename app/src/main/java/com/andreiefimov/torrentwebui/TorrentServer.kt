@@ -98,7 +98,7 @@ object TorrentServer {
      * Destination catalog — injected for testability. Defaults to a file-backed catalog
      * rooted in app-private configuration.
      */
-    internal var destinationCatalog: DestinationCatalog? = null
+    internal var destinationCatalog: DestinationCatalogOperations? = null
 
     /**
      * Queue store reference — used by destination removal to check for references.
@@ -113,7 +113,7 @@ object TorrentServer {
     /**
      * Move service — executes safe torrent data moves between destinations.
      */
-    internal var moveService: MoveService? = null
+    internal var moveService: MoveOperations? = null
 
     /** Stable queue/runtime correlation and serialized durable mutation seam. */
     internal var queueBindings: QueueRuntimeBindings? = null
@@ -433,17 +433,20 @@ object TorrentServer {
                             })
                         }
 
-                        // GET /api/storage/children/{path} — lists validated child directories.
-                        get("/children/{path}") {
-                            val parentPath = call.parameters["path"] ?: run {
-                                call.respond(HttpStatusCode.BadRequest, ErrorResponse("Missing path parameter"))
-                                return@get
+                        // POST /api/storage/children — lists validated child directories.
+                        // Canonical paths stay in authenticated JSON bodies, never request targets.
+                        post("/children") {
+                            val body = try {
+                                call.receive<CanonicalPathRequest>()
+                            } catch (_: Exception) {
+                                call.respond(HttpStatusCode.BadRequest, ErrorResponse("Invalid request body"))
+                                return@post
                             }
                             val operations = storageApiOperations ?: run {
                                 call.respond(HttpStatusCode.ServiceUnavailable, ErrorResponse("Storage service unavailable"))
-                                return@get
+                                return@post
                             }
-                            when (val result = operations.children(parentPath)) {
+                            when (val result = operations.children(body.path)) {
                                 is DirectoryChildrenResult.Available -> call.respond(result.paths)
                                 is DirectoryChildrenResult.Unavailable -> call.respond(
                                     HttpStatusCode.Conflict,
@@ -481,17 +484,19 @@ object TorrentServer {
                             call.respond(destinations)
                         }
 
-                        // POST /api/storage/destinations/{path} — adds a validated path to the catalog.
-                        post("/destinations/{path}") {
-                            val destPath = call.parameters["path"] ?: run {
-                                call.respond(HttpStatusCode.BadRequest, ErrorResponse("Missing path parameter"))
+                        // POST /api/storage/destinations — adds a validated path to the catalog.
+                        post("/destinations") {
+                            val body = try {
+                                call.receive<CanonicalPathRequest>()
+                            } catch (_: Exception) {
+                                call.respond(HttpStatusCode.BadRequest, ErrorResponse("Invalid request body"))
                                 return@post
                             }
                             val operations = storageApiOperations ?: run {
                                 call.respond(HttpStatusCode.ServiceUnavailable, ErrorResponse("Storage service unavailable"))
                                 return@post
                             }
-                            when (val result = operations.approve(destPath)) {
+                            when (val result = operations.approve(body.path)) {
                                 is DestinationApprovalResult.Approved -> call.respond(
                                     AddDestinationResponse(status = "ok", path = result.canonicalPath)
                                 )
@@ -506,12 +511,15 @@ object TorrentServer {
                             }
                         }
 
-                        // DELETE /api/storage/destinations/{path} — removes a destination (only if unreferenced).
-                        delete("/destinations/{path}") {
-                            val destPath = call.parameters["path"] ?: run {
-                                call.respond(HttpStatusCode.BadRequest, ErrorResponse("Missing path parameter"))
+                        // DELETE /api/storage/destinations — removes a destination (only if unreferenced).
+                        delete("/destinations") {
+                            val body = try {
+                                call.receive<CanonicalPathRequest>()
+                            } catch (_: Exception) {
+                                call.respond(HttpStatusCode.BadRequest, ErrorResponse("Invalid request body"))
                                 return@delete
                             }
+                            val destPath = body.path
                             val catalog = TorrentServer.destinationCatalog
                                 ?: run { call.respond(HttpStatusCode.ServiceUnavailable, ErrorResponse("Storage service unavailable")); return@delete }
                             val queueStore = TorrentServer.queueStore
@@ -528,7 +536,10 @@ object TorrentServer {
                                         it.sourcePath == destPath || it.targetPath == destPath
                                     }
                                 if (queue.any { it.destinationPath == destPath } || moveReferencesPath) {
-                                    call.respond(HttpStatusCode.Conflict, ErrorResponse("Destination is still referenced by a queue entry or move"))
+                                    call.respond(
+                                        HttpStatusCode.Conflict,
+                                        ErrorResponse("This Download Folder is still used by a Download. Move or remove that Download before forgetting this folder.")
+                                    )
                                 } else {
                                     call.respond(HttpStatusCode.NotFound, ErrorResponse("Destination not found in catalog"))
                                 }
@@ -694,11 +705,10 @@ object TorrentServer {
                                     val moveState = moveEntry?.phase?.apiName
                                     val queueEntry = queueId?.let { qId -> queueEntries.find { it.queueId == qId } }
                                     val destinationPath = queueEntry?.destinationPath?.ifEmpty { null }
-                                        ?: status.savePath.ifEmpty { null }
                                     val destinationStatus = when {
                                         queueEntry?.addCollisionState != null -> "storage_conflict"
-                                        destinationPath != null &&
-                                            TorrentServer.durableOperations?.ensureDestinationAvailable(id, appContext) == false ->
+                                        destinationPath == null -> "destination_unavailable"
+                                        TorrentServer.durableOperations?.ensureDestinationAvailable(id, appContext) == false ->
                                             "destination_unavailable"
                                         else -> status.destinationStatus
                                     }
@@ -811,6 +821,8 @@ object TorrentServer {
                                 call.respond(HttpStatusCode.BadRequest, ErrorResponse("Invalid request body"))
                                 return@post
                             }
+
+                            if (!call.requireApprovedMoveDestination(body.destinationPath)) return@post
 
                             val result = moveService.startMove(id, body.destinationPath)
                             when (result.status) {
@@ -937,6 +949,8 @@ object TorrentServer {
                             val moveService = TorrentServer.moveService
                                 ?: run { call.respond(HttpStatusCode.ServiceUnavailable, ErrorResponse("Move service unavailable")); return@post }
 
+                            if (!call.requireApprovedMoveDestination(body.destinationPath)) return@post
+
                             val result = moveService.retryMove(id, body.destinationPath)
                             when (result.status) {
                                 "ok" -> call.respond(MoveResponse(status = "ok", phase = "moving"))
@@ -1045,10 +1059,10 @@ object TorrentServer {
                 val moveEntry = qId?.let { journal?.getMove(it) }
                 val queueEntry = qId?.let { queueId -> queueEntries.find { it.queueId == queueId } }
                 val destinationPath = queueEntry?.destinationPath?.ifEmpty { null }
-                    ?: s.savePath.ifEmpty { null }
                 val destinationStatus = when {
                     queueEntry?.addCollisionState != null -> "storage_conflict"
-                    ::appContext.isInitialized && destinationPath != null &&
+                    destinationPath == null -> "destination_unavailable"
+                    ::appContext.isInitialized &&
                         TorrentServer.durableOperations?.ensureDestinationAvailable(id, appContext) == false ->
                         "destination_unavailable"
                     else -> s.destinationStatus
@@ -1090,6 +1104,19 @@ object TorrentServer {
     }
 
     /** Builds one WebSocket-safe alert envelope from AlertDispatcher's fan-out channel. */
+    /** Rejects a move target unless the authenticated catalog identifies it as approved. */
+    private suspend fun ApplicationCall.requireApprovedMoveDestination(destinationPath: String): Boolean {
+        val catalog = TorrentServer.destinationCatalog ?: run {
+            respond(HttpStatusCode.ServiceUnavailable, ErrorResponse("Destination catalog unavailable"))
+            return false
+        }
+        if (!catalog.contains(destinationPath)) {
+            respond(HttpStatusCode.Conflict, ErrorResponse("Choose another approved Download Folder"))
+            return false
+        }
+        return true
+    }
+
     private fun buildAlertJson(alert: AlertEvent): String =
         """{"type":"alert","alertType":"${escapeJson(alert.type)}","message":"${escapeJson(alert.message)}"}"""
 
@@ -1260,7 +1287,11 @@ data class VolumeResponse(
     val isRemovable: Boolean = false
 )
 
-/** Response for POST /api/storage/destinations/{path}. */
+/** Authenticated request body for storage routes that operate on a canonical path. */
+@Serializable
+data class CanonicalPathRequest(val path: String = "")
+
+/** Response for POST /api/storage/destinations. */
 @Serializable
 data class AddDestinationResponse(val status: String, val path: String)
 

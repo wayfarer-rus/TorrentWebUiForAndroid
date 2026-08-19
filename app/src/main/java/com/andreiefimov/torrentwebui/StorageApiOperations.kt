@@ -24,7 +24,7 @@ internal interface StorageApiOperations {
 
 internal class AndroidStorageApiOperations(
     private val context: Context,
-    private val catalog: () -> DestinationCatalog?
+    private val catalog: () -> DestinationCatalogOperations?
 ) : StorageApiOperations {
     override fun volumes(): List<StorageVolume> =
         StorageVolumeService.listVolumes(context).filter { it.isMounted }

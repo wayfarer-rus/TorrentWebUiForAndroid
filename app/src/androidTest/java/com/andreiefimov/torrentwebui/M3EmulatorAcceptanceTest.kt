@@ -35,9 +35,10 @@ class M3EmulatorAcceptanceTest {
     fun setUp() {
         context = ApplicationProvider.getApplicationContext()
         StartupPermissionTestHelper.ensureGranted(context)
-        // Clean up any previous test state
-        RecoverySuppressionStore.clearForceStopped(context)
-        TorrentDaemon.stop(context)
+        // Android restarts the target process to attach instrumentation; that host action is
+        // not the user force-stop behavior this suite validates.
+        StartupPermissionTestHelper.clearInstrumentationStop(context)
+        StartupPermissionTestHelper.stopDaemonIfActive(context)
         AlertDispatcher.stop()
         TorrentSession.destroy()
     }
@@ -45,7 +46,7 @@ class M3EmulatorAcceptanceTest {
     @After
     fun tearDown() {
         // Prove cleanup: daemon/server stopped, fixture shut down, recovery records removed
-        TorrentDaemon.stop(context)
+        StartupPermissionTestHelper.stopDaemonIfActive(context)
         TorrentDaemon.resetDaemonControlFactory()
         AlertDispatcher.stop()
         TorrentSession.destroy()
@@ -153,39 +154,43 @@ class M3EmulatorAcceptanceTest {
 
         // When: Force stop is requested, then the app attempts its ordinary automatic start
         TorrentDaemon.requestForceStopForTest(context)
-        Thread.sleep(1000)
+        awaitDaemonState(TorrentDaemon.DaemonState.Stopped)
         TorrentDaemon.start(context)
-        Thread.sleep(1000)
+        Thread.sleep(1_000)
 
         // Then: Automatic recovery remains suppressed, but the queue stays available for a user start.
         assertTrue("Force stop must suppress automatic recovery", RecoverySuppressionStore.isForceStopped(context))
         assertEquals("Stopped", TorrentDaemon.getHealthStatus(context).lifecycleState)
-        assertEquals(listOf(queued), runBlocking { store.loadQueueIntent() })
+        assertEquals(listOf(migratedEntry(queued)), runBlocking { store.loadQueueIntent() })
 
     }
 
     @Test
     fun corruptRecoveryData_doesNotCrash() {
-        // Given: Daemon is running
+        // Given: The daemon has completed an ordinary stop, leaving recovery ownership inactive.
         TorrentDaemon.start(context)
-        Thread.sleep(1000)
+        awaitDaemonState(TorrentDaemon.DaemonState.Running)
+        TorrentDaemon.stop(context)
+        awaitDaemonState(TorrentDaemon.DaemonState.Stopped)
 
-        // When: Corrupt the recovery data
+        // When: Recovery data is corrupt before the next daemon launch.
         val queueFile = context.filesDir.resolve("queue_intent.json")
         queueFile.writeText("corrupted data {{{")
-
-        TorrentSession.destroy()
-
-        // Then: Next launch should handle corrupt data gracefully
         TorrentDaemon.start(context)
-        Thread.sleep(1000)
 
-        // Verify session is started (no crash)
+        // Then: Recovery is blocked before native ownership is created, without crashing.
+        awaitDaemonState(TorrentDaemon.DaemonState.RecoveryBlocked)
         val diagnostics = TorrentSession.getDiagnostics()
-        assertTrue("Session should be started even with corrupt recovery data", diagnostics.sessionStarted)
+        assertFalse("Unsafe recovery must not start the native session", diagnostics.sessionStarted)
+        assertNotNull(
+            "Blocked recovery should expose a curated local health error",
+            TorrentDaemon.getHealthStatus(context).lastRecoverableError
+        )
 
-        // Verify daemon is in RecoveryBlocked state or recovered successfully
-        // For this test, we just verify no crash occurred
+        // Remove the deliberately corrupt fixture before the normal safe-stop cleanup path.
+        assertTrue("Corrupt recovery fixture should be removable", queueFile.delete())
+        TorrentDaemon.stop(context)
+        awaitDaemonState(TorrentDaemon.DaemonState.Stopped)
     }
 
     @Test
@@ -237,7 +242,7 @@ class M3EmulatorAcceptanceTest {
         assertEquals(TorrentDaemon.DaemonState.Running.name, health.lifecycleState)
         assertEquals("Test native destroy failure", health.lastRecoverableError)
         assertTrue(RecoverySuppressionStore.isForceStopped(context))
-        assertEquals(listOf(queued), runBlocking { store.loadQueueIntent() })
+        assertEquals(listOf(migratedEntry(queued)), runBlocking { store.loadQueueIntent() })
     }
 
     @Test
@@ -300,6 +305,34 @@ class M3EmulatorAcceptanceTest {
 
         // Verify MainActivity started without crash
         assertTrue("MainActivity should start successfully", true)
+    }
+
+    private fun migratedEntry(entry: QueueEntry): QueueEntry = entry.copy(
+        destinationPath = TorrentDaemon.getLegacySaveDirectory(context)?.absolutePath
+    )
+
+    private fun awaitDaemonState(
+        expected: TorrentDaemon.DaemonState,
+        timeoutMs: Long = 10_000L
+    ) {
+        awaitCondition("daemon state ${expected.name}", timeoutMs) {
+            TorrentDaemon.getHealthStatus(context).lifecycleState == expected.name &&
+                (expected != TorrentDaemon.DaemonState.Stopped ||
+                    !StartupPermissionTestHelper.isDaemonServiceActive(context))
+        }
+    }
+
+    private fun awaitCondition(
+        description: String,
+        timeoutMs: Long = 10_000L,
+        condition: () -> Boolean
+    ) {
+        val deadline = System.nanoTime() + timeoutMs * 1_000_000L
+        while (System.nanoTime() < deadline) {
+            if (condition()) return
+            Thread.sleep(50)
+        }
+        fail("Timed out waiting for $description")
     }
 
     // ======================================================================
